@@ -1,11 +1,13 @@
 :root {
   --bg: #f4f5f7; --panel: #fff; --text: #191f28; --muted: #6b7684; --line: #e5e8eb;
   --up: #f04452; --down: #3182f6; --support: #12a77a; --resistance: #f08c00; --accent: #3182f6;
+  /* 추세선은 수평 지지/저항선과 다른 색: 저점을 이은 선 = 연두, 고점을 이은 선 = 분홍 */
+  --trend-support: #5c940d; --trend-resistance: #d6336c;
 }
 @media (prefers-color-scheme: dark) {
   /* 다크 배경에선 지지(초록)·저항(주황)을 더 밝고 진하게 — 보조지표 색과 안 섞이게 */
   :root { --bg: #101013; --panel: #1b1b20; --text: #ececf0; --muted: #9a9aa6; --line: #2c2c34;
-          --support: #1fe0a0; --resistance: #ff9408; }
+          --support: #1fe0a0; --resistance: #ff9408; --trend-support: #b2f03d; --trend-resistance: #ff8fc0; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);

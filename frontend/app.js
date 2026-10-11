@@ -114,7 +114,10 @@ const toPoints = (data) => state.data.candles.map((c, i) => (data[i] == null || 
 // (별점 신뢰도는 뺐다: 백테스트에서 별이 많은 선이 더 잘 지켜지지 않았음 — research/results/summary.md)
 const faded = (hex, strong) => hex + (strong ? "" : "8c");
 const kindColor = (k) => css(k === "support" ? "--support" : "--resistance");
+// 추세선은 수평선과 색을 달리한다 (상승 추세선과 지지선이 같은 청록이라 구분이 안 됐다): 저점선 = 연두, 고점선 = 분홍
+const trendColor = (k) => css(k === "support" ? "--trend-support" : "--trend-resistance");
 const CHANNEL_COLOR = "#74c0fc";
+const itemColor = (it) => (it.group === "channel" ? CHANNEL_COLOR : it.group === "trend" ? trendColor(it.kind) : kindColor(it.kind));
 const PATTERN_COLOR = "#ffd43b";
 
 // 화면에 그릴 수 있는 자동 선 전체 목록. visible 기본값: 각 레이어의 1등만
@@ -264,7 +267,7 @@ function renderTrendlines() {
   const shownTrendIds = new Set();
   for (const it of items.filter((x) => x.group === "trend" && isVisible(x))) {
     const focused = state.focus === it.id;
-    line(it.points, faded(kindColor(it.kind), focused || it.rank === 1), {
+    line(it.points, faded(trendColor(it.kind), focused || it.rank === 1), {
       width: focused ? 3 : it.rank === 1 ? 2 : 1, style: focused ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed,
       title: focused ? it.name : "",
     });
@@ -274,7 +277,7 @@ function renderTrendlines() {
   if (chItem && isVisible(chItem)) {
     const ch = chItem.channel, focused = state.focus === "channel";
     const baseShown = shownTrendIds.has(`auto-${ch.base_kind}`);
-    const color = baseShown ? kindColor(ch.base_kind) : CHANNEL_COLOR;
+    const color = baseShown ? trendColor(ch.base_kind) : CHANNEL_COLOR;
     // 기준 추세선이 이미 그려져 있으면 평행선만 같은 색 점선으로 → 어느 선의 짝인지 한눈에
     if (!baseShown) line(ch.base, color, { width: focused ? 3 : 2 });
     line(ch.other, color, { width: focused ? 3 : 2, style: LW.LineStyle.Dotted, title: focused ? "평행선" : "" });
@@ -299,7 +302,7 @@ function renderTrendlines() {
     const seen = new Set();
     const pts = f.touch_points.filter((p) => !seen.has(p.time) && seen.add(p.time))
       .sort((a, b) => (a.time < b.time ? -1 : 1));
-    const dots = chart.addLineSeries({ color: f.group === "channel" ? CHANNEL_COLOR : kindColor(f.kind), lineVisible: false,
+    const dots = chart.addLineSeries({ color: itemColor(f), lineVisible: false,
       pointMarkersVisible: true, pointMarkersRadius: 5, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
     dots.setData(pts);
     state.trendSeries.push(dots);
@@ -337,7 +340,7 @@ function renderLegend(param) {
   const rows = [];
   for (const it of autoItems().filter(isVisible)) {
     if (it.group === "level" && !it.nearest && state.focus !== it.id) continue;    // 범례도 핵심만
-    const color = it.group === "channel" ? CHANNEL_COLOR : kindColor(it.kind);
+    const color = itemColor(it);
     const row = el("span", { class: `lg${state.focus === it.id ? " on" : ""}`, title: it.why },
       el("i", { style: `background:${color}` }), `${it.name}${it.rank > 1 ? ` 후보${it.rank}` : ""} `,
       `${fmt(it.now)}`);
@@ -1226,7 +1229,7 @@ function renderAutoLines() {
     if (!list.length) { sections.push(el("p", { class: "muted hint" }, "뚜렷한 선을 못 찾았어요")); continue; }
     for (const it of list) {
       const shown = isVisible(it), focused = state.focus === it.id;
-      const color = it.group === "channel" ? CHANNEL_COLOR : kindColor(it.kind);
+      const color = itemColor(it);
       const eye = el("button", { class: `ghost small eye${shown ? " on" : ""}`, title: shown ? "차트에서 숨기기" : "차트에 보이기" }, shown ? "보임" : "숨김");
       eye.addEventListener("click", (e) => {
         e.stopPropagation();

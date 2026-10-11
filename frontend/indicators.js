@@ -135,5 +135,5 @@ export const INDICATORS = {
 };
 
 export const PARAM_LABELS = { period: "기간", mult: "배수", fast: "단기", slow: "장기", signal: "시그널", k: "%K 기간", d: "%D 기간" };
-// 지지(초록)·저항(주황)·상승(빨강)·하락(파랑)과 헷갈리지 않는 색만: 보라, 하늘, 라벤더, 분홍, 회색, 남색, 자주
-export const PALETTE = ["#be4bdb", "#66d9e8", "#e599f7", "#f783ac", "#adb5bd", "#748ffc", "#da77f2"];
+// 지지(청록)·저항(주황)·추세선(연두·분홍)·상승(빨강)·하락(파랑)과 헷갈리지 않는 색만: 보라, 하늘, 라벤더, 회색, 남색, 자주
+export const PALETTE = ["#be4bdb", "#66d9e8", "#e599f7", "#adb5bd", "#748ffc", "#da77f2"];
