@@ -25,7 +25,8 @@ _LABELS = {
     ("support", "up"): ("reclaim", "회복", "{name} {side} {lv} 위로 다시 올라왔어요."),
     ("resistance", "down"): ("reject", "아래 복귀", "{name} {side} {lv} 아래로 다시 내려왔어요."),
 }
-_HISTORY = {"support": " 과거 {t}번 반등했던 가격대예요.", "resistance": " 과거 {t}번 막혔던 가격대예요."}
+# 수평선은 고점·저점이 섞여 묶인다 (막혔던 가격을 뚫고 올라오면 지지선) → '반등'·'막힘'으로 단정하지 않는다
+_HISTORY = {"support": " 과거 {t}번 방향이 바뀌었던 가격대예요.", "resistance": " 과거 {t}번 방향이 바뀌었던 가격대예요."}
 
 
 def subject(name: str) -> str:

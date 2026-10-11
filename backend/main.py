@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hmac
 import json
+import mimetypes
 import time
 from contextlib import asynccontextmanager
 from datetime import date
@@ -101,7 +102,10 @@ def alert_types() -> list[str]:
 def stat_sentence(st: dict | None) -> str:
     if not st or not st.get("n20"):
         return "이 종목에선 과거 기록이 부족해요."
-    return (f"과거 이 종목에서 {st['count']}번, 20거래일 뒤 평균 {st['avg20']:+.1f}% "
+    if st["n20"] < signals.MIN_SAMPLE:
+        return f"이 종목에선 과거 {st['n20']}번뿐이라 숫자로 판단하기 어려워요."
+    base = f", 아무 날 샀을 때는 {st['base20']:+.1f}%" if st.get("base20") is not None else ""
+    return (f"과거 이 종목에서 {st['count']}번, 20거래일 뒤 평균 {st['avg20']:+.1f}%{base} "
             f"(오른 경우 {st['up20']}/{st['n20']}). 과거 통계일 뿐 앞으로를 보장하진 않아요.")
 
 
@@ -638,4 +642,6 @@ def index():
     return FileResponse(FRONTEND / "index.html")
 
 
+# Windows 는 레지스트리 설정에 따라 .js 를 text/plain 으로 내보내서 module 스크립트가 막힌다
+mimetypes.add_type("text/javascript", ".js")
 app.mount("/static", StaticFiles(directory=FRONTEND), name="static")

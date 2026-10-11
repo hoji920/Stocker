@@ -102,6 +102,8 @@ def find_levels(df: pd.DataFrame, window: int = 5, max_each: int = 3) -> dict:
         levels.append({
             "price": round(price, 4),
             "touches": touches,
+            "highs": sum(q[2] == "high" for q in cl),      # 상승이 막힌 횟수
+            "lows": sum(q[2] == "low" for q in cl),        # 하락이 멈춘 횟수
             "last_touch": _t(df, idxs[-1]),
             "score": score,
             "stars": stars,
@@ -113,10 +115,13 @@ def find_levels(df: pd.DataFrame, window: int = 5, max_each: int = 3) -> dict:
     strong = [lv for lv in levels if lv["touches"] >= 2]
     pool = strong if len(strong) >= 2 else levels
 
-    support = sorted((lv for lv in pool if lv["price"] < last_close),
-                     key=lambda lv: last_close - lv["price"])[:max_each]
-    resistance = sorted((lv for lv in pool if lv["price"] >= last_close),
-                        key=lambda lv: lv["price"] - last_close)[:max_each]
+    def side(src, above: bool):
+        return sorted((lv for lv in src if (lv["price"] >= last_close) == above),
+                      key=lambda lv: abs(lv["price"] - last_close))[:max_each]
+
+    # 한쪽이 비면 한 번만 닿은 가격대(전고점·전저점)라도 보여준다 — '위에 아무것도 없다'로 읽히지 않게
+    support = side(pool, False) or side(levels, False)[:1]
+    resistance = side(pool, True) or side(levels, True)[:1]
 
     for lv in support + resistance:
         lv["distance_pct"] = round((lv["price"] / last_close - 1) * 100, 2)
@@ -177,9 +182,10 @@ def _rank_trendlines(df: pd.DataFrame, points: list[tuple[int, float]], kind: st
             "kind": kind,
             "label": label,
             "touches": touches,
+            "tentative": touches < 3,       # 두 점은 언제나 선이 된다 → 세 번째로 닿아야 확인된 선
             "stars": stars,
             "score": score,
-            "why": why,
+            "why": why + (" · 아직 두 점만 이은 임시 선" if touches < 3 else ""),
             "points": [{"time": _t(df, a), "value": round(pa, 4)},
                        {"time": _t(df, -1), "value": round(now, 4)}],
             "touch_points": [{"time": _t(df, j), "value": round(pa + slope * (j - a), 4)} for j in touched],
@@ -335,10 +341,13 @@ _TREND_BODY = {
 
 def channel_insight(ch: dict, fmt) -> dict:
     pos = ch["position_pct"]
+    rising = ch["label"] == "상승 채널"
     if pos > 100:
-        where = "채널 위로 벗어났어요. 오르는 힘이 평소보다 세다는 뜻으로 많이 봐요."
+        where = ("채널 위로 벗어났어요. 오르는 속도가 평소보다 빨라졌다는 뜻으로 많이 봐요." if rising
+                 else "채널 위로 벗어났어요. 내리던 흐름이 깨졌다는 신호로 많이 봐요.")
     elif pos < 0:
-        where = "채널 아래로 벗어났어요. 지금까지의 흐름이 깨졌다는 신호로 많이 봐요."
+        where = ("채널 아래로 벗어났어요. 오르던 흐름이 깨졌다는 신호로 많이 봐요." if rising
+                 else "채널 아래로 벗어났어요. 내리는 속도가 더 빨라졌다는 뜻으로 많이 봐요.")
     elif pos >= 80:
         where = "채널 천장 근처예요. 여기서 상승이 막힐 거라고 보는 사람이 많지만, 과거 검증에선 무작위로 그은 선과 차이가 없었어요."
     elif pos <= 20:
@@ -350,6 +359,40 @@ def channel_insight(ch: dict, fmt) -> dict:
         "title": f"{ch['label']} 안 {pos:.0f}% 위치",
         "body": f"바닥 {fmt(ch['lower'])} ~ 천장 {fmt(ch['upper'])} (폭 {ch['width_pct']:.1f}%). "
                 f"0%=바닥, 100%=천장. {where}",
+    }
+
+
+def level_history(lv: dict, kind: str) -> str:
+    """수평선이 과거에 한 일을 사실대로: 지지선이라고 늘 '반등했던 자리'는 아니다 (막혔던 가격을 뚫고 올라온 경우)."""
+    highs, lows = lv.get("highs", 0), lv.get("lows", 0)
+    if kind == "support":
+        if highs and not lows:
+            return (f"전에 {highs}번 상승이 막혔던 가격대예요. 지금은 그 위로 올라와 있어서, "
+                    "거꾸로 지지선이 된다고 보는 사람이 많아요 (저항→지지 전환).")
+        if highs:
+            return f"과거 이 가격대에서 {lows}번 하락이 멈추고 {highs}번 상승이 막혔어요."
+        return f"과거 이 가격대에서 {lows}번 하락이 멈췄어요."
+    if lows and not highs:
+        return (f"전에 {lows}번 하락이 멈췄던 가격대예요. 지금은 그 아래로 내려와 있어서, "
+                "거꾸로 저항선이 된다고 보는 사람이 많아요 (지지→저항 전환).")
+    if lows:
+        return f"과거 이 가격대에서 {highs}번 상승이 막히고 {lows}번 하락이 멈췄어요."
+    return f"과거 이 가격대에서 {highs}번 상승이 막혔어요."
+
+
+def extremes(df: pd.DataFrame, unit: str = "일") -> dict:
+    """최근 1년(일봉 252개) 또는 조회 기간의 최고·최저. 지지/저항이 비어 있을 때도 기준이 되는 가격."""
+    span = min(len(df), 252) if unit == "일" else len(df)
+    sub = df.iloc[-span:]
+    hi, lo = int(sub["high"].to_numpy().argmax()), int(sub["low"].to_numpy().argmin())
+    last = float(df["close"].iloc[-1])
+    label = "52주" if unit == "일" and span == 252 else f"최근 {span}{unit}"
+    return {
+        "label": label,
+        "high": {"price": float(sub["high"].iloc[hi]), "time": _t(sub, hi),
+                 "distance_pct": round((float(sub["high"].iloc[hi]) / last - 1) * 100, 2)},
+        "low": {"price": float(sub["low"].iloc[lo]), "time": _t(sub, lo),
+                "distance_pct": round((float(sub["low"].iloc[lo]) / last - 1) * 100, 2)},
     }
 
 
@@ -365,24 +408,24 @@ def build_insights(df: pd.DataFrame, levels: dict, fmt, trendlines: list[dict] |
         out.append({
             "kind": "support",
             "title": f"가장 가까운 지지선 {fmt(s['price'])} ({s['distance_pct']:+.1f}%)",
-            "body": f"과거 이 가격대에서 {s['touches']}번 하락이 멈췄거나 반등했어요. "
-                    "깨고 내려가면 다음 지지선을 보는 사람이 많아요.",
+            "body": f"{level_history(s, 'support')} 깨고 내려가면 다음 지지선을 보는 사람이 많아요.",
         })
     else:
         out.append({"kind": "support", "title": "아래쪽 지지선 없음",
-                    "body": "조회 기간 중 최저가 근처예요. 기준이 될 과거 가격대가 없어요."})
+                    "body": f"지금 보는 {len(df)}{unit} 안에서는 가장 낮은 가격대예요. "
+                            "더 오래된 저점은 주·월 봉에서 볼 수 있어요."})
 
     if levels["resistance"]:
         r = levels["resistance"][0]
         out.append({
             "kind": "resistance",
             "title": f"가장 가까운 저항선 {fmt(r['price'])} ({r['distance_pct']:+.1f}%)",
-            "body": f"과거 이 가격대에서 {r['touches']}번 상승이 막혔어요. "
-                    "뚫고 올라가면 이 선이 거꾸로 지지선이 된다고 보는 사람이 많아요.",
+            "body": f"{level_history(r, 'resistance')} 뚫고 올라가면 이 선이 거꾸로 지지선이 된다고 보는 사람이 많아요.",
         })
     else:
         out.append({"kind": "resistance", "title": "위쪽 저항선 없음",
-                    "body": "조회 기간 중 최고가 근처예요. 위에 막혔던 가격대가 없어요."})
+                    "body": f"지금 보는 {len(df)}{unit} 안에서는 가장 높은 가격대예요. "
+                            "더 오래된 고점이 위에 있을 수 있으니 주·월 봉에서 확인해 보세요."})
 
     for lv in levels["support"][:1] + levels["resistance"][:1]:
         if abs(lv["distance_pct"]) <= 1.5:
@@ -395,8 +438,18 @@ def build_insights(df: pd.DataFrame, levels: dict, fmt, trendlines: list[dict] |
         out.append({
             "kind": "trendline",
             "title": f"{tl['label']} {fmt(tl['price'])} ({tl['distance_pct']:+.1f}%)",
-            "body": f"{_TREND_BODY[tl['label']]} 과거 {tl['touches']}번 닿았어요.",
+            "body": f"{_TREND_BODY[tl['label']]} 과거 {tl['touches']}번 닿았어요."
+                    + (" 아직 두 점만 이은 임시 선이라, 한 번 더 닿아야 확인된 추세선으로 봐요." if tl.get("tentative") else ""),
         })
+
+    ex = extremes(df, unit)
+    out.append({
+        "kind": "extremes",
+        "title": f"{ex['label']} 최고 {fmt(ex['high']['price'])} ({ex['high']['distance_pct']:+.1f}%) · "
+                 f"최저 {fmt(ex['low']['price'])} ({ex['low']['distance_pct']:+.1f}%)",
+        "body": (f"최고가는 {ex['high']['time']}, 최저가는 {ex['low']['time']}에 나왔어요. "
+                 if isinstance(ex["high"]["time"], str) else "") + "많은 사람이 기준으로 삼는 가격이에요.",
+    })
 
     ma20, ma60 = sma(close, 20).iloc[-1], sma(close, 60).iloc[-1]
     if not np.isnan(ma20) and not np.isnan(ma60):
@@ -430,7 +483,7 @@ def analyze(candles: list[dict], fmt, unit: str = "일") -> dict:
     channel = find_channel(df, trendlines)
     insights = build_insights(df, levels, fmt, trendlines, unit)
     # 추세선 카드 바로 뒤, 이평/RSI 카드 앞
-    at = next((i for i, c in enumerate(insights) if c["kind"] in ("trend", "rsi")), len(insights))
+    at = next((i for i, c in enumerate(insights) if c["kind"] in ("extremes", "trend", "rsi")), len(insights))
     extra = [trend_pattern(trendlines, float(df["close"].iloc[-1])),
              channel_insight(channel, fmt) if channel else None]
     insights[at:at] = [c for c in extra if c]
@@ -439,6 +492,7 @@ def analyze(candles: list[dict], fmt, unit: str = "일") -> dict:
         "trendlines": trendlines,
         "trend_candidates": candidates,     # 방향별 후보 (1번 = trendlines 에 있는 선)
         "channel": channel,
+        "extremes": extremes(df, unit),
         "insights": insights,
     }
 

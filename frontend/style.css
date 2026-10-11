@@ -331,6 +331,8 @@ button.ghost.on { border-color: var(--accent); color: var(--accent); }
 .pbadge.brk { background: #ffd43b; color: #111; } .pbadge.form { border: 1px solid #ffd43b; color: #ffd43b; }
 .pbadge.vol { background: color-mix(in srgb, var(--up) 20%, transparent); color: var(--up); }
 .pbadge.novol { background: var(--bg); color: var(--muted); }
+.pbadge.bull { background: color-mix(in srgb, var(--up) 20%, transparent); color: var(--up); }
+.pbadge.bear { background: color-mix(in srgb, var(--down) 20%, transparent); color: var(--down); }
 
 /* 시장 탭 안쪽 탭 + 묶음 제목(진하게) */
 .mk-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }

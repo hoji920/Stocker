@@ -1,8 +1,13 @@
-"""차트 패턴 인식 (일봉): 이중 바닥, 역헤드앤숄더, 상승 삼각수렴, 상승 깃발형, 컵앤핸들.
+"""차트 패턴 인식 (일봉).
+
+- 상승형: 이중 바닥, 역헤드앤숄더, 상승 삼각수렴, 상승 깃발형, 컵앤핸들
+- 하락형: 이중 천장(쌍봉), 헤드앤숄더, 하락 삼각수렴 — 상승형 판정을 가격을 뒤집은 차트에 그대로 돌린다
+  (초보자가 '패턴 = 사라는 신호'로만 배우지 않게, 들고 있는 사람에게 필요한 경고 쪽도 같이 보여준다)
 
 원칙
 - 미래 정보 없음: 봉 k 에서 쓰는 스윙 포인트는 k 시점에 이미 확정된 것만 (스윙 i 는 i + W 봉에 확정).
-- 이벤트 = '돌파한 날'. 돌파일 거래량이 20일 평균의 1.5배 이상이면 '거래량 동반'.
+- 이벤트 = '돌파(하락형은 이탈)한 날'. 그날 거래량이 20일 평균의 1.5배 이상이면 '거래량 동반'.
+- 모양마다 '무효선'이 있다: 종가가 그 선을 반대로 넘으면 이 모양은 깨진 것.
 - 이름과 해석은 사람들이 흔히 쓰는 것. 실제로 맞는지는 research/patterns_backtest.py 로 검증한 숫자를 따로 보여준다.
 """
 from __future__ import annotations
@@ -27,8 +32,17 @@ CATALOG = {
     "pat_flag": {"name": "상승 깃발형", "short": "깃발",
                  "desc": "가파르게 오른(깃대) 뒤 거래량이 줄면서 살짝 내려가는 좁은 구간(깃발)을 만들고, 그 윗선을 종가로 넘었어요. 2차 상승의 시작으로 많이 봐요."},
     "pat_cup":  {"name": "컵앤핸들", "short": "컵핸들",
-                 "desc": "U자 모양으로 내려갔다 올라온 컵과 짧은 조정(손잡이) 뒤, 컵 오른쪽 테두리 가격을 종가로 넘었어요. 상승이 이어지는 모양으로 많이 봐요."},
+                 "desc": "오르던 종목이 U자 모양으로 쉬었다 올라온 컵과 짧은 조정(손잡이) 뒤, 컵 오른쪽 테두리 가격을 종가로 넘었어요. 상승이 이어지는 모양으로 많이 봐요."},
+    "pat_dt":   {"name": "이중 천장 (M)", "short": "쌍봉", "dir": "bear",
+                 "desc": "비슷한 가격에서 두 번 고점을 찍고, 그 사이 저점(넥라인) 아래로 종가가 내려갔어요. 고점권에서 상승이 멈췄다는 신호로 많이 봐요."},
+    "pat_hs":   {"name": "헤드앤숄더", "short": "H&S", "dir": "bear",
+                 "desc": "왼쪽 어깨-머리(가장 높은 고점)-오른쪽 어깨 모양 뒤, 두 눌림 저점을 이은 넥라인 아래로 종가가 내려갔어요. 상승 추세가 끝나는 신호로 많이 봐요."},
+    "pat_desc": {"name": "하락 삼각수렴", "short": "하락삼각", "dir": "bear",
+                 "desc": "저점은 같은 가격에서 버티고 고점은 점점 낮아지다가, 그 수평 지지선 아래로 종가가 내려갔어요. 매도세가 강해지는 모양으로 많이 봐요."},
 }
+# 뒤집은 차트에서 찾은 상승형 → 실제 차트의 하락형
+_BEAR_TYPE = {"pat_db": "pat_dt", "pat_ihs": "pat_hs", "pat_asc": "pat_desc"}
+_BEAR_LABEL = {"저항선": "지지선", "저점선": "고점선"}
 
 
 def evidence() -> dict[str, dict]:
@@ -61,7 +75,8 @@ def pivots(df: pd.DataFrame, w: int = W) -> list[dict]:
 
 
 class _Ctx:
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, flip: bool = False):
+        """flip=True 면 가격 부호를 뒤집은 차트 (고점↔저점). 하락형 패턴을 상승형 판정으로 찾기 위한 것."""
         self.df = df
         self.o, self.h, self.l, self.c = (df[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
         self.v = df["volume"].to_numpy(dtype=float)
@@ -69,6 +84,10 @@ class _Ctx:
         self.vavg = pd.Series(self.v).shift().rolling(20, min_periods=10).mean().to_numpy()
         self.piv = pivots(df)
         self.n = len(df)
+        if flip:
+            self.o, self.c, self.h, self.l = -self.o, -self.c, -self.l, -self.h
+            self.piv = [{"i": q["i"], "p": -q["p"], "t": "low" if q["t"] == "high" else "high"} for q in self.piv]
+        self.mirror = None if flip else _Ctx(df, flip=True)
 
     def known(self, k: int) -> list[dict]:
         """봉 k 시점에 확정된 스윙들."""
@@ -91,19 +110,20 @@ def _double_bottoms(x: _Ctx, piv: list[dict], k: int) -> list[dict]:
     for a, b, c in zip(piv, piv[1:], piv[2:]):
         if not (a["t"] == "low" and b["t"] == "high" and c["t"] == "low"):
             continue
-        atr, avg = x.atr[c["i"]], (a["p"] + c["p"]) / 2
+        atr, avg = x.atr[c["i"]], abs(a["p"] + c["p"]) / 2      # abs: 뒤집은 차트(하락형)에선 가격이 음수
         if not (10 <= c["i"] - a["i"] <= 100 and k - c["i"] <= MAX_AGE):
             continue
         if abs(a["p"] - c["p"]) > max(0.03 * avg, 0.75 * atr):            # 두 바닥이 비슷
             continue
         if b["p"] - max(a["p"], c["p"]) < max(0.05 * avg, 2 * atr):        # 가운데 반등이 충분
             continue
-        if x.h[max(0, a["i"] - 40): a["i"]].max(initial=0) < a["p"] + 3 * x.atr[a["i"]]:   # 앞에 하락이 있었어야 '바닥'
+        if x.h[max(0, a["i"] - 40): a["i"]].max(initial=-np.inf) < a["p"] + 3 * x.atr[a["i"]]:   # 앞에 하락이 있었어야 '바닥'
             continue
         if x.l[c["i"] + 1: k].min(initial=np.inf) < min(a["p"], c["p"]) - 0.5 * atr:      # 두 번째 바닥 뒤에 더 빠지면 무효
             continue
         neck = b["p"]
         out.append({"type": "pat_db", "anchors": (a["i"], c["i"]), "level_at": lambda j, v=neck: v, "last_i": c["i"],
+                    "invalid": min(a["p"], c["p"]),
                     "lines": [("모양", [(a["i"], a["p"]), (b["i"], b["p"]), (c["i"], c["p"])]), ("넥라인", [(b["i"], neck)])]})
     return out
 
@@ -114,7 +134,7 @@ def _inv_head_shoulders(x: _Ctx, piv: list[dict], k: int) -> list[dict]:
         l1, h1, l2, h2, l3 = piv[s: s + 5]
         if [p["t"] for p in (l1, h1, l2, h2, l3)] != ["low", "high", "low", "high", "low"]:
             continue
-        atr, avg = x.atr[l3["i"]], (l1["p"] + l3["p"]) / 2
+        atr, avg = x.atr[l3["i"]], abs(l1["p"] + l3["p"]) / 2
         if not (15 <= l3["i"] - l1["i"] <= 150 and k - l3["i"] <= MAX_AGE):
             continue
         if not (l2["p"] < l1["p"] - 0.5 * atr and l2["p"] < l3["p"] - 0.5 * atr):    # 머리가 가장 낮음
@@ -126,11 +146,12 @@ def _inv_head_shoulders(x: _Ctx, piv: list[dict], k: int) -> list[dict]:
             continue
         if abs(h2["p"] - h1["p"]) > 0.08 * avg:                                      # 넥라인이 너무 기울면 제외
             continue
-        if x.h[max(0, l1["i"] - 40): l1["i"]].max(initial=0) < l1["p"] + 3 * x.atr[l1["i"]]:
+        if x.h[max(0, l1["i"] - 40): l1["i"]].max(initial=-np.inf) < l1["p"] + 3 * x.atr[l1["i"]]:
             continue
         slope = (h2["p"] - h1["p"]) / (h2["i"] - h1["i"])
         level = lambda j, h1=h1, slope=slope: h1["p"] + slope * (j - h1["i"])
         out.append({"type": "pat_ihs", "anchors": (l1["i"], l2["i"], l3["i"]), "level_at": level, "last_i": l3["i"],
+                    "invalid": l3["p"],                                              # 오른쪽 어깨 저점
                     "lines": [("모양", [(p["i"], p["p"]) for p in (l1, h1, l2, h2, l3)]), ("넥라인", [(h1["i"], h1["p"])], slope)]})
     return out
 
@@ -143,7 +164,7 @@ def _ascending_triangles(x: _Ctx, piv: list[dict], k: int) -> list[dict]:
         hs = highs[start:]
         level = float(np.mean([p["p"] for p in hs]))
         atr = x.atr[hs[-1]["i"]]
-        if any(abs(p["p"] - level) > max(0.015 * level, 0.75 * atr) for p in hs):    # 고점들이 같은 가격대
+        if any(abs(p["p"] - level) > max(0.015 * abs(level), 0.75 * atr) for p in hs):    # 고점들이 같은 가격대
             continue
         lows = [p for p in recent if p["t"] == "low" and p["i"] > hs[0]["i"]]
         if len(lows) < 2 or any(b["p"] < a["p"] + 0.3 * atr for a, b in zip(lows, lows[1:])):   # 저점이 점점 높아짐
@@ -154,7 +175,7 @@ def _ascending_triangles(x: _Ctx, piv: list[dict], k: int) -> list[dict]:
         if level - lows[0]["p"] < 2 * atr:                                           # 삼각형이 너무 납작하면 제외
             continue
         out.append({"type": "pat_asc", "anchors": (hs[0]["i"], lows[0]["i"]), "level_at": lambda j, v=level: v,
-                    "last_i": last_i,
+                    "last_i": last_i, "invalid": lows[-1]["p"],                       # 마지막으로 높아진 저점
                     "lines": [("저항선", [(hs[0]["i"], level)]), ("저점선", [(p["i"], p["p"]) for p in lows])]})
         break                                                                         # 가장 긴 것 하나
     return out
@@ -185,7 +206,7 @@ def _bull_flags(x: _Ctx, k: int) -> list[dict]:
         # 돌파 = 윗선보다 0.25 ATR 이상 위에서 마감 (깃발 안의 작은 반등이 윗선을 살짝 넘는 걸 돌파로 보지 않게)
         margin = 0.25 * x.atr[e]
         level = lambda j, upper=upper, margin=margin: upper(j) + margin
-        out.append({"type": "pat_flag", "anchors": (s, e), "level_at": level, "last_i": k - 1,
+        out.append({"type": "pat_flag", "anchors": (s, e), "level_at": level, "last_i": k - 1, "invalid": float(fl.min()),
                     "lines": [("깃대", [(s, x.l[s]), (e, x.h[e])]), ("깃발 윗선", [(e + 1, float(upper(e + 1)))], slope)]})
         break
     return out
@@ -200,6 +221,10 @@ def _cup_handles(x: _Ctx, piv: list[dict], k: int) -> list[dict]:
         for r1 in highs:
             span = r2["i"] - r1["i"]
             if not 30 <= span <= 150 or abs(r2["p"] - r1["p"]) > 0.05 * r1["p"]:
+                continue
+            # 컵앤핸들은 '오르던 종목이 쉬어가는' 지속형: 컵 앞 반년 안에 25% 넘게 올라와 있어야 (없으면 그냥 바닥 다지기)
+            before = x.l[max(0, r1["i"] - 120): r1["i"]]
+            if len(before) < 20 or r1["p"] < before.min() * 1.25:
                 continue
             seg_l = x.l[r1["i"]: r2["i"] + 1]
             if x.h[r1["i"] + 1: r2["i"]].max(initial=0) > max(r1["p"], r2["p"]) * 1.01:   # 컵 안에 테두리보다 높은 봉 X
@@ -222,9 +247,22 @@ def _cup_handles(x: _Ctx, piv: list[dict], k: int) -> list[dict]:
                 continue
             rim = r2["p"]
             out.append({"type": "pat_cup", "anchors": (r1["i"], r2["i"]), "level_at": lambda j, v=rim: v, "last_i": r2["i"],
+                        "invalid": float(handle_low),                                  # 손잡이 저점
                         "lines": [("컵", [(r1["i"], r1["p"]), (r1["i"] + bottom_rel, bottom), (r2["i"], r2["p"])]),
                                   ("테두리", [(r1["i"], rim)])]})
             return out
+    return out
+
+
+def _bear_structures(m: _Ctx, k: int) -> list[dict]:
+    """뒤집은 차트(m)에서 찾은 이중 바닥·역H&S·상승 삼각 → 실제 가격의 쌍봉·H&S·하락 삼각으로 되돌린다."""
+    piv = m.known(k)[-14:]
+    out = []
+    for s in _double_bottoms(m, piv, k) + _inv_head_shoulders(m, piv, k) + _ascending_triangles(m, piv, k):
+        lines = [(_BEAR_LABEL.get(spec[0], spec[0]), [(i, -v) for i, v in spec[1]], *(-g for g in spec[2:]))
+                 for spec in s["lines"]]
+        out.append({**s, "type": _BEAR_TYPE[s["type"]], "dir": "bear", "invalid": -s["invalid"],
+                    "level_at": lambda j, f=s["level_at"]: -f(j), "lines": lines})
     return out
 
 
@@ -232,7 +270,20 @@ def _structures(x: _Ctx, k: int) -> list[dict]:
     known = x.known(k)
     piv = known[-14:]                                   # 최근 스윙만 (W/쌍바닥/삼각형은 길어야 100봉 안팎)
     return (_double_bottoms(x, piv, k) + _inv_head_shoulders(x, piv, k) + _ascending_triangles(x, piv, k)
-            + _bull_flags(x, k) + _cup_handles(x, known, k))   # 컵은 150봉까지 → 전체 스윙에서
+            + _bull_flags(x, k) + _cup_handles(x, known, k)    # 컵은 150봉까지 → 전체 스윙에서
+            + _bear_structures(x.mirror, k))
+
+
+def _bear(s: dict) -> bool:
+    return s.get("dir") == "bear"
+
+
+def _broke(x: _Ctx, s: dict, k: int) -> bool:
+    """봉 k 종가가 돌파선을 처음 넘었나 (하락형은 이탈선 아래로 처음 내려갔나)."""
+    lv, prev = s["level_at"](k), s["level_at"](k - 1)
+    if _bear(s):
+        return bool(x.c[k] < lv and x.c[k - 1] >= prev)
+    return x.cross_up(k, lv, prev)
 
 
 # ── 과거 전체: 돌파 이벤트 (신호·검증용) ──
@@ -248,13 +299,13 @@ def events(df: pd.DataFrame, start: int = 60) -> list[tuple[int, str, str]]:
             key = (s["type"], s["anchors"])
             if key in seen:
                 continue
-            if x.cross_up(k, s["level_at"](k), s["level_at"](k - 1)):
+            if _broke(x, s, k):
                 seen.add(key)
                 out.append((k, s["type"], "거래량 동반" if x.vol_ok(k) else "거래량 부족"))
     return out
 
 
-# ── 지금 차트: 형성 중이거나 최근 돌파한 패턴 (그리기용) ──
+# ── 지금 차트: 형성 중이거나 최근 돌파(이탈)한 패턴 (그리기용) ──
 def current(df: pd.DataFrame, fmt, recent_break: int = 10) -> list[dict]:
     if len(df) < 70:
         return []
@@ -265,17 +316,19 @@ def current(df: pd.DataFrame, fmt, recent_break: int = 10) -> list[dict]:
     for k in range(max(60, n - recent_break), n):
         for s in _structures(x, k):
             key = (s["type"], s["anchors"])
-            if key not in found and x.cross_up(k, s["level_at"](k), s["level_at"](k - 1)):
+            if key not in found and _broke(x, s, k):
                 found[key] = (s, k)
-    # 형성 중: 지금 기준으로 구조는 맞고 아직 돌파선 아래
+    # 형성 중: 지금 기준으로 구조는 맞고 아직 돌파선을 못 넘음 (무효선을 이미 넘었으면 깨진 모양이라 제외)
     for s in _structures(x, n - 1):
         key = (s["type"], s["anchors"])
-        if key not in found and x.c[-1] <= s["level_at"](n - 1):
+        sign = -1 if _bear(s) else 1
+        if key not in found and sign * (x.c[-1] - s["level_at"](n - 1)) <= 0 and sign * (x.c[-1] - s["invalid"]) >= 0:
             found[key] = (s, None)
 
     out = []
     for (ptype, _), (s, k) in found.items():
         end = n - 1
+        bear = _bear(s)
         lines = []
         for spec in s["lines"]:
             label, pts = spec[0], spec[1]
@@ -284,17 +337,35 @@ def current(df: pd.DataFrame, fmt, recent_break: int = 10) -> list[dict]:
                 slope = spec[2] if len(spec) > 2 else 0.0
                 pts = [(i0, v0), (end, v0 + slope * (end - i0))]
             lines.append({"label": label, "points": [{"time": x.t(i), "value": round(float(v), 4)} for i, v in pts]})
+        invalid = float(s["invalid"])
+        if s["last_i"] < end:
+            lines.append({"label": "무효선", "points": [{"time": x.t(s["last_i"]), "value": round(invalid, 4)},
+                                                     {"time": x.t(end), "value": round(invalid, 4)}]})
         level_now = float(s["level_at"](end))
         cat = CATALOG[ptype]
-        status = "돌파" if k is not None else "형성 중"
+        word, line_name = ("이탈", "이탈선") if bear else ("돌파", "돌파선")
+        # 돌파(이탈) 뒤에 종가가 무효선을 반대로 넘었으면 실패한 모양
+        failed = k is not None and bool(((x.c[k + 1:] > invalid) if bear else (x.c[k + 1:] < invalid)).any())
+        status = "형성 중" if k is None else "실패" if failed else word
         vol = (x.vol_ok(k) if k is not None else None)
         dist = float((level_now / x.c[-1] - 1) * 100)
-        why = (f"{x.t(k)}에 돌파선({fmt(level_now)})을 종가로 넘었어요. " + ("돌파한 날 거래량이 평소의 1.5배 이상이었어요." if vol
-               else "돌파한 날 거래량은 평소 수준이었어요(거래량 없는 돌파는 속임수인 경우가 많다고 보는 사람이 많아요).")) \
-            if k is not None else f"돌파선 {fmt(level_now)}까지 {dist:+.1f}%. 넘어설 때 거래량이 붙는지 보는 사람이 많아요."
+        if k is None:
+            why = (f"{line_name} {fmt(level_now)}까지 {dist:+.1f}%. "
+                   + ("내려갈 때 거래량이 붙는지 보는 사람이 많아요." if bear else "넘어설 때 거래량이 붙는지 보는 사람이 많아요."))
+        else:
+            why = (f"{x.t(k)}에 종가가 이탈선({fmt(level_now)}) 아래로 내려갔어요. " if bear
+                   else f"{x.t(k)}에 종가가 돌파선({fmt(level_now)})을 넘었어요. ") + (
+                f"{word}한 날 거래량이 평소의 1.5배 이상이었어요." if vol
+                else f"{word}한 날 거래량은 평소 수준이었어요(거래량 없는 {word}{'은' if bear else '는'} 속임수인 경우가 많다고 보는 사람이 많아요).")
+            if failed:
+                why += f" 그 뒤 종가가 무효선({fmt(invalid)})을 {'넘어 올라가' if bear else '깨고 내려가'} 이 모양은 실패했어요."
+        if not failed:
+            why += f" 종가가 {fmt(invalid)} {'위로 올라가면' if bear else '아래로 내려가면'} 이 모양은 깨진 걸로 봐요(무효선)."
         out.append({"id": f"{ptype}-{s['anchors'][0]}", "type": ptype, "name": cat["name"], "status": status,
+                    "dir": "bear" if bear else "bull",
                     "break_time": x.t(k) if k is not None else None, "volume_confirmed": vol,
-                    "level": round(level_now, 4), "distance_pct": round(dist, 2), "why": why, "desc": cat["desc"],
+                    "level": round(level_now, 4), "invalid": round(invalid, 4), "distance_pct": round(dist, 2),
+                    "why": why, "desc": cat["desc"],
                     "lines": lines, "start": x.t(min(i for spec in s["lines"] for i, _ in spec[1]))})
-    out.sort(key=lambda p: (p["status"] != "돌파", p["distance_pct"]))
+    out.sort(key=lambda p: (p["status"] == "형성 중", abs(p["distance_pct"])))
     return out

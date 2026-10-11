@@ -55,3 +55,12 @@ def test_monitor_sends_signal_once_even_after_restart(tmp_path):
                            lambda syms: {"X": 100.0}, lambda c: str, lambda s: [dict(ev)])
     assert len(asyncio.run(make().tick())) == 1
     assert asyncio.run(make().tick()) == []          # 새 Monitor(=재시작)여도 기록에 있으면 안 보냄
+
+
+def test_stats_carry_baseline_so_uptrend_is_not_credited_to_signal():
+    # 꾸준히 오르는 종목: 어떤 신호든 20일 뒤 +. 기준선(아무 날)도 똑같이 + 여야 한다
+    closes = list(100 * 1.003 ** np.arange(300))
+    r = signals.detect(_candles(closes), "US", datetime(2030, 1, 1, tzinfo=NY))
+    st = r["stats"]["gc"]
+    assert abs(st["base20"] - (1.003 ** 20 - 1) * 100) < 0.05 and st["base_up20"] == 100
+    assert r["min_sample"] == signals.MIN_SAMPLE

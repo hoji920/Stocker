@@ -1,10 +1,13 @@
-"""차트 패턴(이중 바닥·역헤드앤숄더·상승 삼각수렴·상승 깃발형·컵앤핸들) 돌파 후 실제로 더 올랐나?
+"""차트 패턴 돌파(하락형은 이탈) 후 실제로 그 방향으로 갔나?
+
+상승형: 이중 바닥·역헤드앤숄더·상승 삼각수렴·상승 깃발형·컵앤핸들 / 하락형: 이중 천장·헤드앤숄더·하락 삼각수렴
+(하락형은 초과수익이 음수여야 패턴이 맞은 것)
 
 - 종목: 탐색 40 + 확증 40 = 80 (research.backtest_lines.US/KR + research.confirm.HOLDOUT), 약 8년 일봉
 - 이벤트: backend.patterns.events (봉 k 까지의 데이터만 사용, 돌파한 날)
 - 수익: 돌파일 종가 → h봉 뒤 종가. '초과수익' = 그 수익 − 그 종목의 같은 h봉 평균 수익 (원래 많이 오른 종목 효과 제거)
 - 대조군: ① 아무 날(=0 기준) ② 단순 돌파: 직전 20일 최고가를 처음 넘은 날 (패턴 모양 없이 '돌파'만)
-- 유의성: 월 묶음 부트스트랩 2000회 + Holm 보정 (주 가설: 패턴 5개 × 20봉 초과수익 > 0)
+- 유의성: 월 묶음 부트스트랩 2000회 + Holm 보정 (주 가설: 패턴별 20봉 초과수익 ≠ 0, 양측)
 
 실행: python -m research.patterns_backtest
 결과: research/results/patterns.md
@@ -125,10 +128,13 @@ def main() -> None:
     name = lambda t: "패턴 전체" if t == "ALL" else patterns.CATALOG[t]["name"]
     f2 = lambda v: "-" if pd.isna(v) else f"{v:+.2f}%"
     pv = lambda v: "-" if pd.isna(v) else (f"{v:.3g}" + (" ✓" if v < 0.05 else ""))
-    out = ["# 차트 패턴 돌파 후 실제로 더 올랐나\n",
+    bull = [t for t, c in patterns.CATALOG.items() if c.get("dir") != "bear"]
+    n_main = int((res.type != "ALL").sum())
+    out = ["# 차트 패턴 돌파(이탈) 후 실제로 그 방향으로 갔나\n",
            f"- {len(data)}종목(탐색 40 + 확증 40), 약 8년 일봉. 패턴 돌파 {len(pat):,}건, 단순 돌파(대조군) {len(ctrl):,}건",
            "- **초과수익** = 돌파일 종가 → h봉 뒤 수익 − 그 종목의 같은 기간 평균 수익. 0 이면 '아무 날 산 것과 같음'",
-           "- 95% 구간·p: 월 묶음 부트스트랩 2000회. Holm 보정은 패턴 5개 기준. ✓ = 보정 후 p<0.05\n",
+           f"- 95% 구간·p: 월 묶음 부트스트랩 2000회. Holm 보정은 패턴 {n_main}개 기준. ✓ = 보정 후 p<0.05",
+           "- 하락형(이중 천장·헤드앤숄더·하락 삼각수렴)은 이탈한 날 기준이고, 초과수익이 **음수**여야 패턴이 맞은 것\n",
            "## ① 돌파 후 초과수익 (아무 날 대비)\n",
            "| 패턴 | 건수 (거래량 동반) | 5봉 | 10봉 | 20봉 초과수익 | 20봉 95% 구간 | Holm p | 20봉 뒤 오른 비율 | 60봉 (95% 구간) |",
            "|---|---|---|---|---|---|---|---|---|"]
@@ -141,7 +147,7 @@ def main() -> None:
                f"{f2(cm[60][0])} ({cm[60][1]:+.2f} ~ {cm[60][2]:+.2f}) |")
     out += ["\n## ② 패턴 모양이 '그냥 돌파'보다 나은가 (20봉 초과수익 차이)\n",
             "| 패턴 | 패턴 − 단순 돌파 | 95% 구간 | Holm p |", "|---|---|---|---|"]
-    for r in res[res.type != "ALL"].itertuples():
+    for r in res[res.type.isin(bull)].itertuples():          # 단순 '신고가 돌파'와의 비교는 상승형만 의미가 있다
         out.append(f"| {name(r.type)} | {r.vs_plain:+.2f}%p | {r.vs_plain_lo:+.2f} ~ {r.vs_plain_hi:+.2f} | {pv(r.vs_plain_holm)} |")
     if "vol_diff" in res:
         out += ["\n## ③ 거래량 동반 돌파가 더 나은가 (20봉 초과수익)\n",

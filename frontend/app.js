@@ -7,19 +7,21 @@ const $ = (sel) => document.querySelector(sel);
 // 차트에 겹쳐 그리는 분석 선들. "+ 추가" 메뉴에서 켜고 끈다. (보조지표는 indicators.js)
 const LAYERS = {
   levels: { name: "지지/저항선", params: { count: 1 }, paramLabel: { count: "위아래 개수" },
-    desc: "여러 번 하락이 멈춘 가격(지지)과 상승이 막힌 가격(저항). 가장 가까운 선만 진하게 보여요." },
-  trend: { name: "자동 추세선", desc: "저점끼리 이은 상승 추세선, 고점끼리 이은 하락 추세선. 비스듬한 지지/저항이에요." },
+    desc: "과거에 여러 번 방향이 바뀐 가격대. 현재가 아래에 있으면 지지, 위에 있으면 저항이에요 (막혔던 가격을 뚫고 올라오면 지지로 바뀌어요). 가장 가까운 선만 진하게 보여요." },
+  extremes: { name: "52주 최고·최저", desc: "최근 1년(일봉이 아니면 보고 있는 기간) 중 가장 높았던 가격과 가장 낮았던 가격. 지지/저항선이 안 잡히는 신고가 근처에서도 기준이 돼요." },
+  trend: { name: "자동 추세선", desc: "저점끼리 이은 상승 추세선, 고점끼리 이은 하락 추세선. 비스듬한 지지/저항이에요. 두 점만 이은 선은 '임시'로 표시해요 (세 번째로 닿아야 확인된 선)." },
   channel: { name: "추세 채널", desc: "추세선과, 그 반대편 끝에 평행하게 그은 선으로 만든 통로. 천장·바닥에서 막히거나 튕길 거라고 보는 사람이 많지만, 과거 검증에선 무작위로 그은 선과 차이가 없었어요." },
   avg: { name: "내 평단", desc: "토스 계좌에 보유 중인 종목이면 내 매수 평균가를 흰색 점선으로 보여줘요." },
   drawings: { name: "내가 그은 선", desc: "✏️/― 버튼으로 직접 그은 선. 관심종목이면 닿을 때 알림이 와요." },
   volume: { name: "거래량", desc: "그날 거래된 주식 수. 큰 움직임에 거래량이 같이 터지면 신뢰도가 높다고 봐요." },
   news: { name: "뉴스 마커", desc: "뉴스가 나온 날에 점을 찍어요. 빨강=호재, 파랑=악재, 회색=중립." },
-  patterns: { name: "차트 패턴", desc: "이중 바닥·역헤드앤숄더·상승 삼각수렴·상승 깃발형·컵앤핸들 모양을 찾아 노란 선으로 그려요. 실제로 맞는지는 '차트 패턴' 탭의 검증 숫자를 같이 보세요." },
+  patterns: { name: "차트 패턴", desc: "상승형(이중 바닥·역헤드앤숄더·상승 삼각수렴·상승 깃발형·컵앤핸들)과 하락형(쌍봉·헤드앤숄더·하락 삼각수렴) 모양을 찾아 노란 선으로 그려요. 점선은 돌파(이탈)선, 가는 점선은 무효선. 실제로 맞는지는 '차트 패턴' 탭의 검증 숫자를 같이 보세요." },
   signals: { name: "매매 신호", desc: "골든크로스·추세선 돌파·신고가 같은 신호가 난 날에 화살표를 찍어요. 장 마감 종가로 확정된 것만. 종류는 오른쪽 '매매 신호 설정'에서 골라요." },
 };
 // 차트에 기본으로 표시할 신호 (MACD·거래량은 자주 나와서 기본은 끔)
 const DEFAULT_SIG_SHOW = ["gc", "dc", "gc_long", "dc_long", "rsi_os_exit", "rsi_ob_exit", "high52", "low52", "tl_up", "tl_down", "ch_up", "ch_down",
-  "pat_db", "pat_ihs", "pat_asc", "pat_flag", "pat_cup"];
+  "pat_db", "pat_ihs", "pat_asc", "pat_flag", "pat_cup", "pat_dt", "pat_hs", "pat_desc"];
+const BEAR_PATTERNS = ["pat_dt", "pat_hs", "pat_desc"];
 const DEFAULT_LAYERS = { levels: { count: 1 }, trend: {}, avg: {}, drawings: {}, volume: {}, patterns: {} };
 
 const store = {
@@ -44,6 +46,12 @@ const state = {
   drawMode: null, pending: null,
 };
 const on = (layer) => layer in state.layers;
+// 하락형 패턴이 생기기 전에 저장된 설정에는 새 종류가 없다 → 한 번만 켜준다 (그 뒤엔 사용자가 끈 걸 존중)
+if (!store.load("stocking.sigShow.bear", false)) {
+  state.sigShow = [...new Set([...state.sigShow, ...BEAR_PATTERNS])];
+  store.save("stocking.sigShow", state.sigShow);
+  store.save("stocking.sigShow.bear", true);
+}
 
 // ── 차트 생성 ──
 const baseOptions = () => ({
@@ -119,6 +127,7 @@ function autoItems() {
     (d.trend_candidates?.[kind] || []).forEach((tl) => items.push({
       id: tl.id, group: "trend", layer: "trend", kind, rank: tl.rank, name: tl.label, why: tl.why,
       now: tl.price, points: tl.points, touch_points: tl.touch_points, defaultVisible: tl.rank === 1,
+      tentative: tl.tentative,
     }));
   }
   if (d.channel) {
@@ -153,6 +162,12 @@ function renderLevels() {
       title: label ? (it.kind === "support" ? "지지" : "저항") : "",
     }));
   }
+  // 52주(또는 보고 있는 기간) 최고·최저: 회색 점선
+  const ex = state.data.extremes;
+  if (ex && on("extremes")) for (const [side, word] of [["high", "최고"], ["low", "최저"]]) state.priceLines.push(candles.createPriceLine({
+    price: ex[side].price, color: "#adb5bd", lineWidth: 1, lineStyle: LW.LineStyle.LargeDashed, axisLabelVisible: true,
+    title: `${ex.label} ${word}`,
+  }));
   // 보유 중이면 내 평단
   const held = heldOf(state.data.symbol);
   if (held && on("avg")) state.priceLines.push(candles.createPriceLine({
@@ -218,10 +233,12 @@ function renderTrendlines() {
     for (const p of state.data.patterns || []) {
       if (state.patFocus && state.patFocus !== p.id) continue;
       for (const ln of p.lines) {
-        const isBreak = /넥라인|저항선|테두리|윗선/.test(ln.label);
-        line(ln.points, PATTERN_COLOR + (state.patFocus ? "" : "cc"), {
-          width: state.patFocus ? 3 : 2, style: isBreak ? LW.LineStyle.Dashed : LW.LineStyle.Solid,
-          title: isBreak && state.patFocus ? `${p.name} 돌파선` : "" });
+        const isBreak = /넥라인|저항선|지지선|테두리|윗선/.test(ln.label);
+        const isInvalid = ln.label === "무효선";       // 종가가 이 선을 넘으면 깨진 모양
+        line(ln.points, PATTERN_COLOR + (state.patFocus && !isInvalid ? "" : isInvalid ? "99" : "cc"), {
+          width: isInvalid ? 1 : state.patFocus ? 3 : 2,
+          style: isInvalid ? LW.LineStyle.Dotted : isBreak ? LW.LineStyle.Dashed : LW.LineStyle.Solid,
+          title: !state.patFocus ? "" : isInvalid ? "무효선" : isBreak ? `${p.name} ${p.dir === "bear" ? "이탈선" : "돌파선"}` : "" });
       }
     }
   }
@@ -621,11 +638,12 @@ chart.subscribeCrosshairMove((p) => {
 });
 
 // ── 차트 패턴 탭 ──
-function evidenceText(ev) {
+function evidenceText(ev, bear) {
   if (!ev || ev.n == null) return "아직 검증 숫자가 없어요 (python -m research.patterns_backtest).";
   const r = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
   const zero = ev.x20_lo <= 0 && ev.x20_hi >= 0;
-  return `검증(80종목·약 8년, 돌파 ${Math.round(ev.n).toLocaleString()}건): 돌파 후 20봉 수익이 그 종목 평소보다 ${r(ev.x20)} `
+  const word = bear ? "이탈" : "돌파";
+  return `검증(80종목·약 8년, ${word} ${Math.round(ev.n).toLocaleString()}건): ${word} 후 20봉 수익이 그 종목 평소보다 ${r(ev.x20)} `
     + `(95% 구간 ${r(ev.x20_lo)} ~ ${r(ev.x20_hi)})${zero ? " — 아무 날 산 것과 차이가 없었어요." : "."}`
     + (ev.x60 != null ? ` 60봉 뒤 ${r(ev.x60)}.` : "");
 }
@@ -637,18 +655,20 @@ function renderPatterns() {
   const pats = state.data.patterns || [];
   const evs = state.data.pattern_evidence || {};
   if (!pats.length) {
-    return list.replaceChildren(el("li", { class: "muted" }, "지금 형성 중이거나 최근 10봉 안에 돌파한 패턴이 없어요. 과거 돌파는 '매매 신호' 탭에 있어요."));
+    return list.replaceChildren(el("li", { class: "muted" }, "지금 형성 중이거나 최근 10봉 안에 돌파·이탈한 패턴이 없어요. 과거 기록은 '매매 신호' 탭에 있어요."));
   }
   list.replaceChildren(...pats.map((p) => {
     const focused = state.patFocus === p.id;
-    const badge = el("span", { class: `pbadge ${p.status === "돌파" ? "brk" : "form"}` }, p.status);
+    const bear = p.dir === "bear";
+    const badge = el("span", { class: `pbadge ${p.status === "형성 중" ? "form" : p.status === "실패" ? "novol" : "brk"}` }, p.status);
+    const side = el("span", { class: `pbadge ${bear ? "bear" : "bull"}` }, bear ? "하락형" : "상승형");
     const vol = p.volume_confirmed == null ? "" : el("span", { class: `pbadge ${p.volume_confirmed ? "vol" : "novol"}` },
       p.volume_confirmed ? "거래량 동반" : "거래량 부족");
     const li = el("li", { class: `pat${focused ? " focus" : ""}` },
-      el("b", {}, p.name, badge, vol, el("span", { class: "t" }, p.break_time || `${p.start}~`)),
+      el("b", {}, p.name, side, badge, vol, el("span", { class: "t" }, p.break_time || `${p.start}~`)),
       el("p", {}, p.why),
       el("p", { class: "muted" }, p.desc),
-      el("p", { class: "ev" }, evidenceText(evs[p.type])));
+      el("p", { class: "ev" }, evidenceText(evs[p.type], bear)));
     li.addEventListener("click", () => {
       state.patFocus = focused ? null : p.id;
       if (!on("patterns")) toggleLayer("patterns");
@@ -659,9 +679,13 @@ function renderPatterns() {
 }
 
 // ── 매매 신호 패널 ──
-function statText(st) {
+// 기준선(아무 날 샀을 때)을 같이 보여준다: 오르는 종목에선 하락 신호 뒤에도 평균이 +로 나오기 때문
+function statText(st, minSample = 5) {
   if (!st || !st.n20) return "이 종목에선 과거 기록이 부족해요.";
-  return `과거 ${st.count}번 · 20거래일 뒤 평균 ${st.avg20 >= 0 ? "+" : ""}${st.avg20.toFixed(1)}% · 오른 경우 ${st.up20}/${st.n20}`;
+  if (st.n20 < minSample) return `이 종목에선 과거 ${st.n20}번뿐이라 숫자로 판단하기 어려워요.`;
+  const r = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+  const base = st.base20 == null ? "" : ` (아무 날 샀을 때 ${r(st.base20)})`;
+  return `과거 ${st.count}번 · 20거래일 뒤 평균 ${r(st.avg20)}${base} · 오른 경우 ${st.up20}/${st.n20}`;
 }
 
 function renderSignals() {
@@ -680,7 +704,7 @@ function renderSignals() {
     const li = el("li", { class: e.dir },
       el("b", {}, e.name, isNew ? el("span", { class: "new" }, "최신") : "", el("span", { class: "t" }, e.time)),
       el("p", {}, `${e.note ? `${e.note}. ` : ""}${cat.desc || ""}`),
-      el("p", { class: "stat" }, statText(sig.stats[e.type])));
+      el("p", { class: "stat" }, statText(sig.stats[e.type], sig.min_sample)));
     li.addEventListener("click", () => focusDate(e.time));
     return li;
   }));
@@ -1053,7 +1077,7 @@ function renderSide() {
     });
   }
   // 차트에 꺼둔 레이어의 설명 카드는 숨긴다 (추세/RSI 요약은 항상)
-  const layerOf = { support: "levels", resistance: "levels", alert: "levels", trendline: "trend", channel: "channel", holding: "avg" };
+  const layerOf = { support: "levels", resistance: "levels", alert: "levels", trendline: "trend", channel: "channel", holding: "avg" };   // 52주 최고·최저 카드는 항상
   const visible = cards.filter((c) => !layerOf[c.kind] || on(layerOf[c.kind]));
   $("#insights").replaceChildren(...visible.map((i) =>
     el("div", { class: `card ${i.kind}` }, el("b", {}, i.title), el("p", {}, i.body))));
@@ -1100,7 +1124,8 @@ function renderAutoLines() {
       const row = el("li", { class: `al${focused ? " focus" : ""}${shown ? "" : " off"}` },
         el("div", { class: "al-main" },
           el("i", { style: `background:${color}` }),
-          el("span", { class: "nm" }, it.name, it.rank > 1 ? el("span", { class: "rk" }, `후보${it.rank}`) : ""),
+          el("span", { class: "nm" }, it.name, it.rank > 1 ? el("span", { class: "rk" }, `후보${it.rank}`) : "",
+            it.tentative ? el("span", { class: "rk", title: "두 점만 이은 선. 세 번째로 닿아야 확인된 추세선으로 봐요" }, "임시") : ""),
           el("span", { class: "px" }, `${fmt(it.now)} ${dist >= 0 ? "+" : ""}${dist.toFixed(1)}%`)),
         focused ? el("p", { class: "why" }, `차트의 점들이 이 선이 닿은 곳이에요. ${it.why}`) : "",
         el("div", { class: "al-act" }, eye, use));

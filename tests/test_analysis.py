@@ -159,3 +159,53 @@ def test_normalize_candles_sorts_and_parses():
     out = normalize_candles(raw)
     assert [c["time"] for c in out] == ["2026-03-25", "2026-03-26"]
     assert out[1]["close"] == 2.5
+
+
+def _rows(closes):
+    t = pd.date_range("2025-01-01", periods=len(closes), freq="B")
+    return [{"time": t[i].date().isoformat(), "open": c, "high": c + 0.5, "low": c - 0.5, "close": c, "volume": 1e6}
+            for i, c in enumerate(closes)]
+
+
+def _breakout_above_old_ceiling():
+    """100~120 박스(고점 120 근처에서 여러 번 막힘) 뒤 130 위로 올라온 차트."""
+    box = [110 + 10 * np.sin(i / 6) for i in range(150)]
+    return _rows(box + list(np.linspace(box[-1], 135, 20)) + [135, 134, 133, 132, 131, 130.5, 130])
+
+
+def test_support_made_of_old_highs_is_described_as_role_reversal():
+    from backend.analysis import level_history
+    lv = find_levels(pd.DataFrame(_breakout_above_old_ceiling()))
+    s = lv["support"][0]
+    assert abs(s["price"] - 120.5) < 1.5 and s["highs"] >= 2 and s["lows"] == 0
+    text = level_history(s, "support")
+    assert "상승이 막혔던" in text and "저항→지지" in text and "하락이 멈" not in text
+
+
+def test_single_prior_high_fills_empty_resistance():
+    # 위쪽엔 한 번 찍은 고점(135.5)뿐 → '저항선 없음' 대신 그 전고점을 보여준다
+    lv = find_levels(pd.DataFrame(_breakout_above_old_ceiling()))
+    assert len(lv["resistance"]) == 1 and lv["resistance"][0]["touches"] == 1
+    assert abs(lv["resistance"][0]["price"] - 135.5) < 0.1
+
+
+def test_extremes_and_no_overclaim_at_period_high():
+    rows = _rows(list(np.linspace(100, 200, 300)))          # 계속 올라 마지막 봉이 최고가
+    out = analyze(rows, lambda p: f"{p:.2f}")
+    assert out["extremes"]["label"] == "52주" and out["extremes"]["high"]["price"] == 200.5
+    none = next(c for c in out["insights"] if c["title"] == "위쪽 저항선 없음")
+    assert "300일 안에서는" in none["body"] and "더 오래된 고점" in none["body"]
+
+
+def test_channel_break_wording_depends_on_direction():
+    from backend.analysis import channel_insight
+    ch = {"label": "하락 채널", "position_pct": 120.0, "lower": 90.0, "upper": 100.0, "width_pct": 11.1}
+    fmt = lambda p: f"{p:.0f}"
+    assert "내리던 흐름이 깨졌다" in channel_insight(ch, fmt)["body"]
+    assert "내리는 속도가 더 빨라졌다" in channel_insight({**ch, "position_pct": -20.0}, fmt)["body"]
+    assert "오르던 흐름이 깨졌다" in channel_insight({**ch, "label": "상승 채널", "position_pct": -20.0}, fmt)["body"]
+
+
+def test_two_point_trendline_is_tentative():
+    for tl in find_trendlines(pd.DataFrame(demo_candles("AAPL", "US"))):
+        assert tl["tentative"] == (tl["touches"] < 3)

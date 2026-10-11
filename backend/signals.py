@@ -2,7 +2,8 @@
 
 - '확정'만 다룬다: 장중인 오늘 봉은 빼고 계산 (confirmed_candles).
 - 각 신호는 '그 일이 처음 일어난 날' 하나의 이벤트. 상태(과열 중 등)가 아니다.
-- 과거 성적: 같은 종목에서 그 신호가 난 뒤 5·20거래일 수익률. 추천이 아니라 과거 통계.
+- 과거 성적: 같은 종목에서 그 신호가 난 뒤 5·20거래일 수익률 + 같은 기간 '아무 날' 수익률(기준선).
+  기준선이 없으면 오르는 종목에선 하락 신호 뒤에도 다 오른 것처럼 보인다. 추천이 아니라 과거 통계.
 """
 from __future__ import annotations
 from datetime import datetime, time as dtime
@@ -33,9 +34,9 @@ CATALOG: dict[str, dict] = {
     "macd_down":   {"name": "MACD 하향 교차", "dir": "bear", "short": "MACD↓",
                     "desc": "MACD선이 시그널선을 아래로 뚫었어요. 오르는 힘이 약해지기 시작했다고 보는 사람이 많아요. 아주 자주 나오는 신호예요."},
     "high52":      {"name": "52주 신고가", "dir": "bull", "short": "신고가",
-                    "desc": "종가가 최근 1년 중 가장 높아요. 위에 막힐 가격대(저항)가 없는 상태예요."},
+                    "desc": "종가가 최근 1년 중 가장 높아요. 최근 1년 안에는 위에 막혔던 가격대가 없다는 뜻이에요 (더 오래된 고점은 있을 수 있어요)."},
     "low52":       {"name": "52주 신저가", "dir": "bear", "short": "신저가",
-                    "desc": "종가가 최근 1년 중 가장 낮아요. 아래에 받쳐줄 가격대(지지)가 없는 상태예요."},
+                    "desc": "종가가 최근 1년 중 가장 낮아요. 최근 1년 안에는 아래에 받쳐준 가격대가 없다는 뜻이에요 (더 오래된 저점은 있을 수 있어요)."},
     "vol_spike":   {"name": "거래량 급증", "dir": "info", "short": "거래량",
                     "desc": "거래량이 최근 20일 평균의 2배를 넘었어요. 큰 뉴스나 큰손 매매가 있었을 수 있어요. 그날 캔들 색이 방향이에요."},
     "tl_up":       {"name": "추세선 위로 돌파", "dir": "bull", "short": "추세↑",
@@ -43,12 +44,12 @@ CATALOG: dict[str, dict] = {
     "tl_down":     {"name": "추세선 아래로 이탈", "dir": "bear", "short": "추세↓",
                     "desc": "저점들을 이은 추세선(지지) 아래로 종가가 내려갔어요. 상승 추세선이었다면 오르던 흐름이 깨졌다는 신호로 많이 봐요."},
     "ch_up":       {"name": "채널 천장 돌파", "dir": "bull", "short": "채널↑",
-                    "desc": "평행 채널의 천장을 종가로 뚫고 올라갔어요. 평소보다 오르는 힘이 세다는 뜻이에요."},
+                    "desc": "평행 채널의 천장을 종가로 뚫고 올라갔어요. 상승 채널이면 오르는 속도가 빨라진 것으로, 하락 채널이면 내리던 흐름이 깨진 것으로 많이 봐요."},
     "ch_down":     {"name": "채널 바닥 이탈", "dir": "bear", "short": "채널↓",
-                    "desc": "평행 채널의 바닥 아래로 종가가 내려갔어요. 지금까지의 통로가 깨졌다는 뜻이에요."},
+                    "desc": "평행 채널의 바닥 아래로 종가가 내려갔어요. 상승 채널이면 오르던 흐름이 깨진 것으로, 하락 채널이면 내리는 속도가 빨라진 것으로 많이 봐요."},
 }
 # 차트 패턴 돌파 (backend.patterns) 도 같은 신호 틀로: 마커·과거 성적·알림
-CATALOG.update({pid: {**p, "dir": "bull"} for pid, p in chart_patterns.CATALOG.items()})
+CATALOG.update({pid: {"dir": "bull", **p} for pid, p in chart_patterns.CATALOG.items()})   # 하락형은 dir=bear
 
 DEFAULT_ALERT_TYPES = ["gc", "dc", "gc_long", "dc_long", "high52", "low52", "tl_up", "tl_down", "ch_up", "ch_down"]
 
@@ -58,6 +59,7 @@ _SESSION = {  # 정규장 마감 (+10분 여유) — 이 시각 전의 '오늘 �
 }
 _PATTERN_LOOKBACK = 90     # 추세선·채널 이탈은 최근 이만큼만 되짚는다 (봉마다 추세선을 다시 구해서 무겁다)
 _DEDUPE_BARS = 10          # 같은 신호가 이 봉 수 안에 또 나오면 첫 번째만
+MIN_SAMPLE = 5             # 과거 성적: 이보다 적게 나온 신호는 평균을 보여주지 않는다 (한두 번은 우연)
 
 
 def market_today(market: str) -> str:
@@ -174,6 +176,11 @@ def _dedupe(events: list[tuple[int, str, str]]) -> list[tuple[int, str, str]]:
 def _stats(df: pd.DataFrame, events: list[tuple[int, str, str]]) -> dict[str, dict]:
     close = df["close"].to_numpy()
     n = len(close)
+    # 기준선: 이 종목을 아무 날에 샀을 때의 h거래일 수익률 (신호가 없어도 나오는 수익)
+    base = {}
+    for h in (5, 20):
+        every = close[h:] / close[:-h] - 1 if n > h else np.array([])
+        base[h] = (round(float(every.mean()) * 100, 2), round(float((every > 0).mean()) * 100)) if len(every) else (None, None)
     out: dict[str, dict] = {}
     for sid in CATALOG:
         idx = [i for i, s, _ in events if s == sid]
@@ -183,6 +190,7 @@ def _stats(df: pd.DataFrame, events: list[tuple[int, str, str]]) -> dict[str, di
             res[f"n{h}"] = len(rets)
             res[f"avg{h}"] = round(float(np.mean(rets)) * 100, 2) if rets else None
             res[f"up{h}"] = int(sum(r > 0 for r in rets))
+            res[f"base{h}"], res[f"base_up{h}"] = base[h]
         out[sid] = res
     return out
 
@@ -195,6 +203,7 @@ def detect(candles: list[dict], market: str, now: datetime | None = None) -> dic
     df = analysis.to_frame(conf)
     events = _dedupe(_indicator_events(df) + _pattern_events(df) + chart_patterns.events(df))
     return {
+        "min_sample": MIN_SAMPLE,
         "events": [{
             "time": df["time"].iloc[i], "type": sid, "dir": CATALOG[sid]["dir"],
             "name": CATALOG[sid]["name"], "short": CATALOG[sid]["short"], "note": note,
