@@ -297,7 +297,7 @@ button.ghost.on { border-color: var(--accent); color: var(--accent); }
 .ev-signal-bear { border-left-color: var(--down) !important; }
 .ev-signal-info { border-left-color: #8b95a1 !important; }
 
-/* 매매 신호 */
+/* 차트 신호 */
 #signals { list-style: none; padding: 0; margin: 0; max-height: 320px; overflow-y: auto; }
 #signals li { padding: 8px 10px; margin-bottom: 6px; background: var(--bg); border-radius: 0 8px 8px 0;
               border-left: 3px solid #8b95a1; font-size: 13px; cursor: pointer; }

@@ -16,10 +16,11 @@ const LAYERS = {
   volume: { name: "거래량", desc: "그날 거래된 주식 수. 큰 움직임에 거래량이 같이 터지면 신뢰도가 높다고 봐요." },
   news: { name: "뉴스 마커", desc: "뉴스가 나온 날에 점을 찍어요. 빨강=호재, 파랑=악재, 회색=중립." },
   patterns: { name: "차트 패턴", desc: "상승형(이중 바닥·역헤드앤숄더·상승 삼각수렴·상승 깃발형·컵앤핸들)과 하락형(쌍봉·헤드앤숄더·하락 삼각수렴) 모양을 찾아 노란 선으로 그려요. 점선은 돌파(이탈)선, 가는 점선은 무효선. 실제로 맞는지는 '차트 패턴' 탭의 검증 숫자를 같이 보세요." },
-  signals: { name: "매매 신호", desc: "골든크로스·추세선 돌파·신고가 같은 신호가 난 날에 화살표를 찍어요. 장 마감 종가로 확정된 것만. 종류는 오른쪽 '매매 신호 설정'에서 골라요." },
+  signals: { name: "차트 신호", desc: "추세선 돌파·신고가·패턴 돌파 같은 일이 생긴 날에 화살표를 찍어요 (빨강=상승 쪽, 파랑=하락 쪽). 사라·팔라는 뜻이 아니에요. 이름은 최근 3개에만 붙고, 화살표에 마우스를 올리면 설명이 떠요. 종류는 '신호 설정'에서 골라요." },
 };
-// 차트에 기본으로 표시할 신호 (MACD·거래량은 자주 나와서 기본은 끔)
-const DEFAULT_SIG_SHOW = ["gc", "dc", "gc_long", "dc_long", "rsi_os_exit", "rsi_ob_exit", "high52", "low52", "tl_up", "tl_down", "ch_up", "ch_down",
+// 차트에 기본으로 표시할 신호: 드물게 나오는 큰 신호만. 자주 나오는 것(MACD·거래량·RSI·20·60일 크로스)은 '신호 설정'에서 켠다
+const FREQUENT_SIGNALS = ["rsi_os_exit", "rsi_ob_exit", "gc", "dc"];
+const DEFAULT_SIG_SHOW = ["gc_long", "dc_long", "high52", "low52", "tl_up", "tl_down", "ch_up", "ch_down",
   "pat_db", "pat_ihs", "pat_asc", "pat_flag", "pat_cup", "pat_dt", "pat_hs", "pat_desc"];
 const BEAR_PATTERNS = ["pat_dt", "pat_hs", "pat_desc"];
 const DEFAULT_LAYERS = { levels: { count: 1 }, trend: {}, avg: {}, drawings: {}, volume: {}, patterns: {} };
@@ -51,6 +52,12 @@ if (!store.load("stocking.sigShow.bear", false)) {
   state.sigShow = [...new Set([...state.sigShow, ...BEAR_PATTERNS])];
   store.save("stocking.sigShow", state.sigShow);
   store.save("stocking.sigShow.bear", true);
+}
+// 자주 나오는 신호를 기본에서 뺀 것도 예전 설정에 한 번만 반영 (그 뒤 사용자가 다시 켜면 그대로 둔다)
+if (!store.load("stocking.sigShow.quiet", false)) {
+  state.sigShow = state.sigShow.filter((t) => !FREQUENT_SIGNALS.includes(t));
+  store.save("stocking.sigShow", state.sigShow);
+  store.save("stocking.sigShow.quiet", true);
 }
 
 // ── 차트 생성 ──
@@ -200,7 +207,7 @@ function drawingLines(d) {
 
 // 층 채널: 기준선(p1→p2)과 평행선(p3) 사이 폭을 그대로 위아래로 복사하고, 층마다 4등분 점선을 넣는다.
 // 반환: { layer(현재가가 있는 층: 0 = 기준선~평행선), pos(그 층 안 위치 0~1), lines: [{ points, quarter }] } — 기준선·평행선 자체는 뺀 나머지
-const MAX_LAYERS = 8;
+const MAX_LAYERS = 8;      // 가격이 지나간 범위가 이보다 많은 층에 걸치면(=폭이 너무 좁으면) 층을 쌓지 않는다
 function channelLayers(d) {
   const cs = state.data.candles, times = cs.map((c) => c.time);
   const i1 = times.indexOf(d.p1.time), i2 = times.indexOf(d.p2?.time), i3 = times.indexOf(d.p3?.time);
@@ -216,16 +223,14 @@ function channelLayers(d) {
     lo = Math.min(lo, u); hi = Math.max(hi, u);
   }
   const u = (cs[last].close - at(last)) / off;
-  let k0 = Math.floor(lo), k1 = Math.ceil(hi);
-  if (k1 - k0 > MAX_LAYERS) {                            // 층이 너무 많으면 현재가 주변만
-    k0 = Math.max(k0, Math.floor(u) - MAX_LAYERS / 2);
-    k1 = Math.min(k1, k0 + MAX_LAYERS);
-  }
+  const k0 = Math.floor(lo), k1 = Math.ceil(hi);
+  // 폭이 좁은 채널은 층을 쌓으면 선 수십 개가 차트를 덮는다 → 기준선·평행선만 그린다
+  if (k1 - k0 > MAX_LAYERS) return { layer: Math.floor(u), pos: u - Math.floor(u), lines: [], narrow: true };
   const seg = (k) => [{ time: times[i1], value: at(i1) + k * off }, { time: times[last], value: at(last) + k * off }];
   const lines = [];
   for (let k = k0; k <= k1; k++) {
     if (k !== 0 && k !== 1) lines.push({ points: seg(k), quarter: false });
-    if (k < k1) for (const q of [0.25, 0.5, 0.75]) lines.push({ points: seg(k + q), quarter: true });
+    if (k < k1) for (const q of k1 - k0 > 5 ? [0.5] : [0.25, 0.5, 0.75]) lines.push({ points: seg(k + q), quarter: true });   // 층이 많으면 가운데 선만
   }
   return { layer: Math.floor(u), pos: u - Math.floor(u), lines: lines.filter((ln) => ln.points.every((pt) => pt.value > 0)) };
 }
@@ -675,12 +680,13 @@ function renderDrawings() {
     const where = drawingLines(d).map((ln) => `${fmt(ln.now)} (${((ln.now / last - 1) * 100).toFixed(1)}%)`).join(" / ") || "-";
     // 채널: 현재가가 몇 층에 있는지 (1층 = 기준선~평행선 사이)
     const ly = d.type === "channel" ? channelLayers(d) : null;
-    const floor = !ly ? "" : ` · 현재가 ${ly.layer >= 0 ? `${ly.layer + 1}층` : `기준선 밖 ${-ly.layer}층`}의 ${(ly.pos * 100).toFixed(0)}% 위치`;
+    const floor = !ly ? "" : ly.narrow ? " · 폭이 좁아 층은 안 그려요"
+      : ` · 현재가 ${ly.layer >= 0 ? `${ly.layer + 1}층` : `기준선 밖 ${-ly.layer}층`}의 ${(ly.pos * 100).toFixed(0)}% 위치`;
     return el("li", {}, el("span", {}, `${name} · 오늘 ${where}${floor}`), x);
   }));
 }
 
-// ── 차트 마커 (뉴스 + 매매 신호) ──
+// ── 차트 마커 (뉴스 + 차트 신호) ──
 function newsMarkers() {
   if (!on("news") || !state.news.length || !isDaily()) return [];
   const days = state.data.candles.map((c) => c.time);
@@ -710,12 +716,14 @@ function signalMarkers() {
     const k = `${e.time}|${dir}`;
     (groups.get(k) || groups.set(k, []).get(k)).push(e);
   }
-  // 글자는 짧게: 신호 하나면 짧은 이름, 여러 개면 개수만. 자세한 건 마우스를 올리면 설명 상자에
+  // 글자는 가장 최근 신호가 난 3일에만. 나머지는 화살표만 (글자가 겹쳐 차트를 가렸다) — 자세한 건 마우스를 올리면 설명 상자에
+  const named = new Set([...new Set([...groups.keys()].map((k) => k.split("|")[0]))].sort().slice(-3));
   return [...groups.entries()].map(([k, list]) => {
     const [time, dir] = k.split("|");
     const bull = dir === "bull";
+    const text = !named.has(time) ? "" : list.length > 1 ? `${list[0].short} +${list.length - 1}` : list[0].short;
     return { time, position: bull ? "belowBar" : "aboveBar", shape: bull ? "arrowUp" : "arrowDown",
-             color: bull ? css("--up") : css("--down"), size: 0.9, text: list.length > 1 ? `${list.length}` : list[0].short };
+             color: bull ? css("--up") : css("--down"), size: text ? 0.9 : 0.6, text };
   });
 }
 
@@ -763,7 +771,7 @@ function renderPatterns() {
   const pats = state.data.patterns || [];
   const evs = state.data.pattern_evidence || {};
   if (!pats.length) {
-    return list.replaceChildren(el("li", { class: "muted" }, "지금 형성 중이거나 최근 10봉 안에 돌파·이탈한 패턴이 없어요. 과거 기록은 '매매 신호' 탭에 있어요."));
+    return list.replaceChildren(el("li", { class: "muted" }, "지금 형성 중이거나 최근 10봉 안에 돌파·이탈한 패턴이 없어요. 과거 기록은 '차트 신호' 탭에 있어요."));
   }
   list.replaceChildren(...pats.map((p) => {
     const focused = state.patFocus === p.id;
@@ -786,7 +794,7 @@ function renderPatterns() {
   }));
 }
 
-// ── 매매 신호 패널 ──
+// ── 차트 신호 패널 ──
 // 기준선(아무 날 샀을 때)을 같이 보여준다: 오르는 종목에선 하락 신호 뒤에도 평균이 +로 나오기 때문
 function statText(st, minSample = 5) {
   if (!st || !st.n20) return "이 종목에선 과거 기록이 부족해요.";
@@ -801,7 +809,7 @@ function renderSignals() {
   const sig = state.data?.signals;
   if (!sig) {
     $("#sig-through").textContent = "";
-    return list.replaceChildren(el("li", { class: "muted" }, "매매 신호는 장 마감 확정 일봉 기준이라 '일' 봉에서 보여요"));
+    return list.replaceChildren(el("li", { class: "muted" }, "차트 신호는 장 마감 확정 일봉 기준이라 '일' 봉에서 보여요"));
   }
   $("#sig-through").textContent = sig.confirmed_through ? `${sig.confirmed_through.slice(5)} 종가까지 확정` : "";
   const items = shownSignals().slice(-10).reverse();
@@ -1504,7 +1512,7 @@ async function initAlerts() {
   const a = status.alert;
   $("#alert-status").textContent = status.toss
     ? `관심종목을 ${a.poll_sec}초마다 확인해요. 지지/저항선·추세선·내가 그은 선까지 ${a.near_pct}% 이내로 오거나 넘으면, `
-      + "그리고 장 마감 후 매매 신호가 확정되면 알려줘요."
+      + "그리고 장 마감 후 차트 신호가 확정되면 알려줘요."
       + (status.telegram ? " 텔레그램 전송 켜짐." : "")
     : "토스 API 키가 있어야 알림이 동작해요.";
   const items = (await (await fetch("/api/alerts?limit=30")).json()).items;

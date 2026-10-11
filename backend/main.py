@@ -313,7 +313,7 @@ def chart(symbol: str, interval: str = "1d"):
         "prev_close": prev_close,
         "candles": candles,
         **analysis.analyze(candles, price_formatter(currency), bars.UNIT_WORD[interval]),
-        # 매매 신호는 '장 마감 확정 일봉' 기준이라 일봉에서만
+        # 차트 신호는 '장 마감 확정 일봉' 기준이라 일봉에서만
         "signals": signals_for(symbol, daily) if interval == "1d" else None,
         # 차트 패턴(형성 중·최근 돌파)도 일봉 기준 + 검증 숫자
         "patterns": cached(f"pat:{symbol}:{daily[-1]['time']}:{daily[-1]['close']}", 120,

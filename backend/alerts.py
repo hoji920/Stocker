@@ -133,7 +133,7 @@ class Monitor:
     def __init__(self, settings: Settings, store: Store, load_levels, fetch_prices, formatter, load_signals=None,
                  check_move=None):
         """load_levels(symbol) -> (name, currency, levels) / fetch_prices(symbols) -> {symbol: price}
-        load_signals(symbol) -> [알림 이벤트] : 가장 최근 확정 봉에서 새로 난 매매 신호 (key 포함)."""
+        load_signals(symbol) -> [알림 이벤트] : 가장 최근 확정 봉에서 새로 난 차트 신호 (key 포함)."""
         self.settings = settings
         self.store = store
         self.load_levels = load_levels
@@ -178,7 +178,7 @@ class Monitor:
         prices = await asyncio.to_thread(self.fetch_prices, symbols)
         new_events = []
         for symbol in symbols:
-            # 확정 매매 신호: key 에 봉 날짜가 들어 있어서, 재시작해도 알림 기록에 있으면 다시 안 보낸다
+            # 확정 차트 신호: key 에 봉 날짜가 들어 있어서, 재시작해도 알림 기록에 있으면 다시 안 보낸다
             if self.load_signals:
                 try:
                     for ev in await asyncio.to_thread(self.load_signals, symbol):

@@ -1,4 +1,4 @@
-"""매매 신호 감지 (확정 봉 기준) + 과거 성적.
+"""차트 신호 감지 (확정 봉 기준) + 과거 성적.
 
 - '확정'만 다룬다: 장중인 오늘 봉은 빼고 계산 (confirmed_candles).
 - 각 신호는 '그 일이 처음 일어난 날' 하나의 이벤트. 상태(과열 중 등)가 아니다.
@@ -26,9 +26,9 @@ CATALOG: dict[str, dict] = {
     "dc_long":     {"name": "장기 데드크로스 (50·200일)", "dir": "bear", "short": "장기데드",
                     "desc": "50일선이 200일선을 아래로 뚫었어요. 장기 흐름이 꺾였다는 신호로 많이 봐요."},
     "rsi_os_exit": {"name": "RSI 과매도 탈출", "dir": "bull", "short": "RSI↑",
-                    "desc": "RSI가 30 아래(과매도)에 있다가 다시 30 위로 올라왔어요. 과매도 구간을 벗어났다는 뜻이에요."},
+                    "desc": "RSI가 30 아래(과매도)에 있다가 다시 30 위로 올라왔어요. 과매도 구간을 벗어났다는 뜻이에요. 한 번 나오면 RSI가 50까지 올라온 뒤에야 다시 나와요."},
     "rsi_ob_exit": {"name": "RSI 과열 해소", "dir": "bear", "short": "RSI↓",
-                    "desc": "RSI가 70 위(과열)에 있다가 다시 70 아래로 내려왔어요. 과열 구간을 벗어났다는 뜻이에요."},
+                    "desc": "RSI가 70 위(과열)에 있다가 다시 70 아래로 내려왔어요. 과열 구간을 벗어났다는 뜻이에요. 한 번 나오면 RSI가 50까지 식은 뒤에야 다시 나와요."},
     "macd_up":     {"name": "MACD 상향 교차", "dir": "bull", "short": "MACD↑",
                     "desc": "MACD선이 시그널선을 위로 뚫었어요. 오르는 힘이 세지기 시작했다고 보는 사람이 많아요. 아주 자주 나오는 신호예요."},
     "macd_down":   {"name": "MACD 하향 교차", "dir": "bear", "short": "MACD↓",
@@ -88,6 +88,23 @@ def _cross_down(a: pd.Series, b: pd.Series | float) -> pd.Series:
     return (a < b) & (a.shift() >= b_prev)
 
 
+def _rearmed_cross(v: pd.Series, level: float, up: bool, reset: float = 50.0) -> pd.Series:
+    """level 을 건넌 날. 단 한 번 신호가 나면 값이 reset(50)까지 돌아와야 다음 신호를 낸다.
+    강하게 오르는 종목은 RSI 가 70 근처를 오르내려서, 같은 과열 구간에서 '과열 해소'가 여러 번 찍혔다."""
+    a = v.to_numpy(dtype=float)
+    out = np.zeros(len(a), dtype=bool)
+    armed = True
+    for i in range(1, len(a)):
+        if np.isnan(a[i]) or np.isnan(a[i - 1]):
+            continue
+        crossed = a[i - 1] <= level < a[i] if up else a[i - 1] >= level > a[i]
+        if armed and crossed:
+            out[i], armed = True, False
+        if (a[i] >= reset) if up else (a[i] <= reset):
+            armed = True
+    return pd.Series(out, index=v.index)
+
+
 def _indicator_events(df: pd.DataFrame) -> list[tuple[int, str, str]]:
     """(봉 index, 신호 id, 추가 설명)"""
     c, v = df["close"], df["volume"]
@@ -105,8 +122,8 @@ def _indicator_events(df: pd.DataFrame) -> list[tuple[int, str, str]]:
     add(_cross_down(s50, s200), "dc_long")
 
     r = analysis.rsi(c)
-    add(_cross_up(r, 30.0), "rsi_os_exit")
-    add(_cross_down(r, 70.0), "rsi_ob_exit")
+    add(_rearmed_cross(r, 30.0, up=True), "rsi_os_exit")
+    add(_rearmed_cross(r, 70.0, up=False), "rsi_ob_exit")
 
     ema = lambda s, n: s.ewm(span=n, adjust=False).mean()
     macd = ema(c, 12) - ema(c, 26)

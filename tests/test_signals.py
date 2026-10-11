@@ -64,3 +64,13 @@ def test_stats_carry_baseline_so_uptrend_is_not_credited_to_signal():
     st = r["stats"]["gc"]
     assert abs(st["base20"] - (1.003 ** 20 - 1) * 100) < 0.05 and st["base_up20"] == 100
     assert r["min_sample"] == signals.MIN_SAMPLE
+
+
+def test_rsi_exit_fires_once_per_overheated_stretch():
+    # RSI 가 70 을 세 번 오르내리지만 50 까지는 한 번만 식는다 → '과열 해소'는 두 번 (구간당 한 번)
+    r = pd.Series([60, 75, 68, 74, 66, 72, 69, 45, 60, 76, 65], dtype=float)
+    fired = list(np.flatnonzero(signals._rearmed_cross(r, 70.0, up=False).to_numpy()))
+    assert fired == [2, 10]
+    # 과매도 쪽도 같은 규칙
+    r = pd.Series([40, 25, 32, 28, 33, 55, 27, 31], dtype=float)
+    assert list(np.flatnonzero(signals._rearmed_cross(r, 30.0, up=True).to_numpy())) == [2, 7]
