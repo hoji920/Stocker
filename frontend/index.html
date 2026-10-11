@@ -40,13 +40,14 @@
           <div class="tools">
             <button id="draw-trend" class="ghost small" title="차트에서 시작점과 끝점을 차례로 클릭하세요. 오늘까지 자동으로 연장되고, 닿으면 알림이 와요.">✏️ 추세선 긋기</button>
             <button id="draw-hline" class="ghost small" title="차트에서 원하는 가격을 한 번 클릭하세요. 닿으면 알림이 와요.">― 수평선 긋기</button>
-            <button id="draw-channel" class="ghost small" title="① 기준 추세선 시작점 ② 끝점 ③ 반대편 고점(저점)을 차례로 클릭. 평행 채널이 그려지고 두 선 모두 알림 대상이에요.">⫽ 채널 긋기</button>
+            <button id="draw-channel" class="ghost small" title="누르면 찍을 자리 ①②③을 추천해줘요. 그대로 쓰거나, 기준선이 지날 저점 두 곳과 반대편 고점을 직접 클릭하세요. 같은 폭으로 위아래 층이 그려져요.">⫽ 채널 긋기</button>
             <div class="dropdown">
               <button id="add-ind" class="small" title="차트에 표시할 선·지표를 골라 넣고 빼요">+ 추가</button>
               <div id="ind-menu" hidden></div>
             </div>
           </div>
         </div>
+        <div id="channel-hint" hidden></div>
         <div class="chart-wrap">
           <div id="chart"></div>
           <div id="legend" title="선을 누르면 근거(닿은 지점)를 보여줘요"></div>

@@ -12,7 +12,7 @@ const LAYERS = {
   trend: { name: "자동 추세선", desc: "저점끼리 이은 상승 추세선, 고점끼리 이은 하락 추세선. 비스듬한 지지/저항이에요. 두 점만 이은 선은 '임시'로 표시해요 (세 번째로 닿아야 확인된 선)." },
   channel: { name: "추세 채널", desc: "추세선과, 그 반대편 끝에 평행하게 그은 선으로 만든 통로. 천장·바닥에서 막히거나 튕길 거라고 보는 사람이 많지만, 과거 검증에선 무작위로 그은 선과 차이가 없었어요." },
   avg: { name: "내 평단", desc: "토스 계좌에 보유 중인 종목이면 내 매수 평균가를 흰색 점선으로 보여줘요." },
-  drawings: { name: "내가 그은 선", desc: "✏️/― 버튼으로 직접 그은 선. 관심종목이면 닿을 때 알림이 와요." },
+  drawings: { name: "내가 그은 선", desc: "✏️/― 버튼으로 직접 그은 선. 채널은 같은 폭으로 위아래 층을 복사하고 층마다 4등분 점선을 넣어요. 관심종목이면 닿을 때 알림이 와요." },
   volume: { name: "거래량", desc: "그날 거래된 주식 수. 큰 움직임에 거래량이 같이 터지면 신뢰도가 높다고 봐요." },
   news: { name: "뉴스 마커", desc: "뉴스가 나온 날에 점을 찍어요. 빨강=호재, 파랑=악재, 회색=중립." },
   patterns: { name: "차트 패턴", desc: "상승형(이중 바닥·역헤드앤숄더·상승 삼각수렴·상승 깃발형·컵앤핸들)과 하락형(쌍봉·헤드앤숄더·하락 삼각수렴) 모양을 찾아 노란 선으로 그려요. 점선은 돌파(이탈)선, 가는 점선은 무효선. 실제로 맞는지는 '차트 패턴' 탭의 검증 숫자를 같이 보세요." },
@@ -120,7 +120,7 @@ function autoItems() {
     d.levels[kind].forEach((lv, i) => items.push({
       id: `lv-${kind}-${lv.price}`, group: "level", layer: "levels", kind, rank: i + 1,
       name: kind === "support" ? "지지선" : "저항선", why: lv.why, now: lv.price, price: lv.price,
-      touch_points: lv.touch_points, defaultVisible: i < count, nearest: i === 0,
+      touch_points: lv.touch_points, defaultVisible: i < count, nearest: i === 0, atPrice: lv.at_price,
     }));
   }
   for (const kind of ["resistance", "support"]) {
@@ -198,13 +198,59 @@ function drawingLines(d) {
           { label: "채널 평행선", points: seg(offset), now: seg(offset)[1].value }];
 }
 
+// 층 채널: 기준선(p1→p2)과 평행선(p3) 사이 폭을 그대로 위아래로 복사하고, 층마다 4등분 점선을 넣는다.
+// 반환: { layer(현재가가 있는 층: 0 = 기준선~평행선), pos(그 층 안 위치 0~1), lines: [{ points, quarter }] } — 기준선·평행선 자체는 뺀 나머지
+const MAX_LAYERS = 8;
+function channelLayers(d) {
+  const cs = state.data.candles, times = cs.map((c) => c.time);
+  const i1 = times.indexOf(d.p1.time), i2 = times.indexOf(d.p2?.time), i3 = times.indexOf(d.p3?.time);
+  if (i1 < 0 || i2 < 0 || i3 < 0 || i1 === i2) return null;
+  const slope = (d.p2.price - d.p1.price) / (i2 - i1);
+  const at = (i) => d.p1.price + slope * (i - i1);
+  const off = d.p3.price - at(i3);
+  if (Math.abs(off) < 1e-9) return null;
+  const last = cs.length - 1;
+  let lo = 0, hi = 1;                                   // 가격이 지나간 범위 (층 단위)
+  for (let i = i1; i <= last; i++) for (const v of [cs[i].low, cs[i].high]) {
+    const u = (v - at(i)) / off;
+    lo = Math.min(lo, u); hi = Math.max(hi, u);
+  }
+  const u = (cs[last].close - at(last)) / off;
+  let k0 = Math.floor(lo), k1 = Math.ceil(hi);
+  if (k1 - k0 > MAX_LAYERS) {                            // 층이 너무 많으면 현재가 주변만
+    k0 = Math.max(k0, Math.floor(u) - MAX_LAYERS / 2);
+    k1 = Math.min(k1, k0 + MAX_LAYERS);
+  }
+  const seg = (k) => [{ time: times[i1], value: at(i1) + k * off }, { time: times[last], value: at(last) + k * off }];
+  const lines = [];
+  for (let k = k0; k <= k1; k++) {
+    if (k !== 0 && k !== 1) lines.push({ points: seg(k), quarter: false });
+    if (k < k1) for (const q of [0.25, 0.5, 0.75]) lines.push({ points: seg(k + q), quarter: true });
+  }
+  return { layer: Math.floor(u), pos: u - Math.floor(u), lines: lines.filter((ln) => ln.points.every((pt) => pt.value > 0)) };
+}
+
+// '채널 긋기' 클릭을 가까운 봉의 고가·저가에 붙인다 (초보자가 꼬리 끝을 정확히 찍기 어렵다)
+function snapToBar(idx, price, x, y) {
+  const cs = state.data.candles;
+  let best = null;
+  for (let i = Math.max(0, idx - 3); i <= Math.min(cs.length - 1, idx + 3); i++) for (const v of [cs[i].high, cs[i].low]) {
+    const px = chart.timeScale().logicalToCoordinate(i), py = candles.priceToCoordinate(v);
+    if (px == null || py == null) continue;
+    const dist = Math.hypot(px - x, py - y);
+    if (dist <= 16 && (!best || dist < best.dist)) best = { dist, idx: i, price: v };
+  }
+  return best || { idx, price };
+}
+
 function renderTrendlines() {
   state.trendSeries.forEach((s) => chart.removeSeries(s));
   state.trendSeries = [];
   if (!state.data) return;
-  const line = (points, color, { width = 2, style = LW.LineStyle.Solid, title = "" } = {}) => {
+  // quiet: 가격축 자동 범위에 영향을 주지 않는 선 (층 선이 차트를 위아래로 벌려 놓지 않게)
+  const line = (points, color, { width = 2, style = LW.LineStyle.Solid, title = "", quiet = false } = {}) => {
     const s = chart.addLineSeries({ color, lineWidth: width, lineStyle: style, priceLineVisible: false,
-      lastValueVisible: !!title, title, crosshairMarkerVisible: false });
+      lastValueVisible: !!title, title, crosshairMarkerVisible: false, ...(quiet ? { autoscaleInfoProvider: () => null } : {}) });
     s.setData(points);
     state.trendSeries.push(s);
     return s;
@@ -253,10 +299,29 @@ function renderTrendlines() {
     dots.setData(pts);
     state.trendSeries.push(dots);
   }
-  if (!on("drawings") || !isDaily()) return renderLegend();      // 비스듬한 선은 날짜로 저장돼서 일봉에서만
-  state.drawings.filter((d) => d.type !== "horizontal").forEach((d) =>
-    drawingLines(d).forEach((ln, i) =>
-      line(ln.points, css("--accent"), { style: i ? LW.LineStyle.Dotted : LW.LineStyle.Solid })));
+  if (!isDaily()) return renderLegend();                           // 비스듬한 선은 날짜로 저장돼서 일봉에서만
+  const accent = css("--accent");
+  const drawChannel = (d, strong) => {
+    drawingLines(d).forEach((ln) => line(ln.points, accent + (strong ? "" : "b3"), { style: strong ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed }));
+    for (const ln of channelLayers(d)?.lines || []) line(ln.points, accent + (ln.quarter ? "40" : strong ? "a6" : "66"), {
+      width: 1, style: ln.quarter ? LW.LineStyle.Dotted : LW.LineStyle.Solid, quiet: true });
+  };
+  if (on("drawings")) for (const d of state.drawings.filter((w) => w.type !== "horizontal")) {
+    if (d.type === "channel") drawChannel(d, true);
+    else drawingLines(d).forEach((ln) => line(ln.points, accent));
+  }
+  // 채널 긋는 중: 추천 채널 미리보기 + 찍을 자리 ①②③
+  const sg = state.drawMode === "channel" && state.hint;
+  if (sg) {
+    drawChannel({ type: "channel", ...sg }, false);
+    [sg.p1, sg.p2, sg.p3].forEach((pt, i) => {
+      const dot = chart.addLineSeries({ color: accent, lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 6,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+      dot.setData([{ time: pt.time, value: pt.price }]);
+      dot.setMarkers([{ time: pt.time, position: "inBar", shape: "circle", color: accent, text: String(i + 1) }]);
+      state.trendSeries.push(dot);
+    });
+  }
   renderLegend();
 }
 
@@ -497,8 +562,46 @@ function setDrawMode(mode) {
   banner({
     trend: "추세선 시작점을 클릭하세요 (Esc 취소)",
     hline: "선을 그을 가격을 클릭하세요 (Esc 취소)",
-    channel: "채널 기준선 시작점을 클릭하세요 (1/3, Esc 취소)",
+    channel: "채널: 기준선이 지날 저점(또는 고점) 두 곳을 차례로 클릭하세요 (1/3). 클릭은 가까운 꼬리 끝에 달라붙어요. Esc 취소",
   }[state.drawMode] || (state.data?.demo ? demoText : ""));
+  renderChannelHint();
+}
+
+// '채널 긋기'를 누르면: 찍을 점 3개 추천을 차트에 미리 보여주고, 그대로 쓰거나 직접 찍게 한다
+function renderChannelHint() {
+  const box = $("#channel-hint");
+  const list = state.drawMode === "channel" && state.data && isDaily() ? state.data.channel_suggestions || [] : [];
+  state.hintIdx = Math.min(state.hintIdx || 0, Math.max(list.length - 1, 0));
+  state.hint = list[state.hintIdx] || null;
+  box.hidden = state.drawMode !== "channel";
+  if (box.hidden) { box.replaceChildren(); return renderTrendlines(); }
+  if (!state.hint) {
+    box.replaceChildren(el("span", { class: "muted" }, "이 차트에선 추천할 채널을 못 찾았어요. 저점 두 곳과 반대편 고점을 직접 찍어 보세요."));
+    return renderTrendlines();
+  }
+  const sg = state.hint;
+  const use = el("button", { class: "small" }, "추천대로 긋기");
+  use.addEventListener("click", () => {
+    if (!on("drawings")) toggleLayer("drawings");
+    saveDrawings([...state.drawings, { id: Date.now().toString(36), type: "channel", p1: sg.p1, p2: sg.p2, p3: sg.p3 }]);
+    setDrawMode(null);
+  });
+  const kids = [el("b", {}, `추천 채널 · ${sg.label}`),
+    el("span", {}, `차트의 ①②가 기준선, ③이 폭이에요. ${sg.why}${sg.layers ? ` 지금까지 가격이 ${sg.layers}층에 걸쳐 움직였어요.` : ""}`), use];
+  if (list.length > 1) {
+    const other = list[(state.hintIdx + 1) % list.length];
+    const swap = el("button", { class: "ghost small" }, `다른 추천: ${other.label}`);
+    swap.addEventListener("click", () => { state.hintIdx = (state.hintIdx + 1) % list.length; renderChannelHint(); });
+    kids.push(swap);
+  }
+  kids.push(el("span", { class: "muted" }, "마음에 안 들면 차트에서 직접 세 점을 찍으면 돼요."));
+  box.replaceChildren(...kids);
+  renderTrendlines();
+  // 추천한 세 점이 화면 왼쪽 밖에 있으면 안 보인다 → 가장 이른 점부터 오늘까지 보이게
+  const times = state.data.candles.map((c) => c.time);
+  const first = Math.min(...[sg.p1, sg.p2, sg.p3].map((pt) => times.indexOf(pt.time)).filter((i) => i >= 0));
+  const range = chart.timeScale().getVisibleLogicalRange();
+  if (Number.isFinite(first) && range && first < range.from + 2) chart.timeScale().setVisibleLogicalRange({ from: first - 8, to: times.length + 3 });
 }
 const demoText = "데모 데이터예요 (실제 시세 아님). .env 에 토스 API 키를 넣으면 실제 시세로 바뀌어요.";
 
@@ -516,9 +619,11 @@ $("#chart").addEventListener("click", (e) => {
   const logical = chart.timeScale().coordinateToLogical(x);
   if (logical == null) return;
   const cs = state.data.candles;
-  const idx = Math.max(0, Math.min(cs.length - 1, Math.round(logical)));
-  const price = candles.coordinateToPrice(y);
-  if (price == null) return;
+  const rawIdx = Math.max(0, Math.min(cs.length - 1, Math.round(logical)));
+  const rawPrice = candles.coordinateToPrice(y);
+  if (rawPrice == null) return;
+  // 비스듬한 선은 가까운 봉의 고가·저가에 달라붙는다 (수평선은 찍은 가격 그대로)
+  const { idx, price } = state.drawMode === "hline" ? { idx: rawIdx, price: rawPrice } : snapToBar(rawIdx, rawPrice, x, y);
   const pt = { time: cs[idx].time, price: Number(price.toFixed(4)) };
   const id = Date.now().toString(36);
   if (state.drawMode === "hline") {
@@ -568,7 +673,10 @@ function renderDrawings() {
     x.addEventListener("click", () => saveDrawings(state.drawings.filter((w) => w.id !== d.id)));
     const name = { trend: "추세선", horizontal: "수평선", channel: "채널" }[d.type];
     const where = drawingLines(d).map((ln) => `${fmt(ln.now)} (${((ln.now / last - 1) * 100).toFixed(1)}%)`).join(" / ") || "-";
-    return el("li", {}, el("span", {}, `${name} · 오늘 ${where}`), x);
+    // 채널: 현재가가 몇 층에 있는지 (1층 = 기준선~평행선 사이)
+    const ly = d.type === "channel" ? channelLayers(d) : null;
+    const floor = !ly ? "" : ` · 현재가 ${ly.layer >= 0 ? `${ly.layer + 1}층` : `기준선 밖 ${-ly.layer}층`}의 ${(ly.pos * 100).toFixed(0)}% 위치`;
+    return el("li", {}, el("span", {}, `${name} · 오늘 ${where}${floor}`), x);
   }));
 }
 
@@ -1125,7 +1233,8 @@ function renderAutoLines() {
         el("div", { class: "al-main" },
           el("i", { style: `background:${color}` }),
           el("span", { class: "nm" }, it.name, it.rank > 1 ? el("span", { class: "rk" }, `후보${it.rank}`) : "",
-            it.tentative ? el("span", { class: "rk", title: "두 점만 이은 선. 세 번째로 닿아야 확인된 추세선으로 봐요" }, "임시") : ""),
+            it.tentative ? el("span", { class: "rk", title: "두 점만 이은 선. 세 번째로 닿아야 확인된 추세선으로 봐요" }, "임시") : "",
+            it.atPrice ? el("span", { class: "rk", title: "현재가가 이 가격대에 걸쳐 있어요. 종가가 허용폭 넘게 벗어나야 뚫린 걸로 봐요" }, "걸쳐 있음") : ""),
           el("span", { class: "px" }, `${fmt(it.now)} ${dist >= 0 ? "+" : ""}${dist.toFixed(1)}%`)),
         focused ? el("p", { class: "why" }, `차트의 점들이 이 선이 닿은 곳이에요. ${it.why}`) : "",
         el("div", { class: "al-act" }, eye, use));
@@ -1251,6 +1360,7 @@ async function loadChart(symbol) {
   renderSide();
   renderIndicators();
   renderDrawings();
+  renderChannelHint();
   renderMarkers();
   renderSignals();
   renderAutoLines();

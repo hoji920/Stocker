@@ -320,6 +320,8 @@ def chart(symbol: str, interval: str = "1d"):
                            lambda: patterns.current(analysis.to_frame(daily), price_formatter(currency)))
                     if interval == "1d" else [],
         "pattern_evidence": cached("pat-evidence", 3600, patterns.evidence),
+        # '채널 긋기'에서 찍을 점 추천 (비스듬히 그은 선은 일봉 전용)
+        "channel_suggestions": analysis.channel_suggestions(analysis.to_frame(daily)) if interval == "1d" else [],
     }
 
 

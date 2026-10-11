@@ -33,8 +33,9 @@ def test_levels_sides_relative_to_close():
     candles = demo_candles("005930", "KR")
     last = candles[-1]["close"]
     lv = find_levels(pd.DataFrame(candles))
-    assert all(x["price"] < last for x in lv["support"])
-    assert all(x["price"] >= last for x in lv["resistance"])
+    # 현재가가 걸쳐 있는 가격대(at_price)는 몇 틱 반대편에 있어도 지금까지의 역할대로 둔다
+    assert all(x["price"] < last or x["at_price"] for x in lv["support"])
+    assert all(x["price"] >= last or x["at_price"] for x in lv["resistance"])
 
 
 def test_rsi_bounds():
@@ -209,3 +210,67 @@ def test_channel_break_wording_depends_on_direction():
 def test_two_point_trendline_is_tentative():
     for tl in find_trendlines(pd.DataFrame(demo_candles("AAPL", "US"))):
         assert tl["tentative"] == (tl["touches"] < 3)
+
+
+def _seg(a, b, n):
+    return list(np.linspace(a, b, n, endpoint=False))
+
+
+def test_zone_under_price_by_a_few_cents_stays_support():
+    # 저점이 100 근처에 세 번 모인 가격대. 현재가가 그보다 살짝 아래(99.9)여도 아직 뚫린 게 아니다
+    closes = [110.0] * 10
+    for _ in range(3):
+        closes += _seg(110, 100.5, 12) + _seg(100.5, 110, 12)
+    closes += _seg(110, 99.9, 12) + [99.9]
+    lv = find_levels(pd.DataFrame(_rows(closes)))
+    s = lv["support"][0]
+    assert s["at_price"] and s["lows"] >= 3 and abs(s["price"] - 100) < 1
+    assert all(abs(r["price"] - 100) > 1 for r in lv["resistance"])
+
+
+def test_year_old_price_zone_is_not_offered_as_support():
+    # 10 근처 박스권(2번 넘게 닿은 가격대가 많음) → 40 까지 급등 → 저점 30, 34 를 한 번씩 찍고 현재가 36
+    box = [10 + np.sin(i / 5) for i in range(150)]
+    closes = box + _seg(box[-1], 40, 30) + _seg(40, 30, 10) + _seg(30, 42, 12) + _seg(42, 34, 10) + _seg(34, 41, 10) + _seg(41, 36, 8) + [36.0]
+    lv = find_levels(pd.DataFrame(_rows(closes)))
+    assert lv["support"] and all(x["price"] > 25 for x in lv["support"])     # 10 근처 가격대는 후보에 없다
+    assert abs(lv["support"][0]["price"] - 33.5) < 1                         # 가장 가까운 전저점
+
+
+def test_trendline_far_from_price_is_dropped():
+    # 저점 46 → 29 를 이은 가파른 선을 오늘까지 늘이면 10 근처. 현재가는 40 안팎 → 후보에서 빠져야 한다
+    closes = ([60.0] * 80 + _seg(60, 46, 20) + _seg(46, 55, 20) + _seg(55, 29, 30) + _seg(29, 45, 20)
+              + [40 + 3 * np.sin(i / 3) for i in range(40)])
+    df = pd.DataFrame(_rows(closes))
+    last = closes[-1]
+    for side in trendline_candidates(df, k=20).values():          # 순위에서 밀린 후보까지 전부
+        assert all(abs(tl["price"] / last - 1) < 0.5 for tl in side)
+
+
+def test_channel_suggestion_from_trend_start():
+    from backend.analysis import channel_suggestions
+    # 계단식 상승: 100 에서 시작해 10 오르고 6 내리는 걸 반복 → 저점은 100, 104, 108 … 한 줄, 폭은 첫 계단 높이
+    closes = [110.0] * 10 + _seg(110, 100, 10)
+    for k in range(6):
+        closes += _seg(100 + 16 * k, 110 + 16 * k + 6 * k, 20) + _seg(110 + 16 * k + 6 * k, 100 + 16 * (k + 1), 12)
+    closes += [closes[-1] + 2, closes[-1] + 4]
+    df = pd.DataFrame(_rows(closes))
+    big = [s for s in channel_suggestions(df) if s["label"] == "큰 흐름"]
+    assert big and big[0]["direction"] == "up"
+    s = big[0]
+    assert s["p1"]["price"] == 99.5 and s["p1"]["time"] < s["p3"]["time"] <= s["p2"]["time"]   # 시작 저점 → 고점 → 두 번째 저점
+    assert s["p2"]["price"] > s["p1"]["price"] and 1.5 <= s["layers"] <= 8
+    # 기준선 아래로 내려간 종가가 없어야 한다
+    i1, i2 = (df.index[df.time == s[k]["time"]][0] for k in ("p1", "p2"))
+    slope = (s["p2"]["price"] - s["p1"]["price"]) / (i2 - i1)
+    assert all(c >= s["p1"]["price"] + slope * (i - i1) - 1 for i, c in enumerate(df.close) if i >= i1)
+
+
+def test_channel_layers_added_to_alert_lines_only_outside_base_channel():
+    times = [f"d{i}" for i in range(5)]
+    d = {"id": "c1", "type": "channel", "p1": {"time": "d0", "price": 10.0},
+         "p2": {"time": "d2", "price": 12.0}, "p3": {"time": "d1", "price": 15.0}}     # 오늘 기준선 14, 평행선 18, 폭 4
+    assert drawing_values(times, d, last=16.0) == [("내 채널 기준선", 14.0), ("내 채널 평행선", 18.0)]
+    assert drawing_values(times, d, last=27.0) == [("내 채널 기준선", 14.0), ("내 채널 평행선", 18.0),
+                                                 ("내 채널 층 선", 26.0), ("내 채널 층 선", 30.0)]
+    assert ("내 채널 층 선", 10.0) in drawing_values(times, d, last=12.0)
