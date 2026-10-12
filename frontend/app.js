@@ -852,6 +852,7 @@ function renderSignalSettings() {
     el("td", {}, check(state.sigShow.includes(id), (v) => {
       state.sigShow = v ? [...state.sigShow, id] : state.sigShow.filter((s) => s !== id);
       store.save("stocking.sigShow", state.sigShow);
+      if (v && !on("signals")) toggleLayer("signals");     // '차트 신호' 표시가 꺼져 있으면 체크해도 아무것도 안 보인다
       renderMarkers();
       renderSignals();
     })),
@@ -1291,7 +1292,20 @@ function renderNews(payload) {
   } else if (payload.items.length && !payload.summary_enabled) {
     box.append(el("p", { class: "muted" }, "OPENAI_API_KEY 를 넣으면 3줄 요약과 호재/악재 태그가 붙어요."));
   }
-  $("#news").replaceChildren(...payload.items.map((n) => {
+  // 미국 종목은 한국어 기사(네이버)와 영어 기사를 탭으로 나눈다. 고른 탭은 기억해둔다
+  const count = (lang) => payload.items.filter((n) => n.lang === lang).length;
+  const split = state.data.market !== "KR" && payload.items.length > 0;
+  let lang = store.load("stocking.newsLang", "ko");
+  if (split && !count(lang)) lang = lang === "ko" ? "en" : "ko";      // 고른 쪽이 비어 있으면 있는 쪽을 보여준다
+  if (split) {
+    box.append(el("div", { class: "seg news-seg" }, ...[["ko", "한국 뉴스"], ["en", "미국 뉴스"]].map(([id, label]) => {
+      const b = el("button", { class: id === lang ? "on" : "" }, `${label} ${count(id)}`);
+      b.addEventListener("click", () => { store.save("stocking.newsLang", id); renderNews(payload); });
+      return b;
+    })));
+  }
+  const items = split ? payload.items.filter((n) => n.lang === lang) : payload.items;
+  $("#news").replaceChildren(...items.map((n) => {
     const li = el("li", {},
       el("span", { class: `tag ${n.sentiment}` }, n.sentiment),
       el("a", { href: n.url, target: "_blank", rel: "noopener noreferrer" }, n.title),

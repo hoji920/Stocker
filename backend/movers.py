@@ -36,8 +36,8 @@ def recent_news(settings: Settings, market: str, symbol: str, name: str, days: i
         except Exception as error:      # 뉴스가 안 돼도 알림 자체는 보낸다
             print(f"[movers] {symbol} 뉴스 실패: {error}")
             return []
-    items = safe(news.fetch_us_news, settings, symbol, limit=10, days=days) if market == "US" \
-        else safe(news.fetch_kr_news, settings, name, limit=10)
+    items = safe(news.fetch_us_news, settings, symbol, limit=10, days=days) + safe(news.fetch_kr_news_about, settings, name, limit=5) \
+        if market == "US" else safe(news.fetch_kr_news, settings, name, limit=10)
     if underlying:
         if underlying.get("news_category"):
             items += safe(news.fetch_market_news, settings, underlying["news_category"], underlying["keywords"], limit=8, days=days)

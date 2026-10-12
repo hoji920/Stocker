@@ -101,6 +101,7 @@ button { white-space: nowrap; padding: 8px 12px; border: 0; border-radius: 8px; 
 .seg { display: inline-flex; background: var(--bg); padding: 2px; border-radius: 8px; }
 .seg button { background: transparent; color: var(--muted); padding: 4px 10px; font-size: 12px; border-radius: 6px; }
 .seg button.on { background: var(--panel); color: var(--text); font-weight: 600; }
+.news-seg { margin: 10px 0 4px; }
 .alert-actions { display: flex; gap: 6px; margin-bottom: 10px; }
 
 /* 종목 정보 탭 */
