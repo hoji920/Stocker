@@ -86,6 +86,15 @@ export const INDICATORS = {
                bands: [{ price: 70, label: "과열" }, { price: 30, label: "과매도" }] };
     },
   },
+  disparity: {
+    name: "이격도", type: "pane", params: { period: 20 },
+    desc: "지금 가격이 N일 이동평균선에서 얼마나 떨어져 있는지(종가 ÷ 이동평균 × 100). 100이면 평균선과 같은 값, 105면 평균보다 5% 위예요. 평균에서 너무 멀어지면 다시 가까워지는 경우가 많다고 보는데, '너무 먼' 기준은 종목마다 달라요(국내 대형주는 20일 기준 105·95를 많이 쓰지만 출렁임이 큰 종목은 훨씬 넓어요).",
+    calc: (cs, p) => {
+      const c = closeOf(cs), ma = smaArr(c, p.period);
+      return { lines: [{ label: `이격도 ${p.period}`, data: ma.map((m, i) => (m ? (c[i] / m) * 100 : null)) }],
+               bands: [{ price: 100, label: "평균선" }] };
+    },
+  },
   macd: {
     name: "MACD", type: "pane", params: { fast: 12, slow: 26, signal: 9 },
     desc: "단기 평균과 장기 평균의 차이. MACD선이 시그널선을 위로 뚫으면 상승 힘이 세지는 것으로, 아래로 뚫으면 약해지는 것으로 많이 봐요. 막대는 두 선의 차이예요.",

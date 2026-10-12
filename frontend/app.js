@@ -413,6 +413,10 @@ function renderIndicators() {
     ind.colors = [];
     let target = chart;
     let first = null;
+    // 아래 칸 지표는 칸이 따로라 색이 겹칠 일이 없다 → 칸마다 첫 색(보라)부터.
+    // (차트 위 지표와 순서를 같이 세면, 이동평균선 3줄 뒤에 넣은 이격도·RSI 가 회색으로 나온다)
+    let paneIdx = 0;
+    const pickColor = def.type === "pane" ? () => PALETTE[paneIdx++ % PALETTE.length] : nextColor;
     if (def.type === "pane") {
       const div = el("div", { class: "pane" }, el("span", { class: "pane-label" }, labelOf(ind)));
       $("#panes").append(div);
@@ -421,7 +425,7 @@ function renderIndicators() {
     }
     for (const [li, ln] of out.lines.entries()) {
       // 사용자가 고른 색(ind.color)이 있으면 첫 줄에, 볼린저밴드처럼 같은 계열 선들(상단·중심·하단)엔 전부
-      const auto = nextColor();
+      const auto = pickColor();
       const color = ind.color && (li === 0 || ind.key === "bb") ? ind.color : auto;
       ind.colors.push(color);
       // 차트 위 지표는 가격축 라벨 대신 범례로 (가격축이 복잡해지지 않게)
