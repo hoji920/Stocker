@@ -10,6 +10,7 @@ import json
 import mimetypes
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import date
 from functools import lru_cache
@@ -724,15 +725,153 @@ def _news_for_agent(symbol: str) -> dict:
     return {"summary": n.get("summary"), "items": [{k: it[k] for k in ("date", "source", "title", "sentiment")} for it in n["items"][:12]]}
 
 
+def scan_rules(scope: str = "watchlist") -> dict:
+    """관심종목·보유 종목 전체를 내 규칙에 대조 (계산만). 매수 조건 충족 → 구간이지만 미달 → 목표 근처 → 해당 없음 순."""
+    held = [h["symbol"] for h in holdings().get("items", [])] if scope in ("holdings", "all") else []
+    symbols = list(dict.fromkeys((store.watchlist() if scope in ("watchlist", "all") else []) + held))
+
+    def one(symbol: str) -> dict:
+        try:
+            r = check_rules(symbol)
+        except Exception as error:
+            return {"symbol": symbol, "error": getattr(error, "detail", type(error).__name__)}
+        pick = lambda k: {"price": r[k]["text"], "pct": round(r[k]["pct"], 1)} if r.get(k) else None
+        return {"symbol": symbol, "name": r["name"], "price": r["price_text"], "verdict": r["verdict"], "tone": r["tone"], "rr": r["rr"],
+                "support": pick("support"), "target": pick("target"), "stop": pick("stop"),
+                "holding_pl_pct": r["holding"]["pl_rate"] if r.get("holding") else None}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = list(pool.map(one, symbols))
+    order = {"buy": 0, "wait": 1, "sell": 2, "none": 3}
+    rows.sort(key=lambda r: (order.get(r.get("tone"), 9), -(r.get("rr") or 0)))
+    return {"scope": scope, "count": len(rows), "matched": sum(r.get("tone") == "buy" for r in rows), "items": rows,
+            "caution": "내가 정한 규칙에 맞는지만 본 거예요. 추천이 아니에요."}
+
+
+def backtest_rules(symbol: str, years: int = 3) -> dict:
+    """내 규칙을 이 종목의 과거에 적용했다면 (같은 규칙·같은 날이면 결과가 같아서 1시간 캐시)."""
+    symbol = symbol.strip().upper()
+    info, _, _ = load_stock(symbol)
+    if info.get("macro") or not get_settings().toss_enabled:
+        raise HTTPException(status_code=400, detail="토스에서 일봉을 받을 수 있는 종목만 과거에 대조할 수 있어요")
+    years = max(1, min(int(years), 5))
+    pages = (years * 252 + rules.LOOKBACK) // 200 + 1
+    candles = cached(f"days:{symbol}:{pages}", 3600, lambda: toss().daily_candles(symbol, pages))
+    mine = my_rules()
+    key = f"rule-bt:{symbol}:{years}:{candles[-1]['time']}:{json.dumps(mine, sort_keys=True)}"
+    return cached(key, 3600, lambda: rules.backtest(candles, mine, price_formatter(currency_of(info, symbol)), symbol,
+                                                    info.get("name", symbol), bars=years * 252))
+
+
+def portfolio() -> dict:
+    """보유 종목을 비중·오늘 손익 기여로 정리 (원화 기준)."""
+    h = holdings()
+    items, s = h.get("items", []), h.get("summary")
+    if not items or not s:
+        return {"items": [], "note": "보유 종목이 없거나 계좌를 조회하지 못했어요"}
+    total = sum(i["market_value_krw"] for i in items)
+    rows = [{"symbol": i["symbol"], "name": i["name"], "weight_pct": round(i["market_value_krw"] / total * 100, 1),
+             "value_krw": round(i["market_value_krw"]), "quantity": i["quantity"], "avg_price": i["avg_price"], "last_price": i["last_price"],
+             "pl_pct": i["pl_rate"], "pl_krw": round(i["pl_amount_krw"]), "today_pct": i["daily_rate"], "today_krw": round(i["daily_amount_krw"])}
+            for i in sorted(items, key=lambda i: i["market_value_krw"], reverse=True)]
+    return {"total_value_krw": round(s["market_value"]["krw"]), "total_pl_krw": round(s["profit"]["krw"]), "total_pl_pct": s["profit_rate"],
+            "today_krw": round(s["daily"]["krw"]), "today_pct": s["daily_rate"], "count": len(rows),
+            "top_weight": {"symbol": rows[0]["symbol"], "name": rows[0]["name"], "weight_pct": rows[0]["weight_pct"]},
+            "top3_weight_pct": round(sum(r["weight_pct"] for r in rows[:3]), 1), "items": rows}
+
+
+# 에이전트가 '대신 실행'하는 일은 전부 여기를 거친다: 에이전트는 제안(propose)만 하고, 사용자가 화면에서 확인을 눌러야 실행(act)된다
+RULE_NAMES = {"buy_support_atr": "지지 근처(ATR 배수)", "buy_channel_pct": "채널 하단(%)", "target_near_atr": "목표 근처(ATR 배수)",
+              "stop_atr": "손절 기준(ATR 배수)", "min_rr": "최소 손익비"}
+
+
+def normalize_action(kind: str, symbol: str | None = None, price: float | None = None, changes: dict | None = None) -> dict:
+    """제안·실행 양쪽에서 같은 검사를 한다. 반환 {kind, …, label}. 잘못된 요청은 ValueError."""
+    if kind == "rules_update":
+        cur, new = my_rules(), rules.clean({**my_rules(), **{k: v for k, v in (changes or {}).items() if k in rules.LIMITS}})
+        diff = {k: new[k] for k in rules.LIMITS if new[k] != cur[k]}
+        if not diff:
+            raise ValueError("바꿀 규칙 값이 없어요 (바꿀 수 있는 것: " + ", ".join(RULE_NAMES.values()) + ")")
+        return {"kind": kind, "changes": diff,
+                "label": "내 규칙 바꾸기: " + ", ".join(f"{RULE_NAMES[k]} {cur[k]:g} → {v:g}" for k, v in diff.items())}
+    if kind not in ("watch_add", "watch_remove", "alert_line"):
+        raise ValueError(f"할 수 없는 일이에요: {kind}")
+    symbol = (symbol or "").strip().upper()
+    try:
+        info, daily, _ = load_stock(symbol)
+    except HTTPException:
+        raise ValueError(f"종목을 찾지 못했어요: {symbol or '(없음)'}")
+    name = info.get("name", symbol)
+    if info.get("macro"):
+        raise ValueError("지수·금리 같은 지표는 관심종목·알림 대상이 아니에요")
+    if kind == "watch_add":
+        if symbol in store.watchlist():
+            raise ValueError(f"{name}은(는) 이미 관심종목이에요")
+        return {"kind": kind, "symbol": symbol, "label": f"{name}({symbol}) 관심종목에 추가"}
+    if kind == "watch_remove":
+        if symbol not in store.watchlist():
+            raise ValueError(f"{name}은(는) 관심종목이 아니에요")
+        return {"kind": kind, "symbol": symbol, "label": f"{name}({symbol}) 관심종목에서 빼기"}
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        raise ValueError("선을 그을 가격이 필요해요")
+    last = daily[-1]["close"]
+    if not 0.2 * last <= price <= 5 * last:
+        raise ValueError(f"현재가({last:g})와 너무 먼 가격이에요: {price:g}")
+    text = price_formatter(currency_of(info, symbol))(price)
+    extra = "" if symbol in store.watchlist() else " + 관심종목에 추가(알림은 관심종목만 와요)"
+    return {"kind": kind, "symbol": symbol, "price": price, "label": f"{name}({symbol}) {text}에 수평선 긋기 (닿으면 알림){extra}"}
+
+
+def propose_action(kind: str, symbol: str | None = None, price: float | None = None, changes: dict | None = None) -> dict:
+    try:
+        action = normalize_action(kind, symbol, price, changes)
+    except ValueError as error:
+        return {"error": str(error)}
+    return {"action": action, "status": "확인 버튼을 사용자에게 보여줬어요. 아직 실행되지 않았어요. 사용자가 확인을 눌러야 실행돼요."}
+
+
+class ActBody(BaseModel):
+    kind: str
+    symbol: str | None = None
+    price: float | None = None
+    changes: dict | None = None
+
+
+@app.post("/api/agent/act")
+def agent_act(body: ActBody):
+    """채팅에서 확인 버튼을 눌렀을 때만 온다. 할 수 있는 일은 관심종목·수평선(알림)·내 규칙뿐 (주문 없음)."""
+    try:
+        a = normalize_action(body.kind, body.symbol, body.price, body.changes)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if a["kind"] == "rules_update":
+        store.update_settings(rules=rules.clean({**my_rules(), **a["changes"]}))
+    elif a["kind"] == "watch_add":
+        store.set_watchlist(store.watchlist() + [a["symbol"]])
+    elif a["kind"] == "watch_remove":
+        store.set_watchlist([s for s in store.watchlist() if s != a["symbol"]])
+    else:
+        _, daily, _ = load_stock(a["symbol"])
+        line = {"id": f"agent-{int(time.time() * 1000)}", "type": "horizontal", "p1": {"time": daily[-1]["time"], "price": a["price"]},
+                "p2": None, "p3": None}
+        store.set_drawings(a["symbol"], (store.drawings(a["symbol"]) + [line])[:30])
+        if a["symbol"] not in store.watchlist():
+            store.set_watchlist(store.watchlist() + [a["symbol"]])
+    return {"done": a["label"], "kind": a["kind"], "symbol": a.get("symbol")}
+
+
 AGENT_TOOLS = {
     "check_my_rules": check_rules,
+    "scan_my_rules": scan_rules,
+    "backtest_my_rules": backtest_rules,
     "read_chart": _chart_summary,
     "get_news": _news_for_agent,
     "why_moved": lambda symbol: why(symbol),
     "market_brief": lambda: macro_summary().get("summary") or {"error": "시장 요약을 만들 수 없어요"},
-    "my_holdings": lambda: [{k: h[k] for k in ("symbol", "name", "quantity", "avg_price", "last_price", "pl_rate", "daily_rate")}
-                            for h in holdings().get("items", [])],
+    "my_portfolio": portfolio,
     "find_symbol": lambda query: search_stocks(query, 5)["items"],
+    "propose_action": propose_action,
 }
 
 

@@ -51,6 +51,22 @@ def test_holding_adds_numbers_from_my_average():
     assert round(r["holding"]["target_from_avg_pct"], 1) == 15.8 and round(r["holding"]["stop_from_avg_pct"], 1) == 3.2
 
 
+def test_backtest_buys_in_zone_and_sells_at_target_or_stop(monkeypatch):
+    # 분석 결과를 고정: 지지 99, 저항 110 → 종가 100 이면 매수 조건 충족 (목표 110, 손절 98)
+    monkeypatch.setattr(rules.analysis, "analyze", lambda sub, fmt, unit: {
+        "levels": {"support": [{"price": 99}], "resistance": [{"price": 110}]}, "trendlines": [], "channel": None})
+    bar = lambda i, close, high=None: {"time": f"d{i:03d}", "open": close, "high": high or close + 1, "low": close - 1, "close": close, "volume": 1.0}
+    flat = [bar(i, 100) for i in range(40)]
+    # 40: 매수(100) → 42: 고가 111 로 목표 110 도달(+10%) / 43: 다시 매수(100) → 45: 종가 97 로 손절(-3%)
+    candles = flat + [bar(40, 100), bar(41, 104), bar(42, 108, high=111), bar(43, 100), bar(44, 99), bar(45, 97), bar(46, 90)]
+    r = rules.backtest(candles, rules.DEFAULT, fmt, "TEST", "테스트", bars=7)
+    assert [(t["buy_date"], t["sell_date"], t["return_pct"], t["exit"]) for t in r["recent_trades"]] == [
+        ("d040", "d042", 10.0, "목표"), ("d043", "d045", -3.0, "손절")]
+    assert (r["trades"], r["wins"], r["win_rate_pct"], r["avg_return_pct"]) == (2, 1, 50.0, 3.5)
+    assert r["total_return_pct"] == 6.7                                          # 1.10 × 0.97
+    assert r["buy_and_hold_pct"] == -10.0 and "10번 미만" in r["caution"]          # 같은 기간 그냥 보유: 100 → 90
+
+
 def test_clean_clamps_bad_input():
     c = rules.clean({"min_rr": "abc", "buy_channel_pct": 999, "stop_atr": -3, "note": "x" * 900, "hack": 1})
     assert c["min_rr"] == rules.DEFAULT["min_rr"] and c["buy_channel_pct"] == 60 and c["stop_atr"] == 0.1

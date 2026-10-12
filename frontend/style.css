@@ -426,6 +426,12 @@ button.ghost.on { border-color: var(--accent); color: var(--accent); }
 .chat-msg.assistant { align-self: flex-start; background: var(--bg); border-bottom-left-radius: 4px; }
 .chat-li { padding-left: 12px; text-indent: -10px; } .chat-li::before { content: "· "; color: var(--muted); }
 .chat-meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
+.chat-action { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 12px; background: var(--panel); }
+.chat-action-label { font-weight: 600; margin-bottom: 8px; }
+.chat-action-btns { display: flex; gap: 6px; }
+.chat-action-error { margin-bottom: 8px; font-size: 12px; color: var(--up); }
+.chat-action.done { border-color: #12b886; color: #12b886; font-weight: 600; }
+.chat-action.cancelled { border-color: var(--line); color: var(--muted); }
 .chat-msg.pending { display: flex; gap: 4px; padding: 14px; }
 .chat-msg.pending i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: chat-dot 1s infinite ease-in-out; }
 .chat-msg.pending i:nth-child(2) { animation-delay: 0.15s; } .chat-msg.pending i:nth-child(3) { animation-delay: 0.3s; }

@@ -1601,18 +1601,61 @@ function richText(text) {
 }
 
 state.chat = [];
-const CHAT_STARTERS = ["지금 내 규칙으로 어때?", "목표가와 손절 기준 알려줘", "오늘 왜 움직였어?", "최근 뉴스 정리해줘", "지금 미국 시장 분위기는?"];
+const CHAT_STARTERS = ["지금 내 규칙으로 어때?", "관심종목 중 내 규칙에 맞는 건?", "내 규칙이 이 종목 과거엔 어땠어?", "내 계좌 비중 정리해줘",
+  "오늘 왜 움직였어?", "목표가에 알림 걸어줘"];
 function renderChat(pending) {
   const log = $("#chat-log");
   log.hidden = !state.chat.length && !pending;
   log.replaceChildren(...state.chat.map((m) => el("div", { class: `chat-msg ${m.role}` },
     ...(m.role === "user" ? [m.content] : richText(m.content)),
+    ...(m.actions || []).map(actionCard),
     m.meta ? el("div", { class: "chat-meta" }, m.meta) : "")),
     pending ? el("div", { class: "chat-msg assistant pending" }, el("i", {}), el("i", {}), el("i", {})) : "");
   $("#chat-starters").hidden = state.chat.length > 0;          // 대화가 시작되면 추천 질문은 접는다
   $("#chat-send").disabled = !!pending;
   log.lastElementChild?.scrollIntoView({ block: "nearest" });
 }
+// AI 가 '대신 해줄 일'은 여기 버튼으로만 실행된다 (관심종목·수평선 알림·내 규칙). 누르기 전에는 아무것도 바뀌지 않는다
+function actionCard(a) {
+  if (a.state === "done") return el("div", { class: "chat-action done" }, `✓ ${a.label}`);
+  if (a.state === "cancelled") return el("div", { class: "chat-action cancelled" }, `취소함 · ${a.label}`);
+  const ok = el("button", { type: "button", class: "small" }, a.state === "busy" ? "실행 중…" : "확인");
+  const no = el("button", { type: "button", class: "ghost small" }, "취소");
+  ok.disabled = no.disabled = a.state === "busy";
+  ok.addEventListener("click", () => runAction(a));
+  no.addEventListener("click", () => { a.state = "cancelled"; renderChat(); });
+  return el("div", { class: "chat-action" }, el("div", { class: "chat-action-label" }, a.label),
+    a.error ? el("div", { class: "chat-action-error" }, a.error) : "", el("div", { class: "chat-action-btns" }, ok, no));
+}
+
+async function runAction(a) {
+  a.state = "busy"; a.error = "";
+  renderChat();
+  try {
+    const res = await fetch("/api/agent/act", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: a.kind, symbol: a.symbol, price: a.price, changes: a.changes }) });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || "실행하지 못했어요");
+    a.state = "done";
+    // 바뀐 것을 화면에 반영: 관심종목 / 지금 보는 종목의 선 / 내 규칙 카드
+    if (a.kind !== "rules_update") {
+      state.watchlist = (await (await fetch("/api/watchlist")).json()).symbols;
+      renderWatchlist();
+      loadWatchSummary();
+      updateLiveSubscription();
+    }
+    if (a.kind === "alert_line" && a.symbol === state.data?.symbol) {
+      state.drawings = (await (await fetch(`/api/drawings/${encodeURIComponent(a.symbol)}`)).json()).items;
+      if (!on("drawings")) toggleLayer("drawings");
+      renderDrawings();
+    }
+    if (a.kind === "rules_update") loadRulesCheck();
+  } catch (error) {
+    a.state = ""; a.error = error.message;
+  }
+  renderChat();
+}
+
 // 종목을 말하지 않고 물으면 '지금 보고 있는 종목' 얘기로 알아듣는다 → 그게 뭔지 보여준다
 function renderChatContext() {
   const d = state.data;
@@ -1651,8 +1694,8 @@ async function askAgent(text) {
       body: JSON.stringify({ messages: state.chat.map(({ role, content }) => ({ role, content })), symbol: state.data?.macro ? null : state.data?.symbol }) });
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "답을 받지 못했어요");
-    state.chat.push({ role: "assistant", content: body.answer,
-      meta: `${body.steps.length ? `찾아본 것: ${body.steps.join(" → ")} · ` : ""}토큰 ${body.tokens.toLocaleString()}` });
+    state.chat.push({ role: "assistant", content: body.answer, actions: body.actions || [],
+      meta:`${body.steps.length ? `찾아본 것: ${body.steps.join(" → ")} · ` : ""}토큰 ${body.tokens.toLocaleString()}` });
   } catch (error) {
     state.chat.push({ role: "assistant", content: error.message, meta: "오류" });
   } finally {

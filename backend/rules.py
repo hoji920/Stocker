@@ -122,3 +122,61 @@ def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None) -> dict
                           "target_from_avg_pct": (target / avg - 1) * 100 if target else None,
                           "stop_from_avg_pct": (stop / avg - 1) * 100 if stop is not None else None}
     return out
+
+
+LOOKBACK, MAX_HOLD = 400, 60       # 앱이 일봉 분석에 쓰는 길이 / 목표도 손절도 안 닿으면 60봉 뒤 정리
+
+
+def backtest(candles: list[dict], rules: dict, fmt, symbol: str, name: str, bars: int = 750, keep: int | None = 6) -> dict:
+    """내 규칙을 과거에 그대로 적용했다면 (미래 정보 없음: 봉 t 의 판정은 t 까지의 데이터로만).
+
+    - 쉬는 날마다 그날까지의 봉으로 앱과 똑같이 선을 긋고 규칙을 대조 → '매수 조건 충족'이면 그날 종가에 산다
+    - 그때 정해진 목표가에 고가가 닿으면 목표가에 팔고, 종가가 손절 기준 아래면 그 종가에 판다 (같은 날 둘 다면 손절로 친다)
+    - MAX_HOLD 봉 안에 둘 다 안 되면 그날 종가에 정리. 한 번에 한 건만 보유. 수수료·세금·호가 차이는 안 뺐다
+    - 비교: 같은 기간 그냥 들고 있기 / 아무 날 사서 평균 보유 기간만큼 들고 있기
+    """
+    n = len(candles)
+    start = max(min(LOOKBACK, n // 2), n - bars)
+    close = [c["close"] for c in candles]
+    trades, i, held_bars = [], start, 0
+    while i < n - 1:
+        sub = candles[max(0, i - LOOKBACK + 1): i + 1]
+        r = evaluate({"symbol": symbol, "name": name, "candles": sub, **analysis.analyze(sub, fmt, "일")}, rules, fmt)
+        if r["tone"] != "buy":
+            i += 1
+            continue
+        entry, target, stop = r["price"], r["target"]["price"], r["stop"]["price"]
+        last = min(i + MAX_HOLD, n - 1)
+        exit_i, exit_price, why = last, close[last], ("보유 중" if last == n - 1 and i + MAX_HOLD > n - 1 else "기간 만료")
+        for j in range(i + 1, last + 1):
+            if close[j] <= stop:
+                exit_i, exit_price, why = j, close[j], "손절"
+                break
+            if candles[j]["high"] >= target:
+                exit_i, exit_price, why = j, target, "목표"
+                break
+        trades.append({"buy_date": candles[i]["time"], "buy": fmt(entry), "sell_date": candles[exit_i]["time"], "sell": fmt(exit_price),
+                       "return_pct": round((exit_price / entry - 1) * 100, 2), "bars": exit_i - i, "exit": why})
+        held_bars += exit_i - i
+        i = exit_i + 1
+    rets = [t["return_pct"] for t in trades]
+    total = 1.0
+    for x in rets:
+        total *= 1 + x / 100
+    avg_hold = round(held_bars / len(trades)) if trades else 0
+    any_day = [close[t + avg_hold] / close[t] - 1 for t in range(start, n - avg_hold)] if avg_hold else []
+    return {
+        "symbol": symbol, "name": name, "period": f"{candles[start]['time']} ~ {candles[-1]['time']}", "bars": n - start,
+        "trades": len(trades), "wins": sum(x > 0 for x in rets),
+        "win_rate_pct": round(sum(x > 0 for x in rets) / len(rets) * 100, 1) if rets else None,
+        "avg_return_pct": round(sum(rets) / len(rets), 2) if rets else None,
+        "total_return_pct": round((total - 1) * 100, 1), "avg_hold_bars": avg_hold,
+        "time_in_market_pct": round(held_bars / (n - start) * 100, 1),
+        "exits": {k: sum(t["exit"] == k for t in trades) for k in ("목표", "손절", "기간 만료", "보유 중")},
+        "buy_and_hold_pct": round((close[-1] / close[start] - 1) * 100, 1),
+        "any_day_same_hold_pct": round(sum(any_day) / len(any_day) * 100, 2) if any_day else None,
+        "recent_trades": trades[-keep:] if keep else trades, "rules": clean(rules),      # keep=None 이면 전부 (research 용)
+        "caution": "한 종목·적은 표본이라 우연일 수 있어요. 수수료·세금·호가 차이는 안 뺐어요. "
+                   + ("거래가 10번 미만이라 승률·평균은 참고만 하세요. " if len(trades) < 10 else "")
+                   + "과거 결과가 앞으로를 보장하지 않아요.",
+    }
