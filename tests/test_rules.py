@@ -1,0 +1,57 @@
+from backend import rules
+
+fmt = lambda p: f"${p:,.2f}"
+
+
+def _chart(price, support=None, resistance=None, channel=None, trendlines=()):
+    # 고가-저가 2 로 고정 → ATR = 2
+    candles = [{"time": f"2026-01-{i + 1:02d}", "open": price, "high": price + 1, "low": price - 1, "close": price, "volume": 1.0}
+               for i in range(30)]
+    return {"symbol": "TEST", "name": "테스트", "candles": candles, "channel": channel, "trendlines": list(trendlines),
+            "levels": {"support": [{"price": p} for p in (support or [])], "resistance": [{"price": p} for p in (resistance or [])]}}
+
+
+def test_buy_zone_near_support_with_enough_reward():
+    r = rules.evaluate(_chart(100, support=[99], resistance=[110]), rules.DEFAULT, fmt)
+    assert r["tone"] == "buy" and r["verdict"] == "매수 조건 충족"
+    assert r["target"]["price"] == 110 and r["stop"]["price"] == 98            # 지지 99 − 0.5 × ATR 2
+    assert r["rr"] == 5.0                                                       # (110−100) ÷ (100−98)
+
+
+def test_buy_zone_but_reward_too_small():
+    r = rules.evaluate(_chart(100, support=[99], resistance=[101.5]), rules.DEFAULT, fmt)
+    assert r["tone"] == "wait" and r["rr"] == 0.75
+
+
+def test_not_near_support_and_near_resistance_is_sell_target():
+    r = rules.evaluate(_chart(100, support=[90], resistance=[101]), rules.DEFAULT, fmt)
+    assert r["tone"] == "sell" and r["verdict"] == "매도 목표 근처"
+
+
+def test_channel_bottom_counts_as_buy_zone_and_channel_top_is_fallback_target():
+    ch = {"label": "상승 채널", "position_pct": 10.0, "lower": 97.0, "upper": 130.0}
+    r = rules.evaluate(_chart(100, channel=ch), rules.DEFAULT, fmt)
+    assert r["tone"] == "buy" and r["target"]["name"] == "채널 상단" and r["stop"]["price"] == 96   # 채널 하단 97 − 1
+
+
+def test_nothing_applies():
+    r = rules.evaluate(_chart(100, support=[80], resistance=[130]), rules.DEFAULT, fmt)
+    assert r["tone"] == "none"
+
+
+def test_my_numbers_change_the_verdict():
+    chart = _chart(100, support=[96], resistance=[120])
+    assert rules.evaluate(chart, rules.DEFAULT, fmt)["tone"] == "none"                       # 지지에서 ATR 2배 → 기본(1배)으론 멀다
+    assert rules.evaluate(chart, {"buy_support_atr": 3}, fmt)["tone"] == "buy"
+
+
+def test_holding_adds_numbers_from_my_average():
+    r = rules.evaluate(_chart(100, support=[99], resistance=[110]), rules.DEFAULT, fmt,
+                       {"quantity": 3, "avg_price": 95.0, "pl_rate": 5.26})
+    assert round(r["holding"]["target_from_avg_pct"], 1) == 15.8 and round(r["holding"]["stop_from_avg_pct"], 1) == 3.2
+
+
+def test_clean_clamps_bad_input():
+    c = rules.clean({"min_rr": "abc", "buy_channel_pct": 999, "stop_atr": -3, "note": "x" * 900, "hack": 1})
+    assert c["min_rr"] == rules.DEFAULT["min_rr"] and c["buy_channel_pct"] == 60 and c["stop_atr"] == 0.1
+    assert len(c["note"]) == 500 and "hack" not in c

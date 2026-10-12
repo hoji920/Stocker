@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import analysis, bars, demo, macro, market_brief, movers, news, patterns, search, signals, underlying
+from backend import agent, analysis, bars, demo, macro, market_brief, movers, news, patterns, rules, search, signals, underlying
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
 from backend.config import get_settings, market_of
@@ -656,6 +656,100 @@ async def alert_stream():
             monitor.unsubscribe(q)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# ── 내 규칙 + 채팅 에이전트 (조회·대조만. 주문 기능은 없다) ──
+def my_rules() -> dict:
+    return rules.clean(store.settings().get("rules"))
+
+
+def holding_of(symbol: str) -> dict | None:
+    try:
+        return next((h for h in holdings().get("items", []) if h["symbol"] == symbol), None)
+    except Exception:                       # 계좌 조회가 안 돼도 규칙 대조는 한다
+        return None
+
+
+def check_rules(symbol: str) -> dict:
+    symbol = symbol.strip().upper()
+    data = chart(symbol, "1d")
+    if data["macro"]:
+        raise HTTPException(status_code=400, detail="지수·금리 같은 지표에는 매매 규칙을 대조하지 않아요")
+    return rules.evaluate(data, my_rules(), price_formatter(data["currency"]), holding_of(symbol))
+
+
+@app.get("/api/rules")
+def get_rules():
+    return {"rules": my_rules(), "defaults": rules.DEFAULT}
+
+
+class RulesBody(BaseModel):
+    rules: dict
+
+
+@app.put("/api/rules")
+def put_rules(body: RulesBody):
+    saved = rules.clean(body.rules)
+    store.update_settings(rules=saved)
+    return {"rules": saved, "defaults": rules.DEFAULT}
+
+
+@app.get("/api/rules/check/{symbol}")
+def rules_check(symbol: str):
+    """지금 가격이 내 규칙의 어디에 해당하는지 (계산만, AI 를 안 부른다)."""
+    return check_rules(symbol)
+
+
+def _chart_summary(symbol: str) -> dict:
+    """에이전트에게 줄 차트 요약 (봉 데이터·좌표는 빼고 읽을 것만)."""
+    d = chart(symbol.strip().upper(), "1d")
+    last = d["candles"][-1]["close"]
+    line = lambda l: {"price": round(l["price"], 2), "distance_pct": l["distance_pct"], "why": l["why"]}
+    ch = d.get("channel")
+    return {
+        "symbol": d["symbol"], "name": d["name"], "currency": d["currency"], "price": last,
+        "change_pct": round((last / d["prev_close"] - 1) * 100, 2),
+        "support": [line(l) for l in d["levels"]["support"][:3]], "resistance": [line(l) for l in d["levels"]["resistance"][:3]],
+        "trendlines": [{"label": t["label"], **line(t), "tentative": t.get("tentative")} for t in d["trendlines"]],
+        "channel": {k: ch[k] for k in ("label", "lower", "upper", "position_pct", "why")} if ch else None,
+        "week52": d.get("extremes"),
+        "insights": [f"{i['title']} — {i['body']}" for i in d.get("insights", [])],
+        "patterns": [{"name": p["name"], "status": p["status"], "why": p["why"]} for p in d.get("patterns", [])],
+        "recent_signals": [{"date": e["time"], "name": e["name"], "dir": e["dir"]} for e in (d.get("signals") or {}).get("events", [])[-5:]],
+    }
+
+
+def _news_for_agent(symbol: str) -> dict:
+    n = stock_news(symbol, ai=True)
+    return {"summary": n.get("summary"), "items": [{k: it[k] for k in ("date", "source", "title", "sentiment")} for it in n["items"][:12]]}
+
+
+AGENT_TOOLS = {
+    "check_my_rules": check_rules,
+    "read_chart": _chart_summary,
+    "get_news": _news_for_agent,
+    "why_moved": lambda symbol: why(symbol),
+    "market_brief": lambda: macro_summary().get("summary") or {"error": "시장 요약을 만들 수 없어요"},
+    "my_holdings": lambda: [{k: h[k] for k in ("symbol", "name", "quantity", "avg_price", "last_price", "pl_rate", "daily_rate")}
+                            for h in holdings().get("items", [])],
+    "find_symbol": lambda query: search_stocks(query, 5)["items"],
+}
+
+
+class ChatBody(BaseModel):
+    messages: list[dict]
+    symbol: str | None = None
+
+
+@app.post("/api/agent/chat")
+def agent_chat(body: ChatBody):
+    settings = get_settings()
+    if not settings.summary_enabled:
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY 가 있어야 질문할 수 있어요")
+    try:
+        return agent.chat(settings, AGENT_TOOLS, body.messages, (body.symbol or "").strip().upper() or None, my_rules()["note"])
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"답을 만들지 못했어요 ({type(error).__name__})")
 
 
 @app.get("/healthz")

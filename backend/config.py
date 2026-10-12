@@ -21,6 +21,7 @@ class Settings:
     openai_api_key: str
     openai_model: str
     openai_brief_model: str     # 시장 요약 전용 (하루 한 번만 부르니 더 좋은 모델을 쓴다)
+    openai_agent_model: str     # 채팅 에이전트 (도구를 골라 쓰는 일이라 mini 보다 한 단계 위)
     token_cache_path: Path
     data_dir: Path
     alert_poll_sec: int
@@ -62,6 +63,7 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         openai_brief_model=os.getenv("OPENAI_BRIEF_MODEL", "gpt-5.5"),
+        openai_agent_model=os.getenv("OPENAI_AGENT_MODEL", "gpt-5.4-mini"),
         # 서버(Render 등)에선 DATA_DIR 로 저장 위치를 바꿀 수 있게 (영구 디스크를 붙이면 거기로)
         token_cache_path=Path(os.getenv("DATA_DIR", ROOT / "data")) / ".token_cache.json" if os.getenv("DATA_DIR")
         else ROOT / ".token_cache.json",

@@ -987,7 +987,7 @@ $("#why-btn").addEventListener("click", async () => {
 });
 
 // ── 오른쪽 아이콘 탭 (내 투자 / 관심 / 최근 본 / 알림) ──
-const SIDE_TITLES = { holdings: "내 투자", watch: "관심종목", recent: "최근 본 종목", market: "시장 한눈에", alerts: "알림" };
+const SIDE_TITLES = { holdings: "내 투자", watch: "관심종목", recent: "최근 본 종목", market: "시장 한눈에", alerts: "알림", ask: "질문" };
 function setTab(tab) {
   state.tab = tab;
   store.save("stocking.tab", tab);
@@ -995,6 +995,7 @@ function setTab(tab) {
   document.querySelectorAll("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== tab));
   $("#side-title").textContent = SIDE_TITLES[tab];
   $("#list-refresh").hidden = !["holdings", "watch"].includes(tab);
+  $("#chat-clear").hidden = tab !== "ask";
   if (tab === "alerts") $("#alert-badge").hidden = true;
   if (tab === "recent") renderRecent();
   if (tab === "market") loadMarket();
@@ -1025,6 +1026,7 @@ function setStockTab(t) {
   document.querySelectorAll(".stab").forEach((b) => b.classList.toggle("on", b.dataset.st === t));
   document.querySelectorAll("[data-stpanel]").forEach((p) => (p.hidden = p.dataset.stpanel !== t));
   if (t === "news") refineNews();              // 뉴스 탭을 열 때 AI 정리 (함수 선언이라 아래에 있어도 된다)
+  if (t === "ask") loadRulesCheck();
 }
 document.querySelectorAll(".stab").forEach((b) => b.addEventListener("click", () => setStockTab(b.dataset.st)));
 setStockTab(store.load("stocking.stockTab", "overview"));
@@ -1477,6 +1479,8 @@ async function load(symbol) {
   $("#name").textContent = `${state.data.name} (${symbol})`;
   rememberRecent(symbol, state.data.name);
   if (isPhone()) setCollapsed(true);          // 폰: 목록에서 종목을 고르면 차트로 돌아감
+  loadRulesCheck();                           // '내 규칙' 탭이 열려 있을 때만 (계산만, AI 아님)
+  renderChatContext();
   renderWatchlist();
   renderHoldings();
   updateLiveSubscription();
@@ -1489,6 +1493,172 @@ async function load(symbol) {
   if (!nres.ok) return $("#news").replaceChildren(el("li", { class: "muted" }, "뉴스를 불러오지 못했어요"));
   showNews(await nres.json());
   refineNews();
+}
+
+// ── 내 규칙 (차트 아래 탭) + 질문 (오른쪽 탭) ──
+// 내 규칙: 내가 정한 조건(지지 근처·채널 하단에서 매수, 저항이 목표)에 지금 가격이 해당하는지. 서버가 계산만 한다 (AI 아님, 토큰 0)
+// 질문: 물어볼 때만 AI 가 차트·뉴스·시장·보유 종목을 찾아보고 답한다. 주문 기능은 없다
+async function loadRulesCheck() {
+  const d = state.data;
+  if (!d || state.stockTab !== "ask") return;
+  const box = $("#rules-card");
+  if (d.macro) return box.replaceChildren(el("p", { class: "muted" }, "지수·금리 같은 지표에는 매매 규칙을 대조하지 않아요."));
+  if (state.rulesCheck?.symbol !== d.symbol) box.replaceChildren(el("p", { class: "muted" }, "규칙에 대조하는 중…"));
+  const res = await fetch(`/api/rules/check/${encodeURIComponent(d.symbol)}`);
+  if (state.data?.symbol !== d.symbol) return;
+  const body = await res.json();
+  if (!res.ok) return box.replaceChildren(el("p", { class: "muted" }, body.detail || "규칙을 대조하지 못했어요"));
+  state.rulesCheck = body;
+  renderRulesCard();
+}
+
+// 손절 ─ 지지 ─ 현재가 ─ 목표 를 한 줄 위에. 목표나 손절을 못 정했으면 그리지 않는다
+function ruleLadder(r) {
+  if (!r.target || !r.stop) return "";
+  const pts = [["stop", "손절", r.stop.price], ...(r.support ? [["support", "지지", r.support.price]] : []),
+               ["now", "현재가", r.price], ["target", "목표", r.target.price]];
+  const lo = Math.min(...pts.map((p) => p[2])), hi = Math.max(...pts.map((p) => p[2]));
+  const at = (v) => (hi === lo ? 50 : ((v - lo) / (hi - lo)) * 100);
+  return el("div", { class: "ladder" },
+    el("div", { class: "ladder-track" },
+      el("div", { class: "ladder-risk", style: `left:${at(r.stop.price)}%;width:${Math.max(0, at(r.price) - at(r.stop.price))}%` }),
+      el("div", { class: "ladder-gain", style: `left:${at(r.price)}%;width:${Math.max(0, at(r.target.price) - at(r.price))}%` }),
+      ...pts.map(([kind, , v]) => el("i", { class: `ladder-dot ${kind}`, style: `left:${at(v)}%` }))),
+    el("div", { class: "ladder-labels" }, ...pts.map(([kind, label, v]) =>
+      el("span", { class: kind, style: `left:${at(v)}%` }, label))));
+}
+
+function renderRulesCard() {
+  const r = state.rulesCheck;
+  const sp = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+  const tile = (label, value, sub, kind = "") => el("div", { class: `rule-tile ${kind}` },
+    el("span", { class: "rule-label" }, label), el("strong", {}, value), el("span", { class: "rule-sub" }, sub || ""));
+  const tiles = [
+    r.target ? tile(`매도 목표 · ${r.target.name}`, r.target.text, sp(r.target.pct), "target") : tile("매도 목표", "못 정함", "위에 저항선이 없어요"),
+    r.stop ? tile("손절 기준", r.stop.text, sp(r.stop.pct), "stop") : tile("손절 기준", "못 정함", ""),
+    tile("손익비", r.rr == null ? "-" : r.rr.toFixed(2), `내 기준 ${r.rules.min_rr} 이상`, r.rr != null && r.rr >= r.rules.min_rr ? "ok" : ""),
+  ];
+  const h = r.holding;
+  const mine = h ? el("div", { class: "rule-mine" },
+    el("span", {}, "내 평단 ", el("b", {}, h.avg_text)),
+    el("span", { class: cls(h.pl_rate) }, `지금 ${sp(h.pl_rate)}`),
+    h.target_from_avg_pct != null ? el("span", {}, `목표가면 ${sp(h.target_from_avg_pct)}`) : "",
+    h.stop_from_avg_pct != null ? el("span", {}, `손절이면 ${sp(h.stop_from_avg_pct)}`) : "") : "";
+  $("#rules-card").replaceChildren(
+    el("div", { class: "rule-head" },
+      el("div", {}, el("div", { class: "rule-name" }, r.name), el("div", { class: "rule-price" }, r.price_text)),
+      el("span", { class: `rule-verdict ${r.tone}` }, r.verdict)),
+    ruleLadder(r),
+    el("div", { class: "rule-tiles" }, ...tiles),
+    mine,
+    el("ul", { class: "rule-checks" }, ...r.checks.map((c) => el("li", { class: c.ok ? "ok" : "" },
+      el("i", {}, c.ok ? "✓" : "–"), el("b", {}, c.label), el("span", {}, c.text)))),
+    el("p", { class: "rule-caution" }, r.caution));
+}
+
+const RULE_FIELDS = [
+  ["buy_support_atr", "지지 근처: 지지선에서 ATR 몇 배 이내", 0.1],
+  ["buy_channel_pct", "채널 하단: 채널 아래에서 몇 % 이내", 1],
+  ["target_near_atr", "목표 근처: 저항선에서 ATR 몇 배 이내", 0.1],
+  ["stop_atr", "손절 기준: 지지선 아래로 ATR 몇 배", 0.1],
+  ["min_rr", "최소 손익비 (목표 폭 ÷ 손절 폭)", 0.1],
+];
+$("#rules-edit-btn").addEventListener("click", async () => {
+  const box = $("#rules-form");
+  if (!box.hidden) return (box.hidden = true);
+  const { rules, defaults } = await (await fetch("/api/rules")).json();
+  const inputs = {};
+  const fields = RULE_FIELDS.map(([key, label, step]) => {
+    inputs[key] = el("input", { type: "number", step, value: rules[key] });
+    return el("label", {}, el("span", {}, label), inputs[key]);
+  });
+  const note = el("textarea", { rows: 2, placeholder: "말로 적어두는 내 원칙 (예: 실적 발표 전 주에는 새로 안 산다). 질문할 때 AI 가 같이 읽어요." });
+  note.value = rules.note;
+  const save = async (values) => {
+    const res = await fetch("/api/rules", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rules: values }) });
+    if (!res.ok) return;
+    box.hidden = true;
+    loadRulesCheck();
+  };
+  const ok = el("button", { class: "small" }, "저장");
+  ok.addEventListener("click", () => save({ ...Object.fromEntries(RULE_FIELDS.map(([k]) => [k, inputs[k].value])), note: note.value }));
+  const reset = el("button", { class: "ghost small" }, "기본값으로");
+  reset.addEventListener("click", () => save({ ...defaults, note: note.value }));
+  box.replaceChildren(
+    el("p", { class: "muted hint" }, "ATR = 이 종목이 하루에 평균적으로 움직이는 폭. 종목마다 출렁임이 달라서 % 대신 ATR 배수로 정해요."),
+    ...fields, el("label", {}, el("span", {}, "내 원칙 메모"), note), el("div", { class: "rule-actions" }, ok, reset));
+  box.hidden = false;
+});
+
+// AI 답은 **굵게** 와 '- 목록' 정도만 쓴다 → 그것만 안전하게 그린다 (HTML 로 넣지 않는다)
+function richText(text) {
+  return text.split("\n").filter((l) => l.trim()).map((line) => {
+    const item = /^\s*[-•]\s+/.test(line);
+    const node = el("div", { class: item ? "chat-li" : "" });
+    line.replace(/^\s*[-•]\s+/, "").split("**").forEach((part, i) => part && node.append(i % 2 ? el("b", {}, part) : part));
+    return node;
+  });
+}
+
+state.chat = [];
+const CHAT_STARTERS = ["지금 내 규칙으로 어때?", "목표가와 손절 기준 알려줘", "오늘 왜 움직였어?", "최근 뉴스 정리해줘", "지금 미국 시장 분위기는?"];
+function renderChat(pending) {
+  const log = $("#chat-log");
+  log.hidden = !state.chat.length && !pending;
+  log.replaceChildren(...state.chat.map((m) => el("div", { class: `chat-msg ${m.role}` },
+    ...(m.role === "user" ? [m.content] : richText(m.content)),
+    m.meta ? el("div", { class: "chat-meta" }, m.meta) : "")),
+    pending ? el("div", { class: "chat-msg assistant pending" }, el("i", {}), el("i", {}), el("i", {})) : "");
+  $("#chat-starters").hidden = state.chat.length > 0;          // 대화가 시작되면 추천 질문은 접는다
+  $("#chat-send").disabled = !!pending;
+  log.lastElementChild?.scrollIntoView({ block: "nearest" });
+}
+// 종목을 말하지 않고 물으면 '지금 보고 있는 종목' 얘기로 알아듣는다 → 그게 뭔지 보여준다
+function renderChatContext() {
+  const d = state.data;
+  $("#chat-context").replaceChildren(...(d && !d.macro
+    ? [el("span", { class: "muted" }, "지금 보는 종목"), el("b", {}, `${d.name} (${d.symbol})`)]
+    : [el("span", { class: "muted" }, "지금은 종목 없이 물어봐요 (종목 이름을 같이 말해주세요)")]));
+}
+function openChat() {
+  setTab("ask");
+  if (!isPhone()) $("#chat-input").focus();
+}
+$("#ask-open").addEventListener("click", openChat);
+$("#chat-clear").addEventListener("click", () => { state.chat = []; renderChat(); });
+$("#chat-starters").replaceChildren(...CHAT_STARTERS.map((q) => {
+  const b = el("button", { type: "button", class: "chip" }, q);
+  b.addEventListener("click", () => askAgent(q));
+  return b;
+}));
+renderChat();
+
+$("#chat-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = $("#chat-input");
+  const text = input.value.trim();
+  input.value = "";
+  askAgent(text);
+});
+
+async function askAgent(text) {
+  if (!text || state.chatBusy) return;
+  state.chatBusy = true;
+  state.chat.push({ role: "user", content: text });
+  renderChat(true);
+  try {
+    const res = await fetch("/api/agent/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: state.chat.map(({ role, content }) => ({ role, content })), symbol: state.data?.macro ? null : state.data?.symbol }) });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || "답을 받지 못했어요");
+    state.chat.push({ role: "assistant", content: body.answer,
+      meta: `${body.steps.length ? `찾아본 것: ${body.steps.join(" → ")} · ` : ""}토큰 ${body.tokens.toLocaleString()}` });
+  } catch (error) {
+    state.chat.push({ role: "assistant", content: error.message, meta: "오류" });
+  } finally {
+    state.chatBusy = false;
+    renderChat();
+  }
 }
 
 function showNews(payload) {
