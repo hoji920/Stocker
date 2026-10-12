@@ -138,9 +138,9 @@ def signal_alerts(symbol: str) -> list[dict]:
 
 
 def prev_close_of(symbol: str, daily: list[dict]) -> float:
-    """전일 종가: 오늘 일봉이 이미 있으면 그 전날, 없으면 마지막 일봉."""
-    today = signals.market_today(market_of(symbol))
-    return daily[-2]["close"] if daily[-1]["time"] == today and len(daily) > 1 else daily[-1]["close"]
+    """전일 종가 = 마지막 일봉의 바로 전 봉. 토스 앱의 '오늘 등락'과 같은 기준.
+    (날짜로 '오늘 봉인지' 따지면 틀린다: 미국 주식 주간거래는 미국 날짜로 전날인데 이미 새 일봉이 생겨 있다)"""
+    return daily[-2]["close"] if len(daily) > 1 else daily[-1]["close"]
 
 
 def change_now(symbol: str, price: float | None = None) -> tuple[float, float]:
@@ -296,11 +296,7 @@ def chart(symbol: str, interval: str = "1d"):
     if len(candles) < 2:
         raise HTTPException(status_code=404, detail="이 봉 단위로 볼 데이터가 부족해요")
     currency = currency_of(info, symbol)
-    # 전일 종가: 등락률 계산용. 오늘 일봉이 이미 있으면 그 전날, 없으면 마지막 일봉
-    tz_today = signals.market_today(market_of(symbol))
-    prev_close = daily[-2]["close"] if daily[-1]["time"] == tz_today else daily[-1]["close"]
-    if info.get("macro"):            # 지표(야후)는 실시간이 없어 마지막 봉이 곧 최신값 → 바로 전 봉과 비교
-        prev_close = daily[-2]["close"]
+    prev_close = prev_close_of(symbol, daily)      # 등락률 계산용
     return {
         "symbol": symbol,
         "name": info.get("name", symbol),
@@ -578,8 +574,7 @@ def watchlist_summary():
             items.append({"symbol": s, "name": s, "error": True})
             continue
         last = prices.get(s, candles[-1]["close"])
-        # 장중엔 오늘 봉이 이미 있으니, 오늘 봉 날짜면 그 전날 종가와 비교
-        prev = candles[-2]["close"] if len(candles) > 1 else last
+        prev = prev_close_of(s, candles)
         lv = analysis.find_levels(analysis.to_frame(candles))
         near = lambda xs: round((xs[0]["price"] / last - 1) * 100, 2) if xs else None
         items.append({
