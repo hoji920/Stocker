@@ -1562,6 +1562,7 @@ const RULE_FIELDS = [
   ["target_near_atr", "목표 근처: 저항선에서 ATR 몇 배 이내", 0.1],
   ["stop_atr", "손절 기준: 지지선 아래로 ATR 몇 배", 0.1],
   ["min_rr", "최소 손익비 (목표 폭 ÷ 손절 폭)", 0.1],
+  ["min_risk_atr", "손익비의 최소 위험: 손절이 너무 가까우면 ATR 몇 배로 볼지 (0 = 끔)", 0.1],
 ];
 $("#rules-edit-btn").addEventListener("click", async () => {
   const box = $("#rules-form");

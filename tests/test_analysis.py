@@ -274,3 +274,16 @@ def test_channel_layers_added_to_alert_lines_only_outside_base_channel():
     assert drawing_values(times, d, last=27.0) == [("내 채널 기준선", 14.0), ("내 채널 평행선", 18.0),
                                                  ("내 채널 층 선", 26.0), ("내 채널 층 선", 30.0)]
     assert ("내 채널 층 선", 10.0) in drawing_values(times, d, last=12.0)
+
+
+def test_atr_and_swings_are_remembered_per_frame_not_across_frames():
+    from backend import analysis
+    a = pd.DataFrame(_rows([100 + 10 * np.sin(i / 5) for i in range(120)]))
+    b = pd.DataFrame(_rows([200 + 30 * np.sin(i / 7) for i in range(120)]))
+    atr_a, sw_a = analysis.atr(a).copy(), analysis.swing_points(a)
+    assert analysis.atr(a) is analysis.atr(a)                         # 같은 프레임이면 다시 계산하지 않는다
+    atr_b = analysis.atr(b)                                           # 다른 프레임이면 새로 계산
+    assert not np.allclose(atr_a.dropna(), atr_b.dropna())
+    assert analysis.atr(a).equals(atr_a) and analysis.swing_points(a) == sw_a   # 다시 a 로 돌아와도 a 의 값
+    sw_a.append("x")
+    assert "x" not in analysis.swing_points(a)                        # 받은 목록을 고쳐도 기억해 둔 값은 그대로

@@ -12,10 +12,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, time as dtime
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
@@ -66,6 +67,15 @@ def price_formatter(currency: str):
 MACRO_CURRENCY = {"pt": "PT", "pct": "PCT", "usd": "USD", "krw": "KRW"}
 
 
+def candle_ttl(now: datetime | None = None) -> int:
+    """일봉을 몇 초 동안 다시 안 받을지. 평소 5분, 새 일봉이 생기는 시간대(평일 한국 시간 08:55~10:15: 국내 개장, 미국 주간거래 시작)엔 30초.
+    등락률은 '마지막 일봉의 바로 전 봉'과 비교하는데, 새 장의 첫 체결이 들어온 뒤에도 옛 일봉을 쓰고 있으면
+    그 사이(최대 5분) 이틀 치 등락률이 나온다."""
+    now = now or datetime.now(ZoneInfo("Asia/Seoul"))
+    opening = now.weekday() < 5 and dtime(8, 55) <= now.time() <= dtime(10, 15)
+    return 30 if opening else 300
+
+
 def load_stock(symbol: str) -> tuple[dict, list[dict], bool]:
     """(종목정보, 일봉, 데모여부). 지수·선물·금리·원자재(매크로)는 야후 일봉."""
     market = market_of(symbol)
@@ -80,7 +90,7 @@ def load_stock(symbol: str) -> tuple[dict, list[dict], bool]:
         return demo.demo_info(symbol, market), demo.demo_candles(symbol, market), True
     try:
         info = cached(f"info:{symbol}", 3600, lambda: toss().stock_info(symbol))
-        candles = cached(f"candles:{symbol}", 300, lambda: toss().daily_candles(symbol))
+        candles = cached(f"candles:{symbol}", candle_ttl(), lambda: toss().daily_candles(symbol))
     except TossApiError as error:
         hint = " (허용 IP에 내 공인 IP를 등록했는지 확인)" if error.status == 403 else ""
         raise HTTPException(status_code=502, detail=f"토스 API 오류 {error.status}{hint}: {error.payload}")
@@ -781,7 +791,7 @@ def portfolio() -> dict:
 
 # 에이전트가 '대신 실행'하는 일은 전부 여기를 거친다: 에이전트는 제안(propose)만 하고, 사용자가 화면에서 확인을 눌러야 실행(act)된다
 RULE_NAMES = {"buy_support_atr": "지지 근처(ATR 배수)", "buy_channel_pct": "채널 하단(%)", "target_near_atr": "목표 근처(ATR 배수)",
-              "stop_atr": "손절 기준(ATR 배수)", "min_rr": "최소 손익비"}
+              "stop_atr": "손절 기준(ATR 배수)", "min_rr": "최소 손익비", "min_risk_atr": "손익비의 최소 위험(ATR 배수)"}
 
 
 def normalize_action(kind: str, symbol: str | None = None, price: float | None = None, changes: dict | None = None) -> dict:

@@ -80,3 +80,9 @@ def get_settings() -> Settings:
 def market_of(symbol: str) -> str:
     """KRX 종목은 숫자로 시작하는 6자리 (신규 코드는 0047P0 처럼 영문 섞임), 그 외는 미국 티커."""
     return "KR" if len(symbol) == 6 and symbol[0].isdigit() and symbol.isalnum() else "US"
+
+
+def llm_args(model: str, temperature: float, effort: str = "low") -> dict:
+    """모델 계열에 맞는 옵션. gpt-4 계열은 temperature 를 받고, 그 뒤 모델(gpt-5 …)은 temperature 를 못 바꾸는 대신
+    reasoning_effort 를 받는다. 호출마다 temperature 를 박아 두면 OPENAI_MODEL 만 바꿔도 요청이 통째로 실패한다."""
+    return {"temperature": temperature} if model.startswith("gpt-4") else {"reasoning_effort": effort}

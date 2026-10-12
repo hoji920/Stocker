@@ -9,9 +9,31 @@
 from __future__ import annotations
 import json
 
-from backend.config import Settings
+from backend.config import Settings, llm_args
 
 MAX_STEPS = 6
+MAX_RESULT_CHARS = 6000
+
+
+def fit_result(result, limit: int = MAX_RESULT_CHARS) -> str:
+    """도구 결과를 모델에 줄 글자 수 안으로. 그냥 자르면 깨진 JSON 이 되고 모델은 뒤가 빠진 줄 모른다
+    (관심·보유 종목이 많으면 '전체 규칙 대조'의 뒤쪽 종목이 조용히 사라졌다) → 가장 긴 목록의 뒤쪽을 덜어내고 그 사실을 적는다."""
+    dump = lambda v: json.dumps(v, ensure_ascii=False, default=str)
+    text = dump(result)
+    if len(text) <= limit:
+        return text
+    box = dict(result) if isinstance(result, dict) else {"items": result} if isinstance(result, list) else None
+    lists = {k: v for k, v in (box or {}).items() if isinstance(v, list) and len(v) > 1}
+    if lists:
+        key = max(lists, key=lambda k: len(dump(lists[k])))
+        total, keep = len(lists[key]), len(lists[key])
+        while keep > 1:
+            keep = max(1, keep * 3 // 4)
+            box[key] = lists[key][:keep]
+            box["truncated"] = f"'{key}' {total}개 중 앞의 {keep}개만 담았어요. 나머지는 빠졌다고 사용자에게 알려주세요."
+            if len(dump(box)) <= limit:
+                return dump(box)
+    return dump({"truncated": "결과가 너무 길어 앞부분만 담았어요.", "text": text[: limit - 80]})
 
 _SYSTEM = (
     "너는 개인용 주식 차트 앱 안의 조사 비서다. 사용자의 질문에 도구를 써서 답한다. 한국어 해요체, 짧고 구체적으로.\n"
@@ -68,7 +90,8 @@ TOOLS = [
          "kind": {"type": "string", "enum": ["watch_add", "watch_remove", "alert_line", "rules_update"]},
          "symbol": {"type": "string"}, "price": {"type": "number"},
          "changes": {"type": "object", "description": "바꿀 값만. 키: buy_support_atr(지지 근처 ATR 배수), buy_channel_pct(채널 하단 %), "
-                                                     "target_near_atr(목표 근처 ATR 배수), stop_atr(손절 ATR 배수), min_rr(최소 손익비)"}},
+                                                     "target_near_atr(목표 근처 ATR 배수), stop_atr(손절 ATR 배수), min_rr(최소 손익비), "
+                                                     "min_risk_atr(손익비를 셀 때 위험의 최소 ATR 배수)"}},
       "required": ["kind"]}),
 ]
 LABELS = {"check_my_rules": "내 규칙 대조", "read_chart": "차트 읽기", "get_news": "뉴스", "why_moved": "움직인 이유",
@@ -82,7 +105,7 @@ def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | No
     client = OpenAI(api_key=settings.openai_api_key)
     model = settings.openai_agent_model
     # gpt-5 계열은 이 API 에서 도구와 '생각(reasoning)'을 같이 못 쓴다 → 생각 없이 (도구 고르기엔 충분, 토큰도 덜 든다)
-    extra = {"temperature": 0.2} if model.startswith("gpt-4") else {"reasoning_effort": "none"}
+    extra = llm_args(model, 0.2, "none")
     context = f"지금 보고 있는 종목: {symbol or '없음'}"
     if rules_note:
         context += f"\n사용자가 적어둔 원칙: {rules_note}"
@@ -108,6 +131,6 @@ def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | No
                 result = {"error": f"{type(error).__name__}: {str(getattr(error, 'detail', error))[:200]}"}
             if isinstance(result, dict) and isinstance(result.get("action"), dict) and result["action"] not in actions:
                 actions.append(result["action"])
-            convo.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result, ensure_ascii=False, default=str)[:6000]})
+            convo.append({"role": "tool", "tool_call_id": call.id, "content": fit_result(result)})
     return {"answer": "도구를 여러 번 썼는데도 답을 정리하지 못했어요. 질문을 조금 좁혀서 다시 물어봐 주세요.", "steps": steps,
             "tokens": tokens, "actions": actions}

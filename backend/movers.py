@@ -11,7 +11,7 @@ import math
 from datetime import date, datetime, timedelta
 
 from backend import news
-from backend.config import Settings
+from backend.config import Settings, llm_args
 
 MARKET_PROXY = {"US": ("SPY", "S&P500(SPY)"), "KR": ("069500", "코스피200(KODEX 200)")}
 
@@ -97,7 +97,7 @@ def explain(settings: Settings, *, symbol: str, name: str, market: str, change_p
     try:
         from openai import OpenAI
         resp = OpenAI(api_key=settings.openai_api_key).chat.completions.create(
-            model=settings.openai_model, temperature=0.1, response_format={"type": "json_object"},
+            model=settings.openai_model, response_format={"type": "json_object"}, **llm_args(settings.openai_model, 0.1),
             messages=[{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
         )
         data = json.loads(resp.choices[0].message.content or "{}")

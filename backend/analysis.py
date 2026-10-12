@@ -7,9 +7,23 @@
 4) 현재가 위 = 저항선, 아래 = 지지선. 단 현재가가 가격대 안에 걸쳐 있으면 아직 안 뚫린 것으로 보고 지금까지의 역할대로
 """
 from __future__ import annotations
+import threading
 
 import numpy as np
 import pandas as pd
+
+# analyze() 한 번에 ATR 을 5~6번, 스윙 포인트를 3번 다시 계산하고 있었다 (과거 대조는 봉마다 analyze 를 부른다).
+# 마지막으로 본 DataFrame 하나에 대해서만 결과를 기억한다. 프레임을 붙잡고 있어서 `is` 비교가 안전하고(id 재사용 없음),
+# 요청이 스레드 풀에서 동시에 돌아도 섞이지 않게 스레드마다 따로 둔다. 프레임은 만든 뒤 고치지 않는다는 전제.
+_memo = threading.local()
+
+
+def _once(df: pd.DataFrame, key, compute):
+    if getattr(_memo, "df", None) is not df:
+        _memo.df, _memo.values = df, {}
+    if key not in _memo.values:
+        _memo.values[key] = compute()
+    return _memo.values[key]
 
 
 def to_frame(candles: list[dict]) -> pd.DataFrame:
@@ -38,28 +52,32 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
 
 
 def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    prev_close = df["close"].shift()
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prev_close).abs(),
-        (df["low"] - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    def compute():
+        prev_close = df["close"].shift()
+        tr = pd.concat([
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        return tr.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    return _once(df, ("atr", n), compute)
 
 
 # ── 지지/저항 ──
 def swing_points(df: pd.DataFrame, window: int = 5) -> list[tuple[int, float, str]]:
     """(index, price, 'high'|'low'). 양옆 window 봉이 다 있어야 확정.
     왼쪽보다는 '엄격히' 높아야(낮아야) 한다 — 같은 가격이 이어지는 보합 구간에서 매 봉이 스윙으로 잡히는 것 방지."""
-    highs, lows = df["high"].to_numpy(), df["low"].to_numpy()
-    points: list[tuple[int, float, str]] = []
-    for i in range(window, len(df) - window):
-        left, right = slice(i - window, i), slice(i + 1, i + window + 1)
-        if highs[i] > highs[left].max() and highs[i] >= highs[right].max():
-            points.append((i, float(highs[i]), "high"))
-        if lows[i] < lows[left].min() and lows[i] <= lows[right].min():
-            points.append((i, float(lows[i]), "low"))
-    return points
+    def compute():
+        highs, lows = df["high"].to_numpy(), df["low"].to_numpy()
+        points: list[tuple[int, float, str]] = []
+        for i in range(window, len(df) - window):
+            left, right = slice(i - window, i), slice(i + 1, i + window + 1)
+            if highs[i] > highs[left].max() and highs[i] >= highs[right].max():
+                points.append((i, float(highs[i]), "high"))
+            if lows[i] < lows[left].min() and lows[i] <= lows[right].min():
+                points.append((i, float(lows[i]), "low"))
+        return points
+    return list(_once(df, ("swing", window), compute))       # 복사본: 받은 쪽이 고쳐도 기억해 둔 목록은 그대로
 
 
 def _quality(touches: int, first_idx: int, last_idx: int, n: int) -> tuple[int, float, str]:
@@ -563,6 +581,16 @@ def build_insights(df: pd.DataFrame, levels: dict, fmt, trendlines: list[dict] |
     return out
 
 
+def lines_only(candles: list[dict]) -> dict:
+    """analyze 와 같은 선(수평 지지/저항, 방향별 1등 추세선, 채널)과 ATR 만. 설명 문장·후보 목록은 만들지 않는다.
+    내 규칙의 과거 대조처럼 봉마다 수천 번 부르는 곳에서 쓴다 (선은 analyze 와 똑같다)."""
+    df = to_frame(candles)
+    levels = find_levels(df)
+    trendlines = find_trendlines(df)
+    return {"levels": levels, "trendlines": trendlines, "channel": find_channel(df, trendlines),
+            "atr": float(np.nan_to_num(atr(df).iloc[-1]))}
+
+
 def analyze(candles: list[dict], fmt, unit: str = "일") -> dict:
     """보조지표 선은 프론트(indicators.js)에서 사용자가 고른 기간으로 계산한다."""
     df = to_frame(candles)
@@ -581,6 +609,7 @@ def analyze(candles: list[dict], fmt, unit: str = "일") -> dict:
         "trendlines": trendlines,
         "trend_candidates": candidates,     # 방향별 후보 (1번 = trendlines 에 있는 선)
         "channel": channel,
+        "atr": float(np.nan_to_num(atr(df).iloc[-1])),       # 마지막 봉의 ATR (내 규칙 대조가 다시 계산하지 않게)
         "extremes": extremes(df, unit),
         "insights": insights,
     }

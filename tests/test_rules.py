@@ -53,7 +53,7 @@ def test_holding_adds_numbers_from_my_average():
 
 def test_backtest_buys_in_zone_and_sells_at_target_or_stop(monkeypatch):
     # 분석 결과를 고정: 지지 99, 저항 110 → 종가 100 이면 매수 조건 충족 (목표 110, 손절 98)
-    monkeypatch.setattr(rules.analysis, "analyze", lambda sub, fmt, unit: {
+    monkeypatch.setattr(rules.analysis, "lines_only", lambda sub: {
         "levels": {"support": [{"price": 99}], "resistance": [{"price": 110}]}, "trendlines": [], "channel": None})
     bar = lambda i, close, high=None: {"time": f"d{i:03d}", "open": close, "high": high or close + 1, "low": close - 1, "close": close, "volume": 1.0}
     flat = [bar(i, 100) for i in range(40)]
@@ -71,3 +71,28 @@ def test_clean_clamps_bad_input():
     c = rules.clean({"min_rr": "abc", "buy_channel_pct": 999, "stop_atr": -3, "note": "x" * 900, "hack": 1})
     assert c["min_rr"] == rules.DEFAULT["min_rr"] and c["buy_channel_pct"] == 60 and c["stop_atr"] == 0.1
     assert len(c["note"]) == 500 and "hack" not in c
+
+
+def test_rr_does_not_explode_when_price_sits_on_the_stop():
+    # 지지 100.9, 손절 = 100.9 − 0.5×ATR(2) = 99.9, 현재가 100 → 손절까지 0.1 (ATR 0.05배)
+    chart = _chart(100, support=[100.9], resistance=[110])
+    chart["levels"]["support"][0]["at_price"] = True                 # 현재가가 걸쳐 있는 지지 가격대
+    old = rules.evaluate(chart, {**rules.DEFAULT, "min_risk_atr": 0}, fmt)
+    assert old["rr"] == 100.0 and not old["risk_floored"]             # 하한이 없으면 (110−100) ÷ 0.1
+    new = rules.evaluate(chart, rules.DEFAULT, fmt)
+    assert new["rr"] == 10.0 and new["risk_floored"]                  # 위험을 최소 ATR 0.5배(=1)로: (110−100) ÷ 1
+    assert new["stop"]["price"] == old["stop"]["price"]               # 손절선 자체는 그대로
+    assert any("위험을 ATR 0.5배" in c["text"] for c in new["checks"])
+
+
+def test_risk_floor_leaves_normal_setups_alone():
+    r = rules.evaluate(_chart(100, support=[99], resistance=[110]), rules.DEFAULT, fmt)
+    assert r["rr"] == 5.0 and not r["risk_floored"]                   # 손절까지 2 (ATR 1배) → 하한에 안 걸린다
+
+
+def test_risk_floor_can_turn_a_buy_into_wait():
+    # 목표까지 +1.2, 손절까지 0.1: 하한 없으면 손익비 12 로 '충족', 하한(위험 1)이면 1.2 로 '미달'
+    chart = _chart(100, support=[100.9], resistance=[101.2])
+    chart["levels"]["support"][0]["at_price"] = True
+    assert rules.evaluate(chart, {**rules.DEFAULT, "min_risk_atr": 0}, fmt)["tone"] == "buy"
+    assert rules.evaluate(chart, rules.DEFAULT, fmt)["tone"] == "wait"

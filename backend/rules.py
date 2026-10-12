@@ -4,7 +4,11 @@
 - 매수 구간: 가장 가까운 지지선에서 ATR × buy_support_atr 이내  또는  채널 아래쪽 buy_channel_pct % 이내
 - 매도 목표: 현재가 위의 가장 가까운 저항선 (없으면 채널 상단)
 - 손절 기준: 지지선(없으면 채널 하단) 아래로 ATR × stop_atr
-- 손익비 = (목표 − 현재가) ÷ (현재가 − 손절).  min_rr 미만이면 구간이어도 '조건 미달'
+- 손익비 = (목표 − 현재가) ÷ 위험.  위험 = 현재가 − 손절, 단 ATR × min_risk_atr 보다 작게 잡지 않는다.
+  현재가가 손절선 바로 위면 분모가 0 에 가까워져 손익비가 수백으로 튄다 (테슬라 2026-07-09: 손절 −0.02%, 손익비 313).
+  3종목 3년 144건에서, 손절까지 ATR 0.25배 미만이던 거래는 표시 손익비 중앙값 11 인데 79% 가 손절로 끝났다.
+  하루 변동폭보다 좁은 손절은 지켜질 수 없고, 손절은 종가로 실행해서 실제 손실이 손절선보다 크다.
+  min_rr 미만이면 구간이어도 '조건 미달'
 
 이건 추천이 아니다. research/ 백테스트에서 자동 지지/저항·채널은 무작위 선보다 잘 지켜지지 않았다.
 '내가 정한 규칙에 맞는 자리인지'를 빠뜨리지 않고 확인하는 용도.
@@ -19,10 +23,11 @@ DEFAULT = {
     "target_near_atr": 1.0,     # 목표가(저항)에서 ATR 몇 배 이내면 '목표 근처'
     "stop_atr": 0.5,            # 지지선 아래로 ATR 몇 배를 손절 기준으로 (0.5 = 앱이 '뚫렸다'고 보는 기준과 같다)
     "min_rr": 1.5,              # 최소 손익비
+    "min_risk_atr": 0.5,        # 손익비를 셀 때 위험을 최소 ATR 몇 배로 볼지 (0 = 하한 없음: 손절까지 거리 그대로)
     "note": "",                 # 말로 적어둔 내 원칙 (에이전트가 같이 읽는다)
 }
 LIMITS = {"buy_support_atr": (0.1, 5), "buy_channel_pct": (1, 60), "target_near_atr": (0.1, 5),
-          "stop_atr": (0.1, 5), "min_rr": (0.5, 10)}
+          "stop_atr": (0.1, 5), "min_rr": (0.5, 10), "min_risk_atr": (0, 3)}
 
 
 def clean(raw: dict | None) -> dict:
@@ -48,7 +53,7 @@ def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None) -> dict
     r = clean(rules)
     candles = chart["candles"]
     price = candles[-1]["close"]
-    atr = float(analysis.atr(analysis.to_frame(candles)).iloc[-1])
+    atr = float(chart["atr"] if chart.get("atr") else analysis.atr(analysis.to_frame(candles)).iloc[-1])
     pct = lambda v: (v / price - 1) * 100
 
     def lines(kind: str) -> list[dict]:
@@ -83,7 +88,10 @@ def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None) -> dict
     target_name = res["name"] if res and res["price"] > price else ("채널 상단" if target else None)
     base = sup["price"] if sup else (ch["lower"] if ch and ch["lower"] < price else None)
     stop = base - r["stop_atr"] * atr if base is not None else None
-    rr = (target - price) / (price - stop) if target and stop is not None and price > stop else None
+    risk = price - stop if stop is not None and price > stop else None
+    floor = r["min_risk_atr"] * atr
+    floored = risk is not None and risk < floor            # 손절이 너무 가까워서 위험을 하한(ATR 배수)으로 올려 잡았다
+    rr = (target - price) / max(risk, floor) if target and risk is not None else None
     near_target = bool(res) and abs(res["price"] - price) / atr <= r["target_near_atr"]
 
     zone = near_support or in_channel_low
@@ -99,9 +107,12 @@ def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None) -> dict
         verdict, tone = "조건에 해당 없음", "none"
     if rr is not None:
         said = "기준 충족" if rr >= r["min_rr"] else f"기준 {r['min_rr']:g} 미달"
-        reasons.append(f"손익비 {rr:.1f} (목표 {pct(target):+.1f}% ÷ 손절 {pct(stop):+.1f}%) → {said}")
+        note = (f" · 손절까지 ATR {risk / atr:.1f}배뿐이라 위험을 ATR {r['min_risk_atr']:g}배({floor / price * 100:.1f}%)로 계산"
+                if floored else "")
+        reasons.append(f"손익비 {rr:.1f} (목표 {pct(target):+.1f}% ÷ 손절 {pct(stop):+.1f}%{note}) → {said}")
     checks.append({"label": "손익비", "ok": rr is not None and rr >= r["min_rr"],
-                   "text": f"{rr:.1f} (기준 {r['min_rr']:g} 이상)" if rr is not None else "목표나 손절 기준을 못 정했어요"})
+                   "text": (f"{rr:.1f} (기준 {r['min_rr']:g} 이상)" + (f" · 손절이 가까워 위험을 ATR {r['min_risk_atr']:g}배로 계산" if floored else ""))
+                   if rr is not None else "목표나 손절 기준을 못 정했어요"})
     if near_target:
         reasons.append(f"{res['name']} {fmt(res['price'])}까지 {pct(res['price']):+.1f}% → 매도 목표 근처예요")
 
@@ -111,10 +122,11 @@ def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None) -> dict
         "support": {"price": sup["price"], "text": fmt(sup["price"]), "pct": pct(sup["price"]), "name": sup["name"]} if sup else None,
         "target": {"price": target, "text": fmt(target), "pct": pct(target), "name": target_name} if target else None,
         "stop": {"price": stop, "text": fmt(stop), "pct": pct(stop)} if stop is not None else None,
-        "rr": round(rr, 2) if rr is not None else None,
+        "rr": round(rr, 2) if rr is not None else None, "risk_floored": floored,
         "channel": {"label": ch["label"], "position_pct": ch["position_pct"], "lower": ch["lower"], "upper": ch["upper"]} if ch else None,
         "rules": r,
-        "caution": "내가 정한 규칙에 맞는지만 본 거예요. 이 앱의 백테스트에서 자동 지지/저항·채널은 무작위 선보다 잘 지켜지지 않았어요.",
+        "caution": "내가 정한 규칙에 맞는지만 본 거예요. 이 앱의 백테스트에서 자동 지지/저항·채널은 무작위 선보다 잘 지켜지지 않았어요. "
+                   "손절은 종가 기준이라 실제 손실은 손절선보다 클 수 있어요.",
     }
     if holding:
         avg = holding["avg_price"]
@@ -141,7 +153,7 @@ def backtest(candles: list[dict], rules: dict, fmt, symbol: str, name: str, bars
     trades, i, held_bars = [], start, 0
     while i < n - 1:
         sub = candles[max(0, i - LOOKBACK + 1): i + 1]
-        r = evaluate({"symbol": symbol, "name": name, "candles": sub, **analysis.analyze(sub, fmt, "일")}, rules, fmt)
+        r = evaluate({"symbol": symbol, "name": name, "candles": sub, **analysis.lines_only(sub)}, rules, fmt)
         if r["tone"] != "buy":
             i += 1
             continue

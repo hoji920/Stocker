@@ -98,3 +98,16 @@ def test_agent_stops_after_max_steps(monkeypatch):
     s, sent = _fake_openai(monkeypatch, [("tool", "market_brief", "{}")] * agent.MAX_STEPS)
     out = agent.chat(s, {"market_brief": lambda: {}}, [{"role": "user", "content": "시장"}], None)
     assert len(sent) == agent.MAX_STEPS and "정리하지 못했어요" in out["answer"]
+
+
+def test_long_tool_result_is_shortened_as_valid_json_and_says_so():
+    import json
+    from backend import agent
+    rows = [{"symbol": f"S{i:03d}", "name": "종목" * 20, "verdict": "조건에 해당 없음", "rr": 1.23} for i in range(200)]
+    text = agent.fit_result({"scope": "all", "count": 200, "items": rows, "caution": "추천이 아니에요"}, limit=3000)
+    data = json.loads(text)                                           # 중간에서 잘린 깨진 JSON 이 아니다
+    assert len(text) <= 3000 and 0 < len(data["items"]) < 200
+    assert data["items"][0]["symbol"] == "S000"                       # 앞쪽(우선순위 높은 것)을 남긴다
+    assert "200개 중" in data["truncated"] and data["caution"] == "추천이 아니에요"
+    assert json.loads(agent.fit_result({"a": 1})) == {"a": 1}         # 짧으면 그대로
+    assert "truncated" in json.loads(agent.fit_result([{"x": "가" * 50}] * 100, limit=1000))

@@ -14,7 +14,7 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
-from backend.config import Settings
+from backend.config import Settings, llm_args
 
 
 @dataclass
@@ -135,7 +135,7 @@ def filter_relevant(settings: Settings, name: str, symbol: str, items: list[News
     block = "\n".join(f"[{i}] {it.title} — {it.summary[:120]}" for i, it in enumerate(items, 1))
     try:
         resp = OpenAI(api_key=settings.openai_api_key).chat.completions.create(
-            model=settings.openai_model, temperature=0, response_format={"type": "json_object"},
+            model=settings.openai_model, response_format={"type": "json_object"}, **llm_args(settings.openai_model, 0),
             messages=[{"role": "system", "content": _FILTER_SYSTEM},
                       {"role": "user", "content": f"종목: {name} ({symbol})\n기사 {len(items)}건:\n{block}"}],
         )
@@ -155,8 +155,7 @@ def summarize(settings: Settings, name: str, items: list[NewsItem]) -> dict | No
     try:
         resp = OpenAI(api_key=settings.openai_api_key).chat.completions.create(
             model=settings.openai_model,
-            temperature=0.2,
-            response_format={"type": "json_object"},
+            response_format={"type": "json_object"}, **llm_args(settings.openai_model, 0.2),
             messages=[{"role": "system", "content": _SYSTEM},
                       {"role": "user", "content": f"종목: {name}\n기사 {len(items)}건:\n{block}"}],
         )

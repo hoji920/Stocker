@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from backend import news
-from backend.config import Settings
+from backend.config import Settings, llm_args
 
 MOODS = ("위험 선호", "중립", "위험 회피")
 EFFORT = "low"
@@ -163,7 +163,7 @@ def build(settings: Settings, groups: list[dict], items: list[news.NewsItem]) ->
     now = mood(groups)
     model = settings.openai_brief_model
     # gpt-5 계열은 temperature 를 못 바꾸고, 답하기 전에 '생각'하는 데 출력 토큰을 쓴다 → 생각을 적게 (기본값이면 출력의 대부분이 생각)
-    extra = {"temperature": 0.2} if model.startswith("gpt-4") else {"reasoning_effort": EFFORT}
+    extra = llm_args(model, 0.2, EFFORT)
     resp = OpenAI(api_key=settings.openai_api_key).chat.completions.create(
         model=model, response_format={"type": "json_object"}, **extra,
         messages=[{"role": "system", "content": _SYSTEM},
