@@ -96,7 +96,6 @@
       <div class="side-head">
         <h3 id="side-title">내 투자</h3>
         <span class="side-actions">
-          <button id="hold-watch" class="ghost small" title="보유종목 전부를 관심종목(알림 대상)에 추가">전부 관심종목에</button>
           <button id="list-refresh" class="ghost small" title="새로고침">↻</button>
         </span>
       </div>
@@ -122,7 +121,8 @@
       </div>
 
       <div data-panel="market" hidden>
-        <p class="muted hint">미국 지수·선물·국채·원자재는 야후 파이낸스 기준이라 몇 분 늦을 수 있어요. 누르면 차트가 열려요.</p>
+        <div id="market-brief" hidden></div>
+        <p class="muted hint">미국 지수·선물·국채·원자재는 야후 파이낸스 기준이에요. 누르면 차트가 열려요.</p>
         <div id="market-list"></div>
       </div>
 

@@ -85,9 +85,9 @@ def fetch_us_news(settings: Settings, symbol: str, limit: int = 15, days: int = 
     ]
 
 
-def fetch_market_news(settings: Settings, category: str, keywords: list[str], limit: int = 10,
+def fetch_market_news(settings: Settings, category: str, keywords: list[str] | None, limit: int = 10,
                       days: int = 3) -> list[NewsItem]:
-    """Finnhub 시장 뉴스(general / crypto) 중 키워드가 들어간 것만. ETF 기초자산 뉴스용."""
+    """Finnhub 시장 뉴스(general / crypto) 중 키워드가 들어간 것만 (ETF 기초자산 뉴스용). keywords 가 없으면 전부 (시장 요약용)."""
     if not settings.finnhub_enabled:
         return []
     resp = httpx.get("https://finnhub.io/api/v1/news", params={"category": category},
@@ -97,7 +97,7 @@ def fetch_market_news(settings: Settings, category: str, keywords: list[str], li
     out = []
     for it in sorted(resp.json(), key=lambda x: x.get("datetime", 0), reverse=True):
         text = f"{it.get('headline', '')} {it.get('summary', '')}".lower()
-        if it.get("datetime", 0) < cutoff or not any(k in text for k in keywords):
+        if it.get("datetime", 0) < cutoff or (keywords and not any(k in text for k in keywords)):
             continue
         out.append(NewsItem(title=it["headline"], summary=it.get("summary", ""),
                             date=datetime.fromtimestamp(it["datetime"], tz=timezone.utc).date().isoformat(),
@@ -198,17 +198,22 @@ def _safe(fn, *args, **kwargs) -> list[NewsItem]:
         return []
 
 
-def get_news(settings: Settings, market: str, symbol: str, name: str) -> dict:
+def get_news(settings: Settings, market: str, symbol: str, name: str, ai: bool = True) -> dict:
+    """ai=False 면 기사 목록만 (AI 를 안 부른다). 차트를 열 때마다 AI 를 부르면 토큰이 많이 들어서,
+    거르기·요약은 뉴스 탭을 열 때만 한다 → ai_pending 이 True 면 화면이 ai=True 로 다시 부른다."""
     if market == "KR":
         items = fetch_kr_news(settings, name)
     else:                                                    # 미국 종목: 영어(Finnhub) + 한국어(네이버), 최신순
         items = _safe(fetch_us_news, settings, symbol, limit=12) + _safe(fetch_kr_news_about, settings, name, limit=12)
         items.sort(key=lambda it: it.date, reverse=True)
-    items = filter_relevant(settings, name, symbol, items)      # 이 종목 주가와 무관한 기사는 뺀 뒤에 요약
-    summary = summarize(settings, name, items)
+    summary = None
+    if ai:
+        items = filter_relevant(settings, name, symbol, items)      # 이 종목 주가와 무관한 기사는 뺀 뒤에 요약
+        summary = summarize(settings, name, items)
     return {
         "items": [asdict(it) for it in items],
         "summary": summary,
         "source_enabled": settings.naver_enabled if market == "KR" else (settings.finnhub_enabled or settings.naver_enabled),
         "summary_enabled": settings.summary_enabled,
+        "ai_pending": not ai and settings.summary_enabled and bool(items),
     }

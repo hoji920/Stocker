@@ -343,6 +343,26 @@ button.ghost.on { border-color: var(--accent); color: var(--accent); }
 .pbadge.bear { background: color-mix(in srgb, var(--down) 20%, transparent); color: var(--down); }
 
 /* 시장 탭 안쪽 탭 + 묶음 제목(진하게) */
+#market-brief { background: var(--bg); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; font-size: 13px; line-height: 1.55; }
+#market-brief.folded { padding: 8px 14px; }
+#market-brief p { margin: 6px 0 0; }
+#market-brief ul, #market-brief ol { margin: 4px 0 0; padding-left: 18px; }
+#market-brief li { margin-bottom: 6px; }
+#market-brief .brief-nums { color: var(--muted); font-size: 12px; }
+#market-brief .brief-nums li { margin-bottom: 2px; }
+.brief-sub { margin-top: 10px; font-size: 11px; font-weight: 700; color: var(--muted); }
+.brief-tag { font-size: 10px; font-weight: 600; padding: 1px 6px; margin-right: 4px; border-radius: 999px; background: var(--panel); color: var(--muted); }
+.brief-src { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 2px; font-size: 11px; }
+.brief-src a { color: var(--muted); text-decoration: underline; }
+.brief-head { display: flex; align-items: center; justify-content: space-between; }
+.brief-title { display: flex; align-items: center; gap: 4px; font-weight: 700; font-size: 14px; }
+.brief-title .fold { background: transparent; color: var(--muted); padding: 0 4px; font-size: 12px; }
+.brief-mood { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--panel); color: var(--muted); }
+.brief-mood.up { color: var(--up); } .brief-mood.down { color: var(--down); }
+.brief-headline { font-weight: 600; }
+.brief-meta { font-size: 11px; }
+.brief-meta + .brief-meta { margin-top: 2px !important; }
+.brief-again { background: transparent; color: var(--muted); padding: 0; font-size: 11px; text-decoration: underline; }
 .mk-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
 .mk-tabs button { background: var(--bg); color: var(--muted); padding: 4px 9px; font-size: 12px; border-radius: 999px; }
 .mk-tabs button.on { background: var(--text); color: var(--panel); font-weight: 600; }

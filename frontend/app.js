@@ -472,6 +472,7 @@ function toggleLayer(key) {
   if (on(key)) delete state.layers[key];
   else state.layers[key] = { ...(LAYERS[key].params || {}) };
   applyLayers();
+  if (key === "news" && on("news")) refineNews();      // 뉴스 마커의 호재/악재 색은 AI 정리가 끝나야 나온다
 }
 
 function layerChips() {
@@ -989,7 +990,6 @@ function setTab(tab) {
   document.querySelectorAll(".rail-btn[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
   document.querySelectorAll("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== tab));
   $("#side-title").textContent = SIDE_TITLES[tab];
-  $("#hold-watch").hidden = tab !== "holdings";
   $("#list-refresh").hidden = !["holdings", "watch"].includes(tab);
   if (tab === "alerts") $("#alert-badge").hidden = true;
   if (tab === "recent") renderRecent();
@@ -1020,6 +1020,7 @@ function setStockTab(t) {
   store.save("stocking.stockTab", t);
   document.querySelectorAll(".stab").forEach((b) => b.classList.toggle("on", b.dataset.st === t));
   document.querySelectorAll("[data-stpanel]").forEach((p) => (p.hidden = p.dataset.stpanel !== t));
+  if (t === "news") refineNews();              // 뉴스 탭을 열 때 AI 정리 (함수 선언이라 아래에 있어도 된다)
 }
 document.querySelectorAll(".stab").forEach((b) => b.addEventListener("click", () => setStockTab(b.dataset.st)));
 setStockTab(store.load("stocking.stockTab", "overview"));
@@ -1053,9 +1054,70 @@ async function loadMarket() {
   if (!res.ok) return box.replaceChildren(el("p", { class: "muted" }, body.detail || "불러오기 실패"));
   state.market = body.groups;
   renderMarket();
+  loadMarketBrief();
   updateLiveSubscription();                    // 실시간 ETF 를 토스 체결로 받기
   clearTimeout(marketTimer);
   marketTimer = setTimeout(() => state.tab === "market" && !$("#app").classList.contains("collapsed") && loadMarket(), 60000);
+}
+
+// 미국 시장 요약: 시장을 움직인 소식 + 지표 3줄. 서버가 하루에 한 번만 만들어 저장해 둔다 (그날 처음 열 때 20초쯤 걸림).
+// 여기서는 15분마다 다시 물어보기만 한다 (날이 바뀌었으면 새 요약이 온다). refresh = '다시 만들기'를 눌렀을 때
+state.brief = null;
+state.briefFolded = store.load("stocking.briefFolded", false);
+let briefAt = 0, briefBusy = false;
+
+async function loadMarketBrief(refresh = false) {
+  if (briefBusy || (!refresh && Date.now() - briefAt < 15 * 60000)) return;
+  briefAt = Date.now();
+  briefBusy = true;
+  if (!state.brief || refresh) renderMarketBrief("시장 요약을 만드는 중… (20초쯤 걸려요)");
+  try {
+    const res = await fetch(`/api/macro/summary${refresh ? "?refresh=1" : ""}`);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || "시장 요약을 불러오지 못했어요");
+    if (!body.enabled) return ($("#market-brief").hidden = true);       // OPENAI_API_KEY 가 없으면 카드 자체를 안 보인다
+    state.brief = body.summary;
+    renderMarketBrief();
+  } catch (error) {
+    briefAt = 0;                                                         // 실패했으면 다음 갱신 때 다시 시도
+    renderMarketBrief(state.brief ? undefined : error.message);
+  } finally {
+    briefBusy = false;
+  }
+}
+
+function renderMarketBrief(notice) {
+  const box = $("#market-brief");
+  box.hidden = false;
+  const b = state.brief;
+  const fold = el("button", { class: "fold", title: state.briefFolded ? "펼치기" : "접기" }, state.briefFolded ? "▸" : "▾");
+  fold.addEventListener("click", () => {
+    state.briefFolded = !state.briefFolded;
+    store.save("stocking.briefFolded", state.briefFolded);
+    renderMarketBrief(notice);
+  });
+  const moodClass = { "위험 선호": "up", "위험 회피": "down" }[b?.mood] || "flat";
+  const head = el("div", { class: "brief-head" }, el("span", { class: "brief-title" }, fold, "미국 시장 요약"),
+    b ? el("span", { class: `brief-mood ${moodClass}` }, b.mood) : "");
+  box.classList.toggle("folded", state.briefFolded);
+  if (state.briefFolded) return box.replaceChildren(head);
+  if (!b || notice) return box.replaceChildren(head, el("p", { class: "muted" }, notice || ""));
+  const again = el("button", { class: "brief-again", title: "지금 소식으로 다시 만들어요 (AI 를 한 번 더 불러요)" }, "다시 만들기");
+  again.addEventListener("click", () => loadMarketBrief(true));
+  // 먼저 '어떤 소식이 시장을 움직였나'(근거 기사 링크), 그 아래 지표 3줄
+  const drivers = (b.drivers || []).map((d) => el("li", {},
+    d.after_close ? el("span", { class: "brief-tag", title: "미국 지수 기준일 장이 끝난 뒤에 나온 소식 (아직 지수에 반영 안 됨)" }, "마감 뒤") : "",
+    el("b", {}, d.what), d.effect ? ` ${d.effect}` : "",
+    el("div", { class: "brief-src" }, ...d.sources.map((s) =>
+      el("a", { href: s.url, target: "_blank", rel: "noopener noreferrer", title: s.title }, s.source)))));
+  box.replaceChildren(head,
+    el("p", { class: "brief-headline" }, b.headline),
+    el("div", { class: "brief-sub" }, "시장을 움직인 소식"),
+    drivers.length ? el("ol", {}, ...drivers) : el("p", { class: "muted" }, "이 움직임을 설명하는 기사를 찾지 못했어요."),
+    el("div", { class: "brief-sub" }, "지표"),
+    el("ul", { class: "brief-nums" }, ...b.lines.map((l) => el("li", {}, l))),
+    el("p", { class: "muted brief-meta" }, `${b.as_of ? `미국 지수 ${b.as_of} 종가 기준 · ` : ""}야후 파이낸스 · AI 요약`),
+    el("p", { class: "muted brief-meta" }, `${b.made_at ? `${b.made_at} 작성 · ` : ""}하루 한 번 만들어요 · `, again));
 }
 
 function marketRow(it) {
@@ -1065,7 +1127,7 @@ function marketRow(it) {
   const chg = it.unit === "pct" ? `${up ? "+" : ""}${it.change_bp.toFixed(1)}bp` : pct(it.change_pct);
   const name = el("span", { class: "nm" }, it.name);
   const li = el("li", { class: `mk${it.symbol === state.data?.symbol ? " active" : ""}`,
-                        title: `${it.name} (${it.symbol}) · ${it.live ? "토스 실시간" : `${it.date} 기준, 야후·몇 분 지연`}` },
+                        title: `${it.name} (${it.symbol}) · ${it.live ? "토스 실시간" : `${it.date} 기준, 야후 파이낸스`}` },
     // 실시간 줄은 이름 앞 초록 점 (묶음 제목에 '토스 실시간'), 나머지는 표시 없음
     el("span", { class: "nmw" }, it.live ? el("span", { class: "rt-dot", title: "토스 실시간" }, "●") : "", name),
     sparkline(it.spark, up),
@@ -1085,7 +1147,7 @@ function renderMarket() {
   }));
   const groups = state.market.filter((g) => state.marketTab === "전체" || g.group === state.marketTab);
   $("#market-list").replaceChildren(chips, ...groups.flatMap((g) => [
-    el("div", { class: "mk-group" }, g.group, el("span", { class: g.live ? "rt" : "delay" }, g.live ? "토스 실시간" : "야후 · 지연")),
+    el("div", { class: "mk-group" }, g.group, el("span", { class: g.live ? "rt" : "delay" }, g.live ? "토스 실시간" : "야후 파이낸스")),
     el("ul", { class: "stock-list" }, ...g.items.map(marketRow)),
   ]));
 }
@@ -1114,13 +1176,6 @@ function renderRecent() {
     return li;
   }));
 }
-$("#hold-watch").addEventListener("click", async () => {
-  const add = state.holdings.map((h) => h.symbol).filter((s) => !state.watchlist.includes(s));
-  if (!add.length) return toast({ type: "info", title: "이미 다 들어있어요", body: "보유종목이 모두 관심종목이에요." });
-  await saveWatchlist([...state.watchlist, ...add]);
-  toast({ type: "info", title: `관심종목 ${add.length}개 추가`, body: `${add.join(", ")} — 이제 지지/저항 알림이 와요.` });
-});
-
 // ── 검색 자동완성 ──
 let suggestTimer = null, suggestSel = -1, suggestItems = [];
 
@@ -1289,6 +1344,9 @@ function renderNews(payload) {
   if (payload.summary) {
     box.append(el("b", {}, `전반적 분위기: ${payload.summary.tone}`),
       el("ol", {}, ...payload.summary.lines.map((l) => el("li", {}, l))));
+  } else if (payload.ai_pending) {
+    box.append(el("p", { class: "muted" }, state.newsRefining === state.data.symbol
+      ? "AI 가 이 종목과 무관한 기사를 거르고 요약하는 중…" : "아직 AI 로 정리하지 않은 기사 목록이에요."));
   } else if (payload.items.length && !payload.summary_enabled) {
     box.append(el("p", { class: "muted" }, "OPENAI_API_KEY 를 넣으면 3줄 요약과 호재/악재 태그가 붙어요."));
   }
@@ -1307,7 +1365,7 @@ function renderNews(payload) {
   const items = split ? payload.items.filter((n) => n.lang === lang) : payload.items;
   $("#news").replaceChildren(...items.map((n) => {
     const li = el("li", {},
-      el("span", { class: `tag ${n.sentiment}` }, n.sentiment),
+      payload.ai_pending ? "" : el("span", { class: `tag ${n.sentiment}` }, n.sentiment),     // 호재/악재는 AI 가 정리한 뒤에
       el("a", { href: n.url, target: "_blank", rel: "noopener noreferrer" }, n.title),
       el("div", { class: "meta" }, `${n.date} · ${n.source}`));
     li.addEventListener("click", (e) => { if (e.target.tagName !== "A") focusDate(n.date); });
@@ -1421,13 +1479,36 @@ async function load(symbol) {
 
   $("#news").replaceChildren(el("li", { class: "muted" }, "뉴스 불러오는 중..."));
   $("#news-summary").replaceChildren();
+  state.newsPayload = null;
   const nres = await fetch(`/api/news/${encodeURIComponent(symbol)}`);
   if (state.data?.symbol !== symbol) return;               // 그 사이 다른 종목 눌렀으면 무시
   if (!nres.ok) return $("#news").replaceChildren(el("li", { class: "muted" }, "뉴스를 불러오지 못했어요"));
-  const payload = await nres.json();
+  showNews(await nres.json());
+  refineNews();
+}
+
+function showNews(payload) {
+  state.newsPayload = payload;
   state.news = payload.items;
   renderNews(payload);
   renderMarkers();
+}
+
+// AI 로 무관한 기사를 거르고 요약하는 건 토큰이 든다 → 차트만 볼 땐 안 하고, 뉴스를 실제로 볼 때만 한다
+// (뉴스 탭을 열었거나, 차트에 뉴스 마커를 켜서 호재/악재 색이 필요할 때)
+async function refineNews() {
+  const symbol = state.data?.symbol;
+  if (!state.newsPayload?.ai_pending || state.newsRefining === symbol) return;
+  if (state.stockTab !== "news" && !on("news")) return;
+  state.newsRefining = symbol;
+  renderNews(state.newsPayload);                           // 'AI 가 정리하는 중…' 표시
+  try {
+    const res = await fetch(`/api/news/${encodeURIComponent(symbol)}?ai=1`);
+    if (res.ok && state.data?.symbol === symbol) showNews(await res.json());
+  } finally {
+    state.newsRefining = null;
+    if (state.data?.symbol === symbol && state.newsPayload?.ai_pending) renderNews(state.newsPayload);   // 실패: 안내 문구로 되돌림
+  }
 }
 
 // ── 관심종목 ──

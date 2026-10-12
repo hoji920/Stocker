@@ -20,6 +20,7 @@ class Settings:
     finnhub_api_key: str
     openai_api_key: str
     openai_model: str
+    openai_brief_model: str     # 시장 요약 전용 (하루 한 번만 부르니 더 좋은 모델을 쓴다)
     token_cache_path: Path
     data_dir: Path
     alert_poll_sec: int
@@ -60,6 +61,7 @@ def get_settings() -> Settings:
         finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        openai_brief_model=os.getenv("OPENAI_BRIEF_MODEL", "gpt-5.5"),
         # 서버(Render 등)에선 DATA_DIR 로 저장 위치를 바꿀 수 있게 (영구 디스크를 붙이면 거기로)
         token_cache_path=Path(os.getenv("DATA_DIR", ROOT / "data")) / ".token_cache.json" if os.getenv("DATA_DIR")
         else ROOT / ".token_cache.json",

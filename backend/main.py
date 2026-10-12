@@ -8,6 +8,7 @@ import base64
 import hmac
 import json
 import mimetypes
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import date
@@ -20,7 +21,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import analysis, bars, demo, macro, movers, news, patterns, search, signals, underlying
+from backend import analysis, bars, demo, macro, market_brief, movers, news, patterns, search, signals, underlying
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
 from backend.config import get_settings, market_of
@@ -38,6 +39,12 @@ def cached(key: str, ttl: float, fn):
     value = fn()
     _cache[key] = (time.time(), value)
     return value
+
+
+def cache_peek(key: str, ttl: float):
+    """저장된 값이 아직 쓸 만하면 그 값, 아니면 None (새로 만들지는 않는다)."""
+    hit = _cache.get(key)
+    return hit[1] if hit and time.time() - hit[0] < ttl else None
 
 
 @lru_cache
@@ -370,16 +377,27 @@ def put_signal_settings(body: SignalSettings):
     return {"catalog": signals.CATALOG, "alert_types": types}
 
 
+NEWS_AI_TTL = 3600       # AI 로 거르고 요약한 뉴스는 종목당 1시간 그대로 쓴다 (토큰 아끼기)
+
+
 @app.get("/api/news/{symbol}")
-def stock_news(symbol: str):
+def stock_news(symbol: str, ai: bool = False):
+    """ai=0(차트를 열 때): 기사 목록만, AI 를 안 부른다. ai=1(뉴스 탭을 열 때): 무관한 기사 거르기 + 3줄 요약.
+    1시간 안에 이미 AI 로 정리한 게 있으면 ai=0 이어도 그걸 준다."""
     symbol = symbol.strip().upper()
     settings = get_settings()
     info, _, _ = load_stock(symbol)
     name = info.get("name", symbol).replace("(데모)", "")
     if info.get("macro"):
-        return {"items": [], "summary": None, "source_enabled": True, "summary_enabled": settings.summary_enabled}
-    return cached(f"news:{symbol}", 600,
-                  lambda: news.get_news(settings, market_of(symbol), symbol, name))
+        return {"items": [], "summary": None, "source_enabled": True, "summary_enabled": settings.summary_enabled,
+                "ai_pending": False}
+    done = cache_peek(f"news-ai:{symbol}", NEWS_AI_TTL)
+    if done is not None:
+        return done
+    fetch = lambda use_ai: news.get_news(settings, market_of(symbol), symbol, name, ai=use_ai)
+    if ai:
+        return cached(f"news-ai:{symbol}", NEWS_AI_TTL, lambda: fetch(True))
+    return cached(f"news:{symbol}", 600, lambda: fetch(False))
 
 
 @app.get("/api/macro")
@@ -394,6 +412,29 @@ def macro_quotes():
         if not groups:
             raise HTTPException(status_code=502, detail=f"시장 지표를 못 받았어요: {error}")
     return {"groups": groups}
+
+
+_brief_lock = threading.Lock()
+
+
+@app.get("/api/macro/summary")
+def macro_summary(refresh: bool = False):
+    """시장 탭 맨 위: 미국 시장을 움직인 소식 + 지수·금리·원자재 3줄.
+    하루에 한 번만 만든다 (그날 처음 열 때 만들고 파일에 저장 → 다음 날 처음 열 때까지 그대로). refresh=1 이면 지금 다시."""
+    settings = get_settings()
+    if not settings.summary_enabled:
+        return {"enabled": False, "summary": None}
+    day = market_brief.brief_day()
+    with _brief_lock:                          # 만드는 데 20초쯤 걸린다 → 그 사이 온 요청이 또 만들지 않게
+        summary = None if refresh else market_brief.load_saved(settings.data_dir, day)
+        if summary is None:
+            try:
+                groups = macro.quotes()
+                summary = market_brief.build(settings, groups, market_brief.headlines(settings, market_brief.as_of(groups)))
+            except Exception as error:
+                raise HTTPException(status_code=502, detail=f"시장 요약을 못 만들었어요 ({type(error).__name__})")
+            market_brief.save(settings.data_dir, day, summary)
+    return {"enabled": True, "summary": summary}
 
 
 def live_etf_quotes() -> list[dict]:

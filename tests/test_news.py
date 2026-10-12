@@ -55,6 +55,30 @@ def test_filter_keeps_all_when_answer_is_broken(monkeypatch):
     assert news.filter_relevant(s, "테슬라", "TSLA", items) == items
 
 
+def test_get_news_without_ai_calls_no_model_and_asks_to_come_back(monkeypatch):
+    monkeypatch.setattr(news, "fetch_us_news", lambda *a, **k: [_item("a", "en")])
+    monkeypatch.setattr(news, "fetch_kr_news_about", lambda *a, **k: [_item("b")])
+    boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError("AI 를 부르면 안 된다"))
+    monkeypatch.setattr(news, "filter_relevant", boom)
+    monkeypatch.setattr(news, "summarize", boom)
+    s = replace(get_settings(), openai_api_key="k")
+    out = news.get_news(s, "US", "TSLA", "테슬라", ai=False)
+    assert len(out["items"]) == 2 and out["summary"] is None and out["ai_pending"] is True
+    assert news.get_news(replace(s, openai_api_key=""), "US", "TSLA", "테슬라", ai=False)["ai_pending"] is False   # 키가 없으면 다시 올 필요 없음
+
+
+def test_news_endpoint_uses_ai_only_when_asked_and_reuses_it(monkeypatch):
+    from backend import main
+    calls = []
+    monkeypatch.setattr(main, "load_stock", lambda s: ({"name": "테슬라"}, [], False))
+    monkeypatch.setattr(main.news, "get_news", lambda s, market, symbol, name, ai: calls.append(ai) or {"ai_pending": not ai})
+    main._cache.pop("news:ZZTEST", None), main._cache.pop("news-ai:ZZTEST", None)
+    assert main.stock_news("zztest")["ai_pending"] is True and calls == [False]        # 차트를 열 때: AI 없이
+    assert main.stock_news("ZZTEST")["ai_pending"] is True and calls == [False]        # 10분 안엔 다시 안 가져온다
+    assert main.stock_news("ZZTEST", ai=True)["ai_pending"] is False and calls == [False, True]   # 뉴스 탭을 열 때
+    assert main.stock_news("ZZTEST")["ai_pending"] is False and calls == [False, True]  # 그 뒤 1시간은 정리된 걸 그대로
+
+
 def test_get_news_keeps_everything_without_summary(monkeypatch):
     monkeypatch.setattr(news, "fetch_us_news", lambda *a, **k: [_item("a", "en")])
     monkeypatch.setattr(news, "fetch_kr_news_about", lambda *a, **k: [_item("b")])
