@@ -22,6 +22,8 @@ class Settings:
     openai_model: str
     openai_brief_model: str     # 시장 요약 전용 (하루 한 번만 부르니 더 좋은 모델을 쓴다)
     openai_agent_model: str     # 채팅 에이전트 (도구를 골라 쓰는 일이라 mini 보다 한 단계 위)
+    openai_judge_models: tuple[str, ...]    # 판단 기록(judgments.py)을 남길 모델들. 여러 개면 같은 입력으로 각각 판단해 비교한다
+    judge_auto: bool            # 주 1회 판단 기록을 서버가 알아서 남길지 (토큰이 든다 → 기본은 꺼 둔다)
     token_cache_path: Path
     data_dir: Path
     alert_poll_sec: int
@@ -64,6 +66,8 @@ def get_settings() -> Settings:
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         openai_brief_model=os.getenv("OPENAI_BRIEF_MODEL", "gpt-5.5"),
         openai_agent_model=os.getenv("OPENAI_AGENT_MODEL", "gpt-5.4-mini"),
+        openai_judge_models=tuple(m.strip() for m in os.getenv("OPENAI_JUDGE_MODELS", "gpt-5.4-mini,gpt-5.5").split(",") if m.strip()),
+        judge_auto=os.getenv("JUDGE_AUTO", "0") == "1",
         # 서버(Render 등)에선 DATA_DIR 로 저장 위치를 바꿀 수 있게 (영구 디스크를 붙이면 거기로)
         token_cache_path=Path(os.getenv("DATA_DIR", ROOT / "data")) / ".token_cache.json" if os.getenv("DATA_DIR")
         else ROOT / ".token_cache.json",

@@ -363,6 +363,21 @@ button.ghost.on { border-color: var(--accent); color: var(--accent); }
 .brief-meta { font-size: 11px; }
 .brief-meta + .brief-meta { margin-top: 2px !important; }
 .brief-again { background: transparent; color: var(--muted); padding: 0; font-size: 11px; text-decoration: underline; }
+/* ── 판단 기록 탭 ── */
+.judge-facts { margin: 0 0 8px; padding-left: 18px; font-size: 13px; line-height: 1.7; color: var(--muted); }
+.judge-facts li:first-child { color: var(--text); font-weight: 600; }
+.judge-run { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--accent); }
+.judge-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; margin: 6px 0 4px; }
+.judge-table { width: 100%; min-width: 620px; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.judge-table th, .judge-table td { padding: 7px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.judge-table th { color: var(--muted); font-weight: 600; background: var(--bg); }
+.judge-table th:first-child, .judge-table td:first-child { text-align: left; }
+.judge-table tr:last-child td { border-bottom: 0; }
+.judge-table tr.primary td:first-child { font-weight: 700; }
+#judge-symbol details { margin-top: 12px; font-size: 13px; }
+#judge-symbol summary { cursor: pointer; color: var(--muted); }
+.judge-rec { margin-top: 8px; padding: 10px 12px; border-radius: 10px; background: var(--bg); line-height: 1.6; }
+.judge-rec-head { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
 /* ── 내 규칙·질문 탭 ── */
 .ask-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 14px 0 8px; }
 .ask-head:first-child { margin-top: 4px; }

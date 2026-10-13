@@ -67,6 +67,7 @@
           <button class="stab" data-st="news">뉴스</button>
           <button class="stab" data-st="drawings">내가 그은 선</button>
           <button class="stab" data-st="ask">내 규칙</button>
+          <button class="stab" data-st="judge">판단 기록</button>
         </div>
         <div data-stpanel="overview"><div id="why-box"></div><div id="insights"></div></div>
         <div data-stpanel="lines" hidden>
@@ -98,6 +99,15 @@
           <div id="rules-form" hidden></div>
           <div id="rules-card"></div>
           <button id="ask-open" class="ghost small">💬 이 종목 물어보기</button>
+        </div>
+        <div data-stpanel="judge" hidden>
+          <div class="ask-head">
+            <div><b>판단 기록</b><span class="muted">AI 가 "시장보다 더 오를지"를 미리 적어 두고, 기간이 지나면 시세로 채점해요. 추천이 아니에요.</span></div>
+            <button id="judge-run" class="ghost small" hidden>이번 주 판단 남기기</button>
+          </div>
+          <div id="judge-status"></div>
+          <div id="judge-board"></div>
+          <div id="judge-symbol"></div>
         </div>
       </section>
     </main>

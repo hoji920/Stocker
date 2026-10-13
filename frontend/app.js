@@ -1027,6 +1027,7 @@ function setStockTab(t) {
   document.querySelectorAll("[data-stpanel]").forEach((p) => (p.hidden = p.dataset.stpanel !== t));
   if (t === "news") refineNews();              // 뉴스 탭을 열 때 AI 정리 (함수 선언이라 아래에 있어도 된다)
   if (t === "ask") loadRulesCheck();
+  if (t === "judge") loadJudgments();
 }
 document.querySelectorAll(".stab").forEach((b) => b.addEventListener("click", () => setStockTab(b.dataset.st)));
 setStockTab(store.load("stocking.stockTab", "overview"));
@@ -1480,6 +1481,7 @@ async function load(symbol) {
   rememberRecent(symbol, state.data.name);
   if (isPhone()) setCollapsed(true);          // 폰: 목록에서 종목을 고르면 차트로 돌아감
   loadRulesCheck();                           // '내 규칙' 탭이 열려 있을 때만 (계산만, AI 아님)
+  loadJudgments();                            // '판단 기록' 탭이 열려 있을 때만
   renderChatContext();
   renderWatchlist();
   renderHoldings();
@@ -1494,6 +1496,88 @@ async function load(symbol) {
   showNews(await nres.json());
   refineNews();
 }
+
+// ── 판단 기록 ──
+// AI 의 판단을 미리 적어 두고 기간이 지나면 시세로 채점한다 (서버 judgments.py). 채점이 쌓이기 전의 판단은 근거 없는 의견이라
+// 종목별 판단은 접어 두고, 성적표를 먼저 보여준다.
+const ARM_NAMES = { news: "숫자 + 기사", nonews: "숫자만" };
+const DIR_NAMES = { outperform: "시장보다 강함", neutral: "판단 안 함", underperform: "시장보다 약함" };
+let judgePoll = null;
+
+async function loadJudgments() {
+  if (state.stockTab !== "judge") return;
+  const sym = state.data && !state.data.macro ? `?symbol=${encodeURIComponent(state.data.symbol)}` : "";
+  const res = await fetch(`/api/judgments${sym}`);
+  if (!res.ok) return $("#judge-status").replaceChildren(el("p", { class: "muted" }, "판단 기록을 불러오지 못했어요"));
+  const j = await res.json();
+  state.judge = j;
+  renderJudgments();
+  clearTimeout(judgePoll);
+  if (j.state.running) judgePoll = setTimeout(loadJudgments, 3000);       // 남기는 중이면 진행 상황을 따라간다
+}
+
+function renderJudgments() {
+  const j = state.judge, st = j.state, p = j.protocol;
+  const left = j.left;
+  const run = $("#judge-run");
+  run.hidden = st.running || left <= 0;
+  run.textContent = `이번 주 판단 남기기 (${left.toLocaleString()}건)`;
+  // 비용은 거의 전부 두 번째(비싼) 모델에서 나온다 → 모델별 건수를 같이 보여준다
+  const perModel = p.models.map((m) => `${m} ${j.by_model[m].toLocaleString()}건`).join(", ");
+  run.title = `AI 를 ${left.toLocaleString()}번 불러요 (한 주 전체: ${perModel}). 한 건에 약 1,200 토큰이에요.`;
+  const models = p.models.map((m, i) => (i === 0 ? `${m}(전 종목)` : `${m}(고정 ${p.premium}종목만)`)).join(", ");
+  const lines = [
+    `이번 주(${j.week}) ${j.recorded_this_week.toLocaleString()}건 기록` + (left <= 0 ? " · 이번 주는 끝났어요" : ` · ${left.toLocaleString()}건 남음` + (j.due ? "" : " · 월요일 아침 6시 이후에 남겨요")),
+    `종목 ${p.universe}개 + 내 종목 · 모델 ${models} · 조건 2가지(숫자 + 기사 / 숫자만) · 채점 ${p.horizons.join("·")}거래일 뒤 (${p.bench} 대비)`,
+    p.auto ? "주 1회 자동으로 남겨요." : "자동 기록은 꺼져 있어요. 버튼을 눌러야 남겨요.",
+  ];
+  const status = [el("ul", { class: "judge-facts" }, ...lines.map((t) => el("li", {}, t)))];
+  if (st.running) status.push(el("p", { class: "judge-run" }, `남기는 중… ${st.done} / ${st.total}건 · 토큰 ${st.tokens.toLocaleString()}`));
+  else if (st.finished && st.total) status.push(el("p", { class: "muted" }, `마지막 실행: ${st.done} / ${st.total}건 · 토큰 ${st.tokens.toLocaleString()}`
+    + (st.errors.length ? ` · 실패 ${st.errors.length}건 (${st.errors.slice(0, 3).join(" / ")})` : "")));
+  $("#judge-status").replaceChildren(...status);
+
+  // 성적표: 주된 판정은 20거래일·고정 100종목
+  const pc = (v) => (v == null ? "–" : `${v.toFixed(1)}%`);
+  const sg = (v) => (v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%p`);
+  const table = (rows, caption) => {
+    if (!rows.length) return [];
+    const body = rows.map((r) => el("tr", { class: r.primary ? "primary" : "" },
+      el("td", {}, `${r.model} · ${ARM_NAMES[r.arm]}`), el("td", {}, `${r.horizon}일`),
+      el("td", {}, `${r.scored} / ${r.recorded}`), el("td", {}, r.calls ? `${pc(r.hit_rate_pct)} (${r.calls}건)` : "–"),
+      el("td", {}, sg(r.mean_signed_excess_pct)), el("td", {}, r.scored ? `${pc(r.always_up_hit_rate_pct)} · ${sg(r.always_up_mean_excess_pct)}` : "–")));
+    return [el("div", { class: "brief-sub" }, caption), el("div", { class: "judge-scroll" }, el("table", { class: "judge-table" },
+      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면"].map((h) => el("th", {}, h))), ...body))];
+  };
+  const anyScored = j.fixed.some((r) => r.scored);
+  $("#judge-board").replaceChildren(
+    ...table(j.fixed, "고정 100종목 성적 (주된 판정은 20일)"),
+    ...table(j.paired || [], "모델 비교: 두 모델이 모두 판단한 종목·주만"),
+    ...table(j.mine, "내 종목 성적 (참고)"),
+    j.fixed.length && !anyScored ? el("p", { class: "muted hint" }, "아직 채점된 판단이 없어요. 5거래일 뒤에 첫 채점이, 20거래일 뒤에 주된 채점이 나와요.") : "",
+    j.weeks.length ? el("p", { class: "muted hint" }, "쓴 토큰: " + j.weeks.map((w) => `${w.week} ${w.model} ${w.records}건 ${w.tokens.toLocaleString()}`).join(" · ")) : "");
+
+  // 지금 보는 종목의 판단: 접어 둔다 (채점 전 의견이 매매 판단에 섞이지 않게)
+  const recs = j.symbol_records || [];
+  const box = $("#judge-symbol");
+  if (!recs.length) return box.replaceChildren();
+  const d = el("details", {}, el("summary", {}, `${state.data.name}에 대한 판단 ${recs.length}건 보기 (채점 전에는 근거 없는 의견이에요)`),
+    ...recs.slice().reverse().map((r) => {
+      const res = (h) => { const s = r.scored[h]; return s ? ` → 초과 ${sg(s.excess)} ${s.hit == null ? "" : s.hit ? "✓" : "✗"}` : " → 채점 대기"; };
+      return el("div", { class: "judge-rec" },
+        el("div", { class: "judge-rec-head" }, `${r.week} · ${r.model} · ${ARM_NAMES[r.arm]} · 기준 ${r.as_of} ${fmt(r.price)}`),
+        el("div", {}, `5일: ${DIR_NAMES[r.d5]} (확신 ${r.c5})${res(5)}`), el("div", {}, `20일: ${DIR_NAMES[r.d20]} (확신 ${r.c20})${res(20)}`),
+        el("div", { class: "muted" }, r.reason), el("div", { class: "muted" }, `틀렸다고 볼 조건: ${r.invalid_if}`));
+    }));
+  box.replaceChildren(d);
+}
+
+$("#judge-run").addEventListener("click", async () => {
+  $("#judge-run").hidden = true;
+  const res = await fetch("/api/judgments/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  if (!res.ok) toast({ type: "info", title: "판단 남기기 실패", body: (await res.json()).detail || "" });
+  setTimeout(loadJudgments, 1500);
+});
 
 // ── 내 규칙 (차트 아래 탭) + 질문 (오른쪽 탭) ──
 // 내 규칙: 내가 정한 조건(지지 근처·채널 하단에서 매수, 저항이 목표)에 지금 가격이 해당하는지. 서버가 계산만 한다 (AI 아님, 토큰 0)

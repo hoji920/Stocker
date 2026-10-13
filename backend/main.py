@@ -23,7 +23,8 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import agent, analysis, bars, demo, macro, market_brief, movers, news, patterns, rules, search, signals, underlying
+from backend import (agent, analysis, bars, demo, judgments, macro, market_brief, movers, news, patterns, rules, search, signals,
+                     underlying)
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
 from backend.config import get_settings, market_of
@@ -225,6 +226,8 @@ async def lifespan(_: FastAPI):
     if get_settings().toss_enabled:
         tasks = [asyncio.create_task(monitor.run_forever()), asyncio.create_task(hub.run_forever())]
         asyncio.create_task(asyncio.to_thread(universe))   # 검색 목록 미리 받아두기 (~7초)
+        if get_settings().judge_auto:
+            tasks.append(asyncio.create_task(judge_scheduler()))
     yield
     for t in tasks:
         t.cancel()
@@ -921,6 +924,124 @@ def agent_chat(body: ChatBody):
         return agent.chat(settings, AGENT_TOOLS, body.messages, (body.symbol or "").strip().upper() or None, my_rules()["note"])
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"답을 만들지 못했어요 ({type(error).__name__})")
+
+
+# ── 판단 기록 (에이전트의 판단을 미리 적어 두고 나중에 시세로 채점. 추천이 아니다) ──
+# 기록은 레포 안 judgments/ 에 둔다 (data/ 는 PC 마다 따로라, 두 PC 를 오가면 기록이 갈라진다 → 커밋해서 맞춘다)
+judge_log = judgments.Log(Path(__file__).resolve().parent.parent / "judgments")
+judge_state = {"running": False, "week": None, "done": 0, "total": 0, "tokens": 0, "errors": [], "started": None, "finished": None}
+_judge_lock = threading.Lock()
+
+
+def judge_symbols() -> list[tuple[str, bool]]:
+    """(종목, 내 종목인지). 고정 100종목 + 지금의 관심·보유 종목."""
+    try:
+        held = [h["symbol"] for h in holdings().get("items", [])]
+    except Exception:
+        held = []
+    mine = {s for s in store.watchlist() + held if market_of(s) == "US" and not macro.is_macro(s)}
+    return [(s, s in mine) for s in dict.fromkeys(judgments.UNIVERSE + sorted(mine))]
+
+
+def judge_plan() -> list[tuple[str, bool, list[tuple[str, str]]]]:
+    """이번 주에 적어야 할 것: (종목, 내 종목인지, [(모델, 조건)]). 첫 번째 모델은 전 종목, 나머지는 judgments.PREMIUM 만."""
+    models = get_settings().openai_judge_models
+    return [(s, mine, [(m, a) for m in judgments.models_for(s, models) for a in judgments.ARMS]) for s, mine in judge_symbols()]
+
+
+def judge_left(week: str) -> int:
+    """이번 주 계획 중 아직 안 적은 건수."""
+    done = judge_log.done_keys(week)
+    return sum((s, *c) not in done for s, _, combos in judge_plan() for c in combos)
+
+
+def judge_run(only: list[str] | None = None) -> dict:
+    """이번 주 판단을 남긴다. 이미 적은 (종목, 모델, 조건)은 건너뛰어서, 중간에 끊겨도 이어서 할 수 있다."""
+    settings = get_settings()
+    if not settings.summary_enabled or not settings.toss_enabled:
+        raise HTTPException(status_code=400, detail="토스 키와 OPENAI_API_KEY 가 있어야 판단을 남길 수 있어요")
+    if not _judge_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="이미 판단을 남기는 중이에요")
+    try:
+        week, done = judgments.week_key(), judge_log.done_keys(judgments.week_key())
+        jobs = [(s, mine, [c for c in combos if (s, *c) not in done]) for s, mine, combos in judge_plan() if not only or s in only]
+        jobs = [j for j in jobs if j[2]]
+        judge_state.update(running=True, week=week, done=0, total=sum(len(j[2]) for j in jobs), tokens=0, errors=[],
+                           started=datetime.now(judgments.KST).isoformat(timespec="seconds"), finished=None)
+        _, bench, _ = load_stock(judgments.BENCH)
+
+        def one(job):
+            symbol, mine, todo = job
+            try:
+                info, candles, _ = load_stock(symbol)
+                if len(candles) < 260:
+                    raise ValueError("일봉이 260개보다 적어요")
+                name = info.get("name", symbol)
+                items = stock_news(symbol, ai=False)["items"] if any(a == "news" for _, a in todo) else []
+                for rec in judgments.make_records(settings, week, symbol, name, mine, candles, bench, items, todo,
+                                                  save_input=judge_log.append_input):
+                    judge_log.append(rec)
+                    judge_state["done"] += 1
+                    judge_state["tokens"] += rec["tokens"]
+            except Exception as error:
+                judge_state["errors"].append(f"{symbol}: {type(error).__name__}: {str(getattr(error, 'detail', error))[:120]}")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(one, jobs))
+        return dict(judge_state)
+    finally:
+        judge_state.update(running=False, finished=datetime.now(judgments.KST).isoformat(timespec="seconds"))
+        _judge_lock.release()
+
+
+async def judge_scheduler():
+    """JUDGE_AUTO=1 일 때만: 그 주 판단이 아직 다 안 적혔고 때가 됐으면(화요일 07:00 이후) 남긴다. 15분마다 확인."""
+    while True:
+        try:
+            if judgments.is_due() and not judge_state["running"]:
+                if judge_left(judgments.week_key()) and not judge_state["errors"]:
+                    await asyncio.to_thread(judge_run)
+        except Exception as error:
+            print(f"[judgments] {type(error).__name__}: {error}")
+        await asyncio.sleep(900)
+
+
+class JudgeRunBody(BaseModel):
+    symbols: list[str] | None = None        # 일부 종목만 (시험용). 없으면 전체
+
+
+@app.post("/api/judgments/run")
+def judgments_run(body: JudgeRunBody):
+    only = [s.strip().upper() for s in body.symbols] if body.symbols else None
+    if judge_state["running"]:
+        raise HTTPException(status_code=409, detail="이미 판단을 남기는 중이에요")
+    threading.Thread(target=lambda: judge_run(only), daemon=True).start()
+    return {"started": True}
+
+
+@app.get("/api/judgments")
+def judgments_summary(symbol: str | None = None):
+    """기록 현황 + 채점 (읽을 때마다 지금 시세로 계산). symbol 을 주면 그 종목의 기록도."""
+    settings = get_settings()
+    records = judge_log.read()
+    scored = cached(f"judge-scored:{len(records)}:{candle_ttl()}", 300, lambda: judgments.score(records, lambda s: load_stock(s)[1]))
+    week = judgments.week_key()
+    plan = judge_plan()
+    out = {
+        "protocol": {"universe": len(judgments.UNIVERSE), "premium": len(judgments.PREMIUM), "horizons": judgments.HORIZONS,
+                     "primary": judgments.PRIMARY, "bench": judgments.BENCH, "models": settings.openai_judge_models,
+                     "arms": judgments.ARMS, "auto": settings.judge_auto},
+        "week": week, "due": judgments.is_due(), "planned": sum(len(c) for _, _, c in plan), "left": judge_left(week),
+        "by_model": {m: sum(sum(x[0] == m for x in c) for _, _, c in plan) for m in settings.openai_judge_models},
+        "recorded_this_week": len(judge_log.done_keys(week)),
+        "state": judge_state, "weeks": judgments.weeks_table(records),
+        "fixed": judgments.summarize(scored, fixed_only=True),
+        "paired": judgments.summarize(judgments.paired(scored), fixed_only=True),      # 모델끼리 비교는 둘 다 판단한 기록만
+        "mine": judgments.summarize([r for r in scored if r.get("mine")], fixed_only=False),
+    }
+    if symbol:
+        s = symbol.strip().upper()
+        out["symbol_records"] = [r for r in scored if r["symbol"] == s][-12:]
+    return out
 
 
 @app.get("/healthz")
