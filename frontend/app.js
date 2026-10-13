@@ -1528,7 +1528,8 @@ function renderJudgments() {
   const models = p.models.map((m, i) => (i === 0 ? `${m}(전 종목)` : `${m}(고정 ${p.premium}종목만)`)).join(", ");
   const lines = [
     `이번 주(${j.week}) ${j.recorded_this_week.toLocaleString()}건 기록` + (left <= 0 ? " · 이번 주는 끝났어요" : ` · ${left.toLocaleString()}건 남음` + (j.due ? "" : " · 월요일 아침 6시 이후에 남겨요")),
-    `종목 ${p.universe}개 + 내 종목 · 모델 ${models} · 조건 2가지(숫자 + 기사 / 숫자만) · 채점 ${p.horizons.join("·")}거래일 뒤 (${p.bench} 대비)`,
+    `이번 주 종목 ${p.symbols}개 (중형·고변동성 ${p.universe} + 내 종목` + (j.week >= p.ndx_from ? ` + 나스닥 100 중 ${p.ndx}, 겹치는 종목은 한 번만` : `. 나스닥 100 중 ${p.ndx}개는 ${p.ndx_from}부터`) + `) · 모델 ${models}`,
+    `조건 2가지(숫자 + 기사 / 숫자만) · 채점 ${p.horizons.join("·")}거래일 뒤 (${p.bench} 대비)`,
     p.auto ? "주 1회 자동으로 남겨요." : "자동 기록은 꺼져 있어요. 버튼을 눌러야 남겨요.",
   ];
   const status = [el("ul", { class: "judge-facts" }, ...lines.map((t) => el("li", {}, t)))];
@@ -1551,7 +1552,8 @@ function renderJudgments() {
   };
   const anyScored = j.fixed.some((r) => r.scored);
   $("#judge-board").replaceChildren(
-    ...table(j.fixed, "고정 100종목 성적 (주된 판정은 20일)"),
+    ...table(j.fixed, "중형·고변동성 100종목 성적 (주된 판정은 20일)"),
+    ...table(j.ndx || [], "나스닥 100 성적"),
     ...table(j.paired || [], "모델 비교: 두 모델이 모두 판단한 종목·주만"),
     ...table(j.mine, "내 종목 성적 (참고)"),
     j.fixed.length && !anyScored ? el("p", { class: "muted hint" }, "아직 채점된 판단이 없어요. 5거래일 뒤에 첫 채점이, 20거래일 뒤에 주된 채점이 나와요.") : "",

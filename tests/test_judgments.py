@@ -54,6 +54,16 @@ def test_make_records_uses_last_finished_close_and_saves_the_prompt(monkeypatch)
     assert all(r["prompt_sha"] == by_arm[r["arm"]]["prompt_sha"] and r["system_sha"] == j.sha(j._SYSTEM) for r in recs)
 
 
+def test_nasdaq_100_joins_from_w43_and_overlaps_count_once():
+    assert j.symbols_for("2026-W42") == j.UNIVERSE                                   # 첫 주는 중형 100 만
+    both = j.symbols_for("2026-W43")
+    assert len(both) == len(set(j.UNIVERSE) | set(j.NDX)) == len(set(both)) and both[:100] == j.UNIVERSE
+    assert len(j.NDX) == 99 and {"AAPL", "TSLA", "MSTR", "MU"} <= set(j.NDX) and not {"HONA", "SPCX"} & set(j.NDX)
+    recs = [_rec("MU"), _rec("AAPL"), _rec("IREN")]                                  # MU 는 양쪽, AAPL 은 나스닥만, IREN 은 중형만
+    assert [r["symbol"] for r in j.in_set(recs, j.NDX)] == ["MU", "AAPL"]
+    assert [r["symbol"] for r in j.in_set(recs, j.UNIVERSE)] == ["MU", "IREN"]
+
+
 def test_expensive_models_only_judge_the_fixed_subset():
     import random
     assert sorted(j.PREMIUM) == sorted(random.Random(20261013).sample(sorted(j.UNIVERSE), 30))     # 골라 넣지 않고 뽑은 그대로
@@ -64,10 +74,10 @@ def test_expensive_models_only_judge_the_fixed_subset():
 
 
 def test_paired_keeps_only_records_every_model_judged():
-    recs = [dict(_rec("AAA", model="mini"), scored={}), dict(_rec("AAA", model="big"), scored={}),
-            dict(_rec("BBB", model="mini"), scored={}),                                             # big 은 BBB 를 안 봤다
-            dict(_rec("AAA", model="mini", week="2026-W43"), scored={})]                            # 다음 주엔 mini 만
-    assert [(r["week"], r["symbol"], r["model"]) for r in j.paired(recs)] == [("2026-W42", "AAA", "mini"), ("2026-W42", "AAA", "big")]
+    recs = [dict(_rec("MU", model="mini"), scored={}), dict(_rec("MU", model="big"), scored={}),
+            dict(_rec("NET", model="mini"), scored={}),                                             # big 은 BBB 를 안 봤다
+            dict(_rec("MU", model="mini", week="2026-W43"), scored={})]                            # 다음 주엔 mini 만
+    assert [(r["week"], r["symbol"], r["model"]) for r in j.paired(recs)] == [("2026-W42", "MU", "mini"), ("2026-W42", "MU", "big")]
     assert j.paired([recs[2]]) == []                                                                # 모델이 하나뿐이면 비교할 게 없다
 
 
@@ -134,9 +144,9 @@ def test_score_uses_price_at_judgment_and_same_exit_day():
 
 def test_summarize_compares_with_always_up():
     stock, bench = _candles([100] * 10 + [100 + i for i in range(1, 26)]), _candles([100] * 35)
-    data = {"AAA": stock, "BBB": [dict(c, close=200 - c["close"]) for c in stock], "SPY": bench}   # BBB 는 내린다
-    recs = [_rec("AAA", d20="outperform", c20=80), _rec("BBB", d20="underperform", c20=60, price=100.0),
-            _rec("AAA", arm="nonews", d20="underperform", c20=70)]
+    data = {"MU": stock, "NET": [dict(c, close=200 - c["close"]) for c in stock], "SPY": bench}   # BBB 는 내린다
+    recs = [_rec("MU", d20="outperform", c20=80), _rec("NET", d20="underperform", c20=60, price=100.0),
+            _rec("MU", arm="nonews", d20="underperform", c20=70)]
     rows = {(r["arm"], r["horizon"]): r for r in j.summarize(j.score(recs, data.__getitem__))}
     news20 = rows[("news", 20)]
     assert (news20["calls"], news20["hit_rate_pct"], news20["primary"]) == (2, 100.0, True)

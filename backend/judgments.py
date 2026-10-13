@@ -24,6 +24,11 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
   W42 는 화요일 오전에 남겨서 기준 가격이 토스 주간거래 중의 가격이었다 (그 가격과 날짜는 기록에 있어 채점은 그대로 된다).
   토스는 한국 낮에 주간거래가 시작되면 그날 날짜의 일봉을 새로 만든다 → completed() 가 아직 안 끝난 봉을 빼고 본다.
 - 재현: W43 부터 모델에 준 입력 원문을 judgments/inputs/<주>.jsonl 에 남기고, 기록에는 그 해시(prompt_sha)와 지시문 해시(system_sha)를 적는다.
+- 종목군 추가: W43 부터 나스닥 100(NDX, 99종목)도 첫 번째 모델로 판단한다. UNIVERSE 는 내가 고른 후보에서 나온 묶음이라
+  치우쳤을 수 있어서, 고른 기준이 객관적인 묶음을 하나 더 둔다. 두 묶음의 성적은 따로 낸다 (어느 종목이 어느 묶음인지는 이 파일의 목록으로 정한다).
+  질문은 두 묶음 모두 'SPY 보다 더 오를지'로 같다. 나스닥 100 종목이 원래 SPY 보다 잘 오르는 효과는 '전부 강함으로 찍기' 기준선에 그대로 나타나므로
+  그 기준선과 비교해서 본다. QQQ 가격도 기록에 남긴다 (qqq_as_of, qqq_price).
+- 여기까지가 첫 채점(W42 의 5거래일 뒤) 전에 바꾼 것이다. 채점이 나온 뒤에는 기준을 바꾸지 않는다.
 
 이 기록은 추천이 아니다. 채점이 쌓이기 전의 판단은 근거 없는 의견과 같다.
 """
@@ -44,6 +49,14 @@ UNIVERSE = """ACHR AEHR AI AMC APP ASTS BBAI BE BTBT CELH CIFR CLS COHR CORZ CRS
 LCID LITE LSCC MARA MRNA MSTR MU NET NNE NVAX OPEN PLTR PTON QS RDW RIOT RKLB SEDG SMCI SNAP SNOW SOUN U UPST VRT
 AA ACLS AFRM ALAB AMKR ARM BB BEAM CCJ CHPT CLF CLSK COIN CRDO CVNA DELL DUOL ENPH ESTC FSLR GTLB HOOD IONQ JOBY LEU
 LMND LUNR MDB MRVL NBIS NIO NTLA OKLO PATH PLUG QBTS RBLX RGTI RIVN RUN SHOP SMR SOFI TTD UEC VKTX VST W WULF ZS""".split()
+# 두 번째 종목군: 나스닥 100 (2026-10-13 en.wikipedia.org/wiki/List_of_NASDAQ-100_companies 의 101개 중,
+# 일봉이 260개가 안 되는 HONA·SPCX 를 뺀 99개). 지수 구성이 바뀌어도 이 목록을 그대로 따라간다. 13개는 UNIVERSE 와 겹친다.
+NDX = """AAPL ABNB ADBE ADI ADP ADSK AEP ALAB ALNY AMAT AMD AMGN AMZN APP ARM ASML AVGO AXON BKNG BKR CCEP CDNS CEG CMCSA COST CPRT
+CRWD CRWV CSCO CSX CTAS DASH DDOG DXCM EXC FANG FAST FER FTNT GEHC GILD GOOG GOOGL HON IDXX INTC INTU ISRG KDP KLAC LIN LITE LRCX MAR
+MCHP MDLZ MELI META MNST MPWR MRNA MRVL MSFT MSTR MU NBIS NFLX NVDA NXPI ODFL ORLY PANW PAYX PCAR PDD PEP PLTR PYPL QCOM REGN RKLB
+ROP ROST SBUX SHOP SNDK SNPS STX TER TMUS TRI TSLA TTWO TXN VRTX WDAY WDC WMT XEL""".split()
+NDX_FROM = "2026-W43"    # 이 주부터 나스닥 100 도 판단한다 (W42 는 UNIVERSE 와 내 종목만)
+BENCH2 = "QQQ"       # 나스닥 100 ETF. 판단의 질문은 SPY 대비로 통일하고, QQQ 가격은 나중 분석용으로 같이 적어 둔다
 # 첫 번째 모델 말고는 이 종목들만 판단한다 (비용). random.Random(20261013).sample(sorted(UNIVERSE), 30)
 PREMIUM = """ACLS AI ALAB APP BB BBAI BTBT CCJ CHPT COHR COIN CRSP DDOG DELL GTLB LSCC MRNA MRVL MU NET PLUG QBTS RBLX RDW RIOT RIVN SOFI
 TTD VRT VST""".split()
@@ -62,6 +75,11 @@ _SYSTEM = (
     '- JSON 으로만 답한다: {"d5": "outperform|neutral|underperform", "c5": 50, "d20": "...", "c20": 50, '
     '"reason": "한국어 1~2문장", "invalid_if": "이 판단이 틀렸다고 볼 조건을 한국어 한 문장으로"}'
 )
+
+
+def symbols_for(week: str) -> list[str]:
+    """그 주에 판단할 고정 종목 (내 종목은 따로 더한다). 겹치는 종목은 한 번만."""
+    return list(dict.fromkeys(UNIVERSE + (NDX if week >= NDX_FROM else [])))
 
 
 def models_for(symbol: str, models: tuple[str, ...]) -> tuple[str, ...]:
@@ -185,13 +203,15 @@ class Log:
 
 def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bool, candles: list[dict], bench: list[dict],
                  items: list[dict], todo: list[tuple[str, str]], now: datetime | None = None,
-                 save_input=None) -> list[dict]:
+                 save_input=None, bench2: list[dict] | None = None) -> list[dict]:
     """한 종목에 대해 아직 안 적은 (모델, 조건)들을 판단한다. 조건이 달라도 숫자·기준일·가격은 같다.
-    candles·bench 는 끝난 봉까지만(completed) 쓴다. save_input(entry) 로 모델에 준 입력 원문을 남긴다."""
+    candles·bench 는 끝난 봉까지만(completed) 쓴다. save_input(entry) 로 모델에 준 입력 원문을 남긴다. bench2 = QQQ (가격만 적어 둔다)."""
     candles, bench = completed(candles, now), completed(bench, now)
     feats, as_of = features(candles, bench), candles[-1]["time"]
-    base = {"week": week, "symbol": symbol, "name": name, "mine": mine, "fixed": symbol in UNIVERSE, "as_of": as_of,
+    base = {"week": week, "symbol": symbol, "name": name, "mine": mine, "fixed": symbol in UNIVERSE, "ndx": symbol in NDX, "as_of": as_of,
             "price": candles[-1]["close"], "bench_as_of": bench[-1]["time"], "bench_price": bench[-1]["close"]}
+    if bench2 and (q := completed(bench2, now)):
+        base.update(qqq_as_of=q[-1]["time"], qqq_price=q[-1]["close"])
     prompts = {arm: build_prompt(symbol, name, as_of, feats, items if arm == "news" else None) for arm in {a for _, a in todo}}
     for arm, text in prompts.items():
         if save_input:
@@ -239,10 +259,16 @@ def score(records: list[dict], candles_of) -> list[dict]:
     return out
 
 
+def in_set(records: list[dict], symbols: list[str]) -> list[dict]:
+    """그 종목군의 기록만. 기록에 적힌 표시가 아니라 이 파일의 목록으로 가른다 (W42 기록에는 ndx 표시가 없다)."""
+    keep = set(symbols)
+    return [r for r in records if r["symbol"] in keep]
+
+
 def summarize(scored: list[dict], fixed_only: bool = True) -> list[dict]:
     """(모델, 조건, 기간)별 성적. always_up = 같은 기록에 전부 outperform 이라고 찍었을 때."""
     rows = []
-    recs = [r for r in scored if r.get("fixed") or not fixed_only]
+    recs = in_set(scored, UNIVERSE) if fixed_only else scored
     for model in sorted({r["model"] for r in recs}):
         for arm in ARMS:
             g = [r for r in recs if r["model"] == model and r["arm"] == arm]
@@ -269,12 +295,12 @@ def summarize(scored: list[dict], fixed_only: bool = True) -> list[dict]:
 
 def paired(scored: list[dict]) -> list[dict]:
     """모델끼리 공정하게 비교할 기록만: 고정 종목 중, 같은 (주, 종목, 조건)을 모든 모델이 판단한 것."""
+    scored = in_set(scored, UNIVERSE)
     models = {r["model"] for r in scored}
     seen: dict[tuple, set] = {}
     for r in scored:
-        if r.get("fixed"):
-            seen.setdefault((r["week"], r["symbol"], r["arm"]), set()).add(r["model"])
-    return [r for r in scored if r.get("fixed") and seen.get((r["week"], r["symbol"], r["arm"])) == models] if len(models) > 1 else []
+        seen.setdefault((r["week"], r["symbol"], r["arm"]), set()).add(r["model"])
+    return [r for r in scored if seen.get((r["week"], r["symbol"], r["arm"])) == models] if len(models) > 1 else []
 
 
 def weeks_table(records: list[dict]) -> list[dict]:

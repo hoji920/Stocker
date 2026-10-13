@@ -934,13 +934,13 @@ _judge_lock = threading.Lock()
 
 
 def judge_symbols() -> list[tuple[str, bool]]:
-    """(종목, 내 종목인지). 고정 100종목 + 지금의 관심·보유 종목."""
+    """(종목, 내 종목인지). 고정 100종목 + 나스닥 100 + 지금의 관심·보유 종목."""
     try:
         held = [h["symbol"] for h in holdings().get("items", [])]
     except Exception:
         held = []
     mine = {s for s in store.watchlist() + held if market_of(s) == "US" and not macro.is_macro(s)}
-    return [(s, s in mine) for s in dict.fromkeys(judgments.UNIVERSE + sorted(mine))]
+    return [(s, s in mine) for s in dict.fromkeys(judgments.symbols_for(judgments.week_key()) + sorted(mine))]
 
 
 def judge_plan() -> list[tuple[str, bool, list[tuple[str, str]]]]:
@@ -969,6 +969,7 @@ def judge_run(only: list[str] | None = None) -> dict:
         judge_state.update(running=True, week=week, done=0, total=sum(len(j[2]) for j in jobs), tokens=0, errors=[],
                            started=datetime.now(judgments.KST).isoformat(timespec="seconds"), finished=None)
         _, bench, _ = load_stock(judgments.BENCH)
+        _, bench2, _ = load_stock(judgments.BENCH2)
 
         def one(job):
             symbol, mine, todo = job
@@ -979,7 +980,7 @@ def judge_run(only: list[str] | None = None) -> dict:
                 name = info.get("name", symbol)
                 items = stock_news(symbol, ai=False)["items"] if any(a == "news" for _, a in todo) else []
                 for rec in judgments.make_records(settings, week, symbol, name, mine, candles, bench, items, todo,
-                                                  save_input=judge_log.append_input):
+                                                  save_input=judge_log.append_input, bench2=bench2):
                     judge_log.append(rec)
                     judge_state["done"] += 1
                     judge_state["tokens"] += rec["tokens"]
@@ -1027,7 +1028,8 @@ def judgments_summary(symbol: str | None = None):
     week = judgments.week_key()
     plan = judge_plan()
     out = {
-        "protocol": {"universe": len(judgments.UNIVERSE), "premium": len(judgments.PREMIUM), "horizons": judgments.HORIZONS,
+        "protocol": {"universe": len(judgments.UNIVERSE), "ndx": len(judgments.NDX), "ndx_from": judgments.NDX_FROM, "symbols": len(plan),
+                     "premium": len(judgments.PREMIUM), "horizons": judgments.HORIZONS,
                      "primary": judgments.PRIMARY, "bench": judgments.BENCH, "models": settings.openai_judge_models,
                      "arms": judgments.ARMS, "auto": settings.judge_auto},
         "week": week, "due": judgments.is_due(), "planned": sum(len(c) for _, _, c in plan), "left": judge_left(week),
@@ -1035,6 +1037,7 @@ def judgments_summary(symbol: str | None = None):
         "recorded_this_week": len(judge_log.done_keys(week)),
         "state": judge_state, "weeks": judgments.weeks_table(records),
         "fixed": judgments.summarize(scored, fixed_only=True),
+        "ndx": judgments.summarize(judgments.in_set(scored, judgments.NDX), fixed_only=False),
         "paired": judgments.summarize(judgments.paired(scored), fixed_only=True),      # 모델끼리 비교는 둘 다 판단한 기록만
         "mine": judgments.summarize([r for r in scored if r.get("mine")], fixed_only=False),
     }
