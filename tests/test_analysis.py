@@ -287,3 +287,49 @@ def test_atr_and_swings_are_remembered_per_frame_not_across_frames():
     assert analysis.atr(a).equals(atr_a) and analysis.swing_points(a) == sw_a   # 다시 a 로 돌아와도 a 의 값
     sw_a.append("x")
     assert "x" not in analysis.swing_points(a)                        # 받은 목록을 고쳐도 기억해 둔 값은 그대로
+
+def _exponential_market(n=200, start=50.0, rate=0.01, swing=0.08):
+    """매일 1%씩 오르는 추세 위에서 20봉마다 저점을 찍는 시세. 저점들은 '로그에서 직선'(= 같은 % 속도)인 선 위에 있다."""
+    from backend import analysis  # noqa: F401
+    t = pd.date_range("2025-01-01", periods=n, freq="B")
+    rows = []
+    for i in range(n):
+        base = start * np.exp(rate * i)
+        c = base * (1 + swing * abs(np.sin(np.pi * i / 20)))
+        rows.append({"time": t[i].date().isoformat(), "open": c, "high": c * 1.004, "low": c * 0.996, "close": c, "volume": 1e6})
+    return rows
+
+
+def test_log_trendline_follows_constant_percent_growth(monkeypatch):
+    from backend import analysis
+    df = pd.DataFrame(_exponential_market())
+    linear = trendline_candidates(df)["support"][0]
+    monkeypatch.setattr(analysis, "LOG_TRENDS", True)
+    log = trendline_candidates(df)["support"][0]
+    assert log["log"] and not linear["log"]
+    assert log["touches"] > linear["touches"] and log["touches"] >= 5        # 직선은 뒤쪽 저점에서 멀어지고, 로그 선은 다 닿는다
+    assert abs(log["slope_pct"] - 1.0) < 0.05                                # 하루 1% 씩 오르는 선
+    first, last = log["points"]
+    mid = log["touch_points"][len(log["touch_points"]) // 2]                  # 가운데 닿은 점은 두 끝점의 '비율' 보간 위에 있다
+    times = df["time"].tolist()
+    frac = (times.index(mid["time"]) - times.index(first["time"])) / (times.index(last["time"]) - times.index(first["time"]))
+    assert abs(mid["value"] - first["value"] * (last["value"] / first["value"]) ** frac) < 0.01 * mid["value"]
+    assert abs(log["price"] / df["low"].iloc[-1] - 1) < 0.02                 # 오늘 값이 실제 저점 근처
+
+
+def test_log_channel_is_parallel_in_ratio(monkeypatch):
+    from backend import analysis
+    df = pd.DataFrame(_exponential_market())
+    monkeypatch.setattr(analysis, "LOG_TRENDS", True)
+    ch = find_channel(df, find_trendlines(df))
+    assert ch and ch["log"] and ch["upper"] > ch["lower"] and 0 <= ch["position_pct"] <= 100
+    ratio = lambda pts_a, pts_b, k: pts_b[k]["value"] / pts_a[k]["value"]
+    assert abs(ratio(ch["base"], ch["other"], 0) - ratio(ch["base"], ch["other"], 1)) < 1e-3     # 두 선은 어디서나 같은 비율만큼 떨어져 있다
+    assert abs(ch["step_pct"] - 1.0) < 0.05
+
+
+def test_linear_is_still_the_default():
+    from backend import analysis
+    assert analysis.LOG_TRENDS is False
+    tl = find_trendlines(pd.DataFrame(_exponential_market()))
+    assert tl and all(not t["log"] for t in tl)

@@ -14,6 +14,7 @@
 '내가 정한 규칙에 맞는 자리인지'를 빠뜨리지 않고 확인하는 용도.
 """
 from __future__ import annotations
+import math
 
 from backend import analysis
 
@@ -66,8 +67,9 @@ def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None, price: 
         return horiz + trend
 
     sup, res, ch = _nearest(lines("support"), price, True), _nearest(lines("resistance"), price, False), chart.get("channel")
-    if ch and live and ch["upper"] != ch["lower"]:            # 채널 안 위치도 지금 가격으로 다시
-        ch = {**ch, "position_pct": round((price - ch["lower"]) / (ch["upper"] - ch["lower"]) * 100, 1)}
+    if ch and live and ch["upper"] != ch["lower"]:            # 채널 안 위치도 지금 가격으로 다시 (로그 채널이면 로그 눈금에서)
+        f = math.log if ch.get("log") else float
+        ch = {**ch, "position_pct": round((f(price) - f(ch["lower"])) / (f(ch["upper"]) - f(ch["lower"])) * 100, 1)}
     reasons, checks, near_support, in_channel_low = [], [], False, False     # checks = 화면의 체크 목록 (조건 하나씩 맞는지)
     if sup:
         gap = (price - sup["price"]) / atr

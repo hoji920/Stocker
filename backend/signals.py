@@ -172,9 +172,14 @@ def _pattern_events(df: pd.DataFrame) -> list[tuple[int, str, str]]:
             span = sub["time"].tolist().index(ch["base"][1]["time"]) - sub["time"].tolist().index(ch["base"][0]["time"])
             per_bar = slope / span if span else 0
             up_prev, lo_prev = ch["upper"], ch["lower"]
-            if close[k - 1] <= up_prev and close[k] > (up_prev + per_bar) * 1.005 and ch["base_kind"] == "support":
+            if ch.get("log"):                       # 로그 채널은 두 선이 매일 같은 비율로 움직인다
+                step = 1 + ch["step_pct"] / 100
+                up_next, lo_next = up_prev * step, lo_prev * step
+            else:
+                up_next, lo_next = up_prev + per_bar, lo_prev + per_bar
+            if close[k - 1] <= up_prev and close[k] > up_next * 1.005 and ch["base_kind"] == "support":
                 out.append((k, "ch_up", ch["label"]))
-            if close[k - 1] >= lo_prev and close[k] < (lo_prev + per_bar) * 0.995 and ch["base_kind"] == "resistance":
+            if close[k - 1] >= lo_prev and close[k] < lo_next * 0.995 and ch["base_kind"] == "resistance":
                 out.append((k, "ch_down", ch["label"]))
     return out
 

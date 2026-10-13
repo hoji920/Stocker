@@ -23,8 +23,8 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import (agent, analysis, bars, demo, judgments, macro, market_brief, movers, news, patterns, rules, search, signals,
-                     underlying)
+from backend import (agent, analysis, bars, demo, judgments, macro, market_brief, movers, news, patterns, reading, rules, search,
+                     signals, underlying)
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
 from backend.config import get_settings, market_of
@@ -110,7 +110,7 @@ def levels_for_alert(symbol: str) -> tuple[str, str, dict]:
 
 def signals_for(symbol: str, candles: list[dict]) -> dict:
     """확정 봉 기준 신호. 봉 날짜가 같으면 결과도 같아서 날짜로 캐시."""
-    key = f"sig:{symbol}:{candles[-1]['time']}:{len(candles)}"
+    key = f"sig:{symbol}:{candles[-1]['time']}:{len(candles)}:{analysis.LOG_TRENDS}"
     return cached(key, 600, lambda: signals.detect(candles, market_of(symbol)))
 
 
@@ -213,6 +213,7 @@ def move_alerts(symbol: str, price: float, seen) -> list[dict]:
 
 
 store = Store(get_settings().data_dir)
+analysis.LOG_TRENDS = bool(store.settings().get("log_trends"))     # 추세선·채널을 로그 가격에서 그을지 (차트의 '로그' 버튼)
 monitor = Monitor(get_settings(), store, levels_for_alert,
                   lambda symbols: toss().prices(symbols), price_formatter, signal_alerts, move_alerts)
 
@@ -329,6 +330,7 @@ def chart(symbol: str, interval: str = "1d"):
         "macro": bool(info.get("macro")),          # 지수·선물·금리·원자재: 실시간·관심종목·보유 없음
         "prev_close": prev_close,
         "candles": candles,
+        "log_scale": analysis.LOG_TRENDS,          # 추세선·채널을 로그 가격에서 그었나 (화면의 가격축도 로그로 맞춘다)
         **analysis.analyze(candles, price_formatter(currency), bars.UNIT_WORD[interval]),
         # 차트 신호는 '장 마감 확정 일봉' 기준이라 일봉에서만
         "signals": signals_for(symbol, daily) if interval == "1d" else None,
@@ -340,6 +342,19 @@ def chart(symbol: str, interval: str = "1d"):
         # '채널 긋기'에서 찍을 점 추천 (비스듬히 그은 선은 일봉 전용)
         "channel_suggestions": analysis.channel_suggestions(analysis.to_frame(daily)) if interval == "1d" else [],
     }
+
+
+class ScaleBody(BaseModel):
+    log: bool
+
+
+@app.put("/api/settings/scale")
+def put_scale(body: ScaleBody):
+    """추세선·채널을 로그 가격에서 그을지. 화면만이 아니라 신호·알림·내 규칙도 같은 선을 쓰게 서버 설정으로 둔다.
+    수평 지지/저항과 내가 그은 선은 그대로다."""
+    store.update_settings(log_trends=body.log)
+    analysis.LOG_TRENDS = body.log
+    return {"log": analysis.LOG_TRENDS}
 
 
 @app.get("/api/live")
@@ -708,6 +723,28 @@ def check_rules(symbol: str, price: float | None = None, batch: dict | None = No
     return rules.evaluate(data, my_rules(), price_formatter(data["currency"]), holding_of(symbol), price=now)
 
 
+@app.get("/api/reading/{symbol}")
+def chart_reading(symbol: str, make: bool = False, price: float | None = None):
+    """한눈에 보기의 '구조 읽기'. make=0 이면 오늘 이미 만든 것만 돌려주고(없으면 null), make=1 일 때만 AI 를 부른다.
+    같은 종목은 그날의 마지막 봉·눈금 설정이 같으면 다시 만들지 않는다 (6시간)."""
+    symbol = symbol.strip().upper()
+    settings = get_settings()
+    if not settings.summary_enabled:
+        return {"enabled": False, "reading": None}
+    data = chart(symbol, "1d")
+    if data["macro"]:
+        return {"enabled": False, "reading": None}
+    key = f"reading:{symbol}:{data['candles'][-1]['time']}:{analysis.LOG_TRENDS}"
+    done = cache_peek(key, 6 * 3600)
+    if done is None and make:
+        now = live_price(symbol, data["candles"][-1]["close"], price)
+        try:
+            done = cached(key, 6 * 3600, lambda: reading.read(settings, data, now, price_formatter(data["currency"])))
+        except Exception as error:
+            raise HTTPException(status_code=502, detail=f"구조 읽기를 만들지 못했어요 ({type(error).__name__})")
+    return {"enabled": True, "reading": done}
+
+
 @app.get("/api/rules")
 def get_rules():
     return {"rules": my_rules(), "defaults": rules.DEFAULT}
@@ -792,7 +829,7 @@ def backtest_rules(symbol: str, years: int = 3) -> dict:
     pages = (years * 252 + rules.LOOKBACK) // 200 + 1
     candles = cached(f"days:{symbol}:{pages}", 3600, lambda: toss().daily_candles(symbol, pages))
     mine = my_rules()
-    key = f"rule-bt:{symbol}:{years}:{candles[-1]['time']}:{json.dumps(mine, sort_keys=True)}"
+    key = f"rule-bt:{symbol}:{years}:{candles[-1]['time']}:{analysis.LOG_TRENDS}:{json.dumps(mine, sort_keys=True)}"
     return cached(key, 3600, lambda: rules.backtest(candles, mine, price_formatter(currency_of(info, symbol)), symbol,
                                                     info.get("name", symbol), bars=years * 252))
 

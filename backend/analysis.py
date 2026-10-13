@@ -18,6 +18,22 @@ import pandas as pd
 _memo = threading.local()
 
 
+# 추세선·채널을 로그 가격에서 긋는다 (main 이 사용자 설정으로 켠다). 몇 배씩 오른 종목은 같은 기울기가 '같은 % 속도'여야
+# 자연스럽다: 40 → 140 달러 구간을 직선으로 이으면 뒤쪽 저점들이 선에서 점점 멀어진다.
+# 기본은 선형 — research/ 의 검증은 전부 선형 선으로 했다. 수평 지지/저항은 어느 쪽이든 같다.
+LOG_TRENDS = False
+_OHLC = ("open", "high", "low", "close")
+
+
+def _log_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """가격을 로그로 바꾼 사본 (attrs['log'] 표시). 스윙 포인트의 위치는 그대로고 값만 로그가 된다."""
+    out = df.copy()
+    for c in _OHLC:
+        out[c] = np.log(df[c].astype(float))
+    out.attrs["log"] = True
+    return out
+
+
 def _once(df: pd.DataFrame, key, compute):
     if getattr(_memo, "df", None) is not df:
         _memo.df, _memo.values = df, {}
@@ -171,11 +187,14 @@ def _rank_trendlines(df: pd.DataFrame, points: list[tuple[int, float]], kind: st
     resistance: 고점끼리 연결, 종가가 선 위로 tol 이상 올라가면 무효
     """
     n = len(df)
+    log = bool(df.attrs.get("log"))                       # 로그 프레임이면 아래 값들은 전부 로그 가격, 내보낼 때만 되돌린다
+    val = (lambda v: float(np.exp(v))) if log else float
     close = df["close"].to_numpy()
     xs = np.arange(n)
     pts = [p for p in points if p[0] >= n - lookback]
     # 가파른 선을 오늘까지 늘이면 현재가와 동떨어진 값이 된다 (예: 현재가 35 인데 지지 추세선 12) → 그런 선은 후보에서 뺀다
-    far = _far(float(close[-1]), float(np.nan_to_num(atr(df).iloc[-1])), atrs=6, pct=0.20)
+    last_atr = float(np.nan_to_num(atr(df).iloc[-1]))
+    far = max(6 * last_atr, float(np.log(1.2))) if log else _far(float(close[-1]), last_atr, atrs=6, pct=0.20)
     cands = []
     for i, (a, pa) in enumerate(pts):
         for b, pb in pts[i + 1:]:
@@ -183,7 +202,7 @@ def _rank_trendlines(df: pd.DataFrame, points: list[tuple[int, float]], kind: st
                 continue
             slope = (pb - pa) / (b - a)
             line = pa + slope * (xs[a:] - a)
-            if line[-1] <= 0 or abs(line[-1] - close[-1]) > far:
+            if (not log and line[-1] <= 0) or abs(line[-1] - close[-1]) > far:
                 continue
             seg = close[a:]
             if kind == "support" and (seg < line - tol).any():
@@ -223,25 +242,33 @@ def _rank_trendlines(df: pd.DataFrame, points: list[tuple[int, float]], kind: st
             "stars": stars,
             "score": score,
             "why": why + (" · 아직 두 점만 이은 임시 선" if touches < 3 else ""),
-            "points": [{"time": _t(df, a), "value": round(pa, 4)},
-                       {"time": _t(df, -1), "value": round(now, 4)}],
-            "touch_points": [{"time": _t(df, j), "value": round(pa + slope * (j - a), 4)} for j in touched],
-            "price": round(now, 4),
-            "slope_pct": round(slope / now * 100, 3),     # 하루당 기울기 %
-            "distance_pct": round((now / close[-1] - 1) * 100, 2),
+            "points": [{"time": _t(df, a), "value": round(val(pa), 4)},
+                       {"time": _t(df, -1), "value": round(val(now), 4)}],
+            "touch_points": [{"time": _t(df, j), "value": round(val(pa + slope * (j - a)), 4)} for j in touched],
+            "price": round(val(now), 4),
+            # 하루당 기울기 %. 로그 선은 매일 같은 비율로 움직인다
+            "slope_pct": round((float(np.exp(slope)) - 1) * 100 if log else slope / now * 100, 3),
+            "distance_pct": round((val(now) / val(close[-1]) - 1) * 100, 2),
+            "log": log,
         })
     return out
 
 
 def _trend_tol(df: pd.DataFrame) -> float:
+    """추세선에 '닿았다'고 볼 허용폭: ATR 절반, 가격의 0.5%~3% 사이. 로그 프레임에서는 같은 뜻의 로그 폭."""
+    if df.attrs.get("log"):
+        return float(np.clip(float(atr(df).iloc[-1]) * 0.5, 0.005, 0.03))
     last_close = float(df["close"].iloc[-1])
     return float(np.clip(float(atr(df).iloc[-1]) * 0.5, last_close * 0.005, last_close * 0.03))
 
 
 def trendline_candidates(df: pd.DataFrame, window: int = 5, k: int = 3) -> dict:
-    """방향별 후보 k개. {"support": [...], "resistance": [...]} — 각 목록의 첫 번째가 가장 믿을 만한 선."""
+    """방향별 후보 k개. {"support": [...], "resistance": [...]} — 각 목록의 첫 번째가 가장 믿을 만한 선.
+    선은 꼬리(고가·저가)의 스윙 포인트를 잇고, 뚫렸는지는 종가로 본다."""
     if len(df) < 60:
         return {"support": [], "resistance": []}
+    if LOG_TRENDS and not df.attrs.get("log"):
+        df = _log_frame(df)
     tol = _trend_tol(df)
     swings = swing_points(df, window)
     lows = [(i, p) for i, p, t in swings if t == "low"]
@@ -264,10 +291,16 @@ def find_channel(df: pd.DataFrame, trendlines: list[dict]) -> dict | None:
     if not trendlines:
         return None
     base = max(trendlines, key=lambda t: (t.get("score", 0), t["touches"], t["kind"] == "support"))
+    log = bool(base.get("log"))                           # 기준선이 로그 선이면 평행선도 로그에서 (같은 비율만큼 떨어진 선)
+    if log:
+        df = _log_frame(df)
+    val = (lambda v: float(np.exp(v))) if log else float
     times = df["time"].tolist()
     a = times.index(base["points"][0]["time"])
     n = len(df)
     pa, now = base["points"][0]["value"], base["points"][1]["value"]
+    if log:
+        pa, now = float(np.log(pa)), float(np.log(now))
     slope = (now - pa) / (n - 1 - a)
     line_at = lambda i: pa + slope * (i - a)
     tol = _trend_tol(df)
@@ -296,19 +329,21 @@ def find_channel(df: pd.DataFrame, trendlines: list[dict]) -> dict | None:
         "label": "상승 채널" if slope > 0 else "하락 채널",
         "base_kind": base["kind"],
         "base": base["points"],
-        "other": [{"time": base["points"][0]["time"], "value": round(pa + offset, 4)},
-                  {"time": base["points"][1]["time"], "value": round(now + offset, 4)}],
+        "other": [{"time": base["points"][0]["time"], "value": round(val(pa + offset), 4)},
+                  {"time": base["points"][1]["time"], "value": round(val(now + offset), 4)}],
         "other_kind": "resistance" if opp == "high" else "support",
-        "other_price": round(now + offset, 4),
-        "upper": round(upper_now, 4),
-        "lower": round(lower_now, 4),
-        "width_pct": round((upper_now / lower_now - 1) * 100, 2),
-        "position_pct": round((last - lower_now) / (upper_now - lower_now) * 100, 1),   # 0=바닥, 100=천장
+        "other_price": round(val(now + offset), 4),
+        "upper": round(val(upper_now), 4),
+        "lower": round(val(lower_now), 4),
+        "width_pct": round((val(upper_now) / val(lower_now) - 1) * 100, 2),
+        "position_pct": round((last - lower_now) / (upper_now - lower_now) * 100, 1),   # 0=바닥, 100=천장 (로그 채널이면 로그 눈금에서의 위치)
+        "step_pct": round((float(np.exp(slope)) - 1) * 100 if log else slope / now * 100, 4),     # 두 선이 하루에 움직이는 %
+        "log": log,
         "stars": stars,
         "score": score,
         "why": f"기준선 {base['touches']}번 + 반대편 {len(other_touched)}번 닿음 · {why.split(' · ', 1)[1]}",
         "touch_points": base.get("touch_points", []) + [
-            {"time": _t(df, i), "value": round(line_at(i) + offset, 4)} for i in other_touched],
+            {"time": _t(df, i), "value": round(val(line_at(i) + offset), 4)} for i in other_touched],
     }
 
 

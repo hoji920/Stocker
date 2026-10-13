@@ -1443,6 +1443,9 @@ async function loadChart(symbol) {
   chart.applyOptions({ timeScale: { timeVisible: d.intraday, secondsVisible: false } });
   state.panes.forEach((p) => p.chart.applyOptions({ timeScale: { timeVisible: d.intraday } }));
   candles.applyOptions({ priceFormat: d.currency === "KRW" ? { type: "price", precision: 0, minMove: 1 } : { type: "price", precision: 2, minMove: 0.01 } });
+  // 로그: 가격축을 로그 눈금으로 (같은 % 움직임이 같은 높이). 서버도 추세선·채널을 로그 가격에서 그어서, 두 점을 이은 선이 화면에서 곧게 보인다
+  candles.priceScale().applyOptions({ mode: d.log_scale ? LW.PriceScaleMode.Logarithmic : LW.PriceScaleMode.Normal });
+  $("#log-scale").classList.toggle("on", !!d.log_scale);
   // lightweight-charts 는 넘긴 객체의 time 을 자기 형식으로 바꿔버려서, 원본(날짜 문자열 비교에 씀) 대신 복사본을 준다
   candles.setData(d.candles.map((c) => ({ ...c })));
   volume.setData(d.candles.map((c) => ({ time: c.time, value: c.volume, color: (c.close >= c.open ? css("--up") : css("--down")) + "55" })));
@@ -1455,6 +1458,7 @@ async function loadChart(symbol) {
   renderSignals();
   renderAutoLines();
   renderPatterns();
+  loadReading();                              // 구조 읽기: 오늘 이미 만든 게 있으면 보여주고, 없으면 버튼만 (일봉에서만)
   $("#daily-only").hidden = isDaily();
   // 지수·선물·금리(야후)는 관심종목/이유찾기 대상이 아니고 토스 실시간도 없음
   $("#watch-toggle").hidden = $("#why-btn").hidden = $("#live-dot").hidden = !!d.macro;
@@ -1463,6 +1467,15 @@ async function loadChart(symbol) {
   requestAnimationFrame(() => setTimeout(() =>
     chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 3 }), 50));
 }
+
+// 로그 버튼: 서버 설정을 바꾼다 (신호·알림·내 규칙도 같은 추세선을 쓰게) → 차트를 다시 받아 그린다
+$("#log-scale").addEventListener("click", async () => {
+  const res = await fetch("/api/settings/scale", { method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ log: !state.data?.log_scale }) });
+  if (!res.ok || !state.data) return;
+  await loadChart(state.data.symbol);
+  loadRulesCheck();
+});
 
 async function load(symbol) {
   symbol = symbol.trim().toUpperCase();
@@ -1495,6 +1508,36 @@ async function load(symbol) {
   if (!nres.ok) return $("#news").replaceChildren(el("li", { class: "muted" }, "뉴스를 불러오지 못했어요"));
   showNews(await nres.json());
   refineNews();
+}
+
+// ── 구조 읽기 (한눈에 보기 맨 위) ──
+// 아래 카드들(지지선, 추세선, 채널 …)을 AI 가 한 덩어리로 풀어 쓴 것. 버튼을 눌렀을 때만 만들고, 그날 이미 만든 게 있으면 바로 보여준다
+async function loadReading(make = false) {
+  const d = state.data, box = $("#reading-box");
+  if (!d || d.macro || !isDaily()) return box.replaceChildren();
+  if (make) box.replaceChildren(el("div", { class: "reading" }, el("div", { class: "reading-head" }, el("b", {}, "구조 읽기")),
+    el("p", { class: "muted" }, "AI 가 선들을 묶어서 읽는 중…")));
+  const q = make ? `?make=1${state.lastShown ? `&price=${state.lastShown}` : ""}` : "";
+  const res = await fetch(`/api/reading/${encodeURIComponent(d.symbol)}${q}`);
+  if (state.data?.symbol !== d.symbol) return;
+  const body = await res.json();
+  if (!res.ok) return box.replaceChildren(el("div", { class: "reading" }, el("p", { class: "muted" }, body.detail || "구조 읽기를 만들지 못했어요")));
+  if (!body.enabled) return box.replaceChildren();
+  const r = body.reading;
+  if (!r) {
+    const btn = el("button", { class: "ghost small" }, "AI 로 구조 읽기");
+    btn.addEventListener("click", () => loadReading(true));
+    return box.replaceChildren(el("div", { class: "reading empty" },
+      el("span", { class: "muted" }, "아래 선들을 묶어서 '지금 어떤 모양의 어디쯤인지' 한 번에 읽어줘요."), btn));
+  }
+  box.replaceChildren(el("div", { class: "reading" },
+    el("div", { class: "reading-head" }, el("b", {}, "구조 읽기"), el("span", { class: "muted" }, `${r.as_of} · ${r.price} 기준 · AI`)),
+    el("p", {}, r.structure),
+    el("ul", {}, ...r.below.map((t, i) => el("li", {}, el("b", {}, i ? "" : "아래쪽 "), t)),
+      ...r.above.map((t, i) => el("li", {}, el("b", {}, i ? "" : "위쪽 "), t))),
+    el("p", { class: "reading-sum" }, r.summary),
+    r.unverified.length ? el("p", { class: "reading-warn" }, `확인 필요: 자료에 없는 숫자가 섞였어요 (${r.unverified.join(", ")})`) : "",
+    el("p", { class: "muted hint" }, "선의 위치를 풀어 쓴 것이지 전망이 아니에요. 이 앱의 검증에서 자동 선은 무작위 선보다 잘 지켜지지 않았어요.")));
 }
 
 // ── 판단 기록 ──

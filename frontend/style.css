@@ -363,6 +363,16 @@ button.ghost.on { border-color: var(--accent); color: var(--accent); }
 .brief-meta { font-size: 11px; }
 .brief-meta + .brief-meta { margin-top: 2px !important; }
 .brief-again { background: transparent; color: var(--muted); padding: 0; font-size: 11px; text-decoration: underline; }
+/* ── 구조 읽기 (한눈에 보기) ── */
+.reading { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; font-size: 14px; line-height: 1.65; }
+.reading.empty { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.reading-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.reading-head b { display: inline; margin: 0; font-size: 14px; } .reading-head .muted { font-size: 11px; }
+.reading p { margin: 0 0 6px; }
+.reading ul { margin: 0 0 8px; padding-left: 18px; }
+.reading li { margin-bottom: 4px; } .reading li b { display: inline; margin: 0; font-size: inherit; }
+.reading-sum { font-weight: 600; }
+.reading-warn { color: var(--resistance); font-size: 12px; }
 /* ── 판단 기록 탭 ── */
 .judge-facts { margin: 0 0 8px; padding-left: 18px; font-size: 13px; line-height: 1.7; color: var(--muted); }
 .judge-facts li:first-child { color: var(--text); font-weight: 600; }
