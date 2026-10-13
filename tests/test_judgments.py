@@ -73,6 +73,41 @@ def test_expensive_models_only_judge_the_fixed_subset():
     assert j.models_for("TSLA", models) == ("mini",)                                               # 내 종목도 첫 모델만
 
 
+def test_repeats_only_for_the_subset_with_the_first_model_from_w43():
+    models, sym = ("mini", "big"), j.PREMIUM[0]
+    assert j.combos_for(sym, models, "2026-W42") == [("mini", "news"), ("mini", "nonews"), ("big", "news"), ("big", "nonews")]
+    assert j.combos_for(sym, models, "2026-W43")[4:] == [("mini", "news_r"), ("mini", "nonews_r")]
+    assert j.combos_for("AAPL", models, "2026-W43") == [("mini", "news"), ("mini", "nonews")]      # 나스닥만: 반복도 비싼 모델도 없음
+
+
+def test_repeat_gets_the_same_prompt_as_its_base_arm(monkeypatch):
+    seen = []
+    monkeypatch.setattr(j, "judge", lambda s, model, prompt: seen.append(prompt) or {"d5": "neutral", "c5": 50, "d20": "neutral", "c20": 50,
+                                                                                     "reason": "", "invalid_if": "", "tokens": 1})
+    days = pd.bdate_range(end="2026-10-09", periods=300).strftime("%Y-%m-%d")
+    candles = [{"time": d, "open": 100, "high": 101, "low": 99, "close": 100.0, "volume": 10.0} for d in days]
+    saved = []
+    recs = j.make_records(get_settings(), "2026-W43", "MU", "마이크론", False, candles, candles,
+                          [{"date": "2026-10-11", "source": "yna", "title": "기사", "summary": ""}],
+                          [("mini", "news"), ("mini", "news_r")], now=datetime(2026, 10, 19, 8, 0, tzinfo=j.KST), save_input=saved.append)
+    assert seen[0] == seen[1] and "기사" in seen[0] and len(saved) == 1                              # 입력은 한 번만 저장
+    assert [r["arm"] for r in recs] == ["news", "news_r"] and recs[0]["prompt_sha"] == recs[1]["prompt_sha"]
+    assert recs[1]["news_count"] == 1
+
+
+def test_consistency_counts_agreement_and_flips():
+    recs = [_rec("MU", model="mini", arm="news", d20="outperform", c20=60, d5="neutral"),
+            _rec("MU", model="mini", arm="news_r", d20="outperform", c20=70, d5="neutral"),
+            _rec("NET", model="mini", arm="news", d20="outperform", c20=60, d5="underperform"),
+            _rec("NET", model="mini", arm="news_r", d20="underperform", c20=60, d5="neutral"),
+            _rec("AI", model="mini", arm="news_r", d20="neutral")]                                    # 짝이 없는 반복은 세지 않는다
+    row = j.consistency(recs)[0]
+    assert (row["model"], row["arm"], row["pairs"]) == ("mini", "news", 2)
+    assert (row["same_d20_pct"], row["opposite_d20_pct"], row["conf_gap_20"]) == (50.0, 50.0, 5.0)
+    assert (row["same_d5_pct"], row["opposite_d5_pct"]) == (50.0, 0.0)                                # 약함 → 판단 안 함은 뒤집힌 게 아니다
+    assert [r["arm"] for r in j.summarize([dict(r, scored={}) for r in recs])] == ["news", "news"]     # 성적표에는 반복이 안 들어간다
+
+
 def test_paired_keeps_only_records_every_model_judged():
     recs = [dict(_rec("MU", model="mini"), scored={}), dict(_rec("MU", model="big"), scored={}),
             dict(_rec("NET", model="mini"), scored={}),                                             # big 은 BBB 를 안 봤다
@@ -99,7 +134,8 @@ def _fake_openai(monkeypatch, content):
 
     class FakeClient:
         def __init__(self, **_):
-            reply = NS(choices=[NS(message=NS(content=content))], usage=NS(total_tokens=123))
+            usage = NS(total_tokens=123, prompt_tokens=100, completion_tokens=23, completion_tokens_details=NS(reasoning_tokens=7))
+            reply = NS(choices=[NS(message=NS(content=content))], usage=usage, model="gpt-5.5-2026-04-23")
             self.chat = NS(completions=NS(create=lambda **k: sent.update(k) or reply))
     monkeypatch.setattr(openai, "OpenAI", FakeClient)
     return replace(get_settings(), openai_api_key="k"), sent
@@ -108,8 +144,12 @@ def _fake_openai(monkeypatch, content):
 def test_judge_parses_and_clamps(monkeypatch):
     s, sent = _fake_openai(monkeypatch, '{"d5": "neutral", "c5": 90, "d20": "underperform", "c20": 140, "reason": "r", "invalid_if": "x"}')
     out = j.judge(s, "gpt-5.5", "p")
-    assert out == {"d5": "neutral", "c5": 50, "d20": "underperform", "c20": 100, "reason": "r", "invalid_if": "x", "tokens": 123}
+    assert {k: out[k] for k in ("d5", "c5", "d20", "c20", "reason", "invalid_if", "tokens")} == {
+        "d5": "neutral", "c5": 50, "d20": "underperform", "c20": 100, "reason": "r", "invalid_if": "x", "tokens": 123}
     assert sent["model"] == "gpt-5.5" and "temperature" not in sent
+    # 실제로 답한 모델 버전·호출 설정·토큰 내역을 같이 남긴다
+    assert (out["model_version"], out["params"], out["tokens_in"], out["tokens_out"], out["tokens_reasoning"]) == (
+        "gpt-5.5-2026-04-23", {"reasoning_effort": "low"}, 100, 23, 7)
 
 
 def test_judge_rejects_bad_direction(monkeypatch):

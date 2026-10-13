@@ -1500,7 +1500,7 @@ async function load(symbol) {
 // ── 판단 기록 ──
 // AI 의 판단을 미리 적어 두고 기간이 지나면 시세로 채점한다 (서버 judgments.py). 채점이 쌓이기 전의 판단은 근거 없는 의견이라
 // 종목별 판단은 접어 두고, 성적표를 먼저 보여준다.
-const ARM_NAMES = { news: "숫자 + 기사", nonews: "숫자만" };
+const ARM_NAMES = { news: "숫자 + 기사", nonews: "숫자만", news_r: "숫자 + 기사 (다시 물음)", nonews_r: "숫자만 (다시 물음)" };
 const DIR_NAMES = { outperform: "시장보다 강함", neutral: "판단 안 함", underperform: "시장보다 약함" };
 let judgePoll = null;
 
@@ -1557,6 +1557,11 @@ function renderJudgments() {
     ...table(j.paired || [], "모델 비교: 두 모델이 모두 판단한 종목·주만"),
     ...table(j.mine, "내 종목 성적 (참고)"),
     j.fixed.length && !anyScored ? el("p", { class: "muted hint" }, "아직 채점된 판단이 없어요. 5거래일 뒤에 첫 채점이, 20거래일 뒤에 주된 채점이 나와요.") : "",
+    // 같은 입력을 한 번 더 물었을 때 판단이 얼마나 같았나 (성적과는 별개: 판단이 얼마나 흔들리는지)
+    ...((j.consistency || []).length ? [el("div", { class: "brief-sub" }, "같은 입력에 다시 물었을 때"),
+      el("ul", { class: "judge-facts" }, ...j.consistency.map((c) => el("li", {},
+        `${c.model} · ${ARM_NAMES[c.arm]} (${c.pairs}쌍): 방향이 같았던 비율 5일 ${pc(c.same_d5_pct)} · 20일 ${pc(c.same_d20_pct)}`
+        + ` / 강함↔약함으로 뒤집힌 비율 5일 ${pc(c.opposite_d5_pct)} · 20일 ${pc(c.opposite_d20_pct)}`)))] : []),
     j.weeks.length ? el("p", { class: "muted hint" }, "쓴 토큰: " + j.weeks.map((w) => `${w.week} ${w.model} ${w.records}건 ${w.tokens.toLocaleString()}`).join(" · ")) : "");
 
   // 지금 보는 종목의 판단: 접어 둔다 (채점 전 의견이 매매 판단에 섞이지 않게)

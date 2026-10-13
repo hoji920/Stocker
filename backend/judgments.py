@@ -28,6 +28,10 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
   치우쳤을 수 있어서, 고른 기준이 객관적인 묶음을 하나 더 둔다. 두 묶음의 성적은 따로 낸다 (어느 종목이 어느 묶음인지는 이 파일의 목록으로 정한다).
   질문은 두 묶음 모두 'SPY 보다 더 오를지'로 같다. 나스닥 100 종목이 원래 SPY 보다 잘 오르는 효과는 '전부 강함으로 찍기' 기준선에 그대로 나타나므로
   그 기준선과 비교해서 본다. QQQ 가격도 기록에 남긴다 (qqq_as_of, qqq_price).
+- 기록 항목 추가 (W43 부터): 실제로 답한 모델 버전(model_version), 호출 설정(params), 토큰 내역(tokens_in/out/reasoning).
+  같은 이름의 모델이 중간에 바뀌어도 가려낼 수 있게.
+- 반복 판단 (W43 부터): PREMIUM 30종목은 첫 번째 모델에 같은 입력을 한 번 더 묻는다 (조건 news_r, nonews_r).
+  판단이 얼마나 흔들리는지 보는 용도이고 성적표에는 넣지 않는다 (consistency).
 - 여기까지가 첫 채점(W42 의 5거래일 뒤) 전에 바꾼 것이다. 채점이 나온 뒤에는 기준을 바꾸지 않는다.
 
 이 기록은 추천이 아니다. 채점이 쌓이기 전의 판단은 근거 없는 의견과 같다.
@@ -62,6 +66,9 @@ PREMIUM = """ACLS AI ALAB APP BB BBAI BTBT CCJ CHPT COHR COIN CRSP DDOG DELL GTL
 TTD VRT VST""".split()
 HORIZONS, PRIMARY, BENCH = (5, 20), 20, "SPY"
 ARMS = ("news", "nonews")
+# 같은 입력을 한 번 더 물어 판단이 얼마나 흔들리는지 본다 (PREMIUM 종목, 첫 번째 모델만). 성적표에는 넣지 않는다 (같은 판단을 두 번 세지 않게)
+REPEATS = {"news_r": "news", "nonews_r": "nonews"}
+REPEAT_FROM = "2026-W43"
 DIRECTIONS = ("outperform", "neutral", "underperform")
 KST, ET = ZoneInfo("Asia/Seoul"), ZoneInfo("America/New_York")
 BUCKETS = ((50, 59), (60, 69), (70, 79), (80, 89), (90, 100))
@@ -85,6 +92,14 @@ def symbols_for(week: str) -> list[str]:
 def models_for(symbol: str, models: tuple[str, ...]) -> tuple[str, ...]:
     """이 종목을 판단할 모델들: 첫 번째 모델은 전 종목, 나머지는 PREMIUM 종목만."""
     return tuple(m for i, m in enumerate(models) if i == 0 or symbol in PREMIUM)
+
+
+def combos_for(symbol: str, models: tuple[str, ...], week: str) -> list[tuple[str, str]]:
+    """이 종목에 대해 그 주에 적을 (모델, 조건) 전부. 반복 판단은 PREMIUM 종목을 첫 번째 모델로만."""
+    out = [(m, a) for m in models_for(symbol, models) for a in ARMS]
+    if models and symbol in PREMIUM and week >= REPEAT_FROM:
+        out += [(models[0], r) for r in REPEATS]
+    return out
 
 
 def week_key(now: datetime | None = None) -> str:
@@ -147,8 +162,9 @@ def build_prompt(symbol: str, name: str, as_of: str, feats: dict, items: list[di
 def judge(settings: Settings, model: str, prompt: str) -> dict:
     """LLM 한 번 호출 → {d5, c5, d20, c20, reason, invalid_if, tokens}. 형식이 어긋나면 ValueError (기록하지 않는다)."""
     from openai import OpenAI
+    params = llm_args(model, 0.2)
     resp = OpenAI(api_key=settings.openai_api_key).chat.completions.create(
-        model=model, response_format={"type": "json_object"}, **llm_args(model, 0.2),
+        model=model, response_format={"type": "json_object"}, **params,
         messages=[{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}])
     data = json.loads(resp.choices[0].message.content or "{}")
     out = {}
@@ -159,7 +175,12 @@ def judge(settings: Settings, model: str, prompt: str) -> dict:
         out[f"d{h}"] = d
         out[f"c{h}"] = 50 if d == "neutral" else max(50, min(100, int(data.get(f"c{h}", 50))))
     out["reason"], out["invalid_if"] = str(data.get("reason", ""))[:400], str(data.get("invalid_if", ""))[:300]
-    out["tokens"] = resp.usage.total_tokens if resp.usage else 0
+    # 나중에 되살릴 수 없는 것: 실제로 답한 모델 버전(같은 이름 아래에서 모델이 바뀔 수 있다), 호출 설정, 토큰 내역
+    u = resp.usage
+    out["tokens"] = u.total_tokens if u else 0
+    out["tokens_in"], out["tokens_out"] = (u.prompt_tokens, u.completion_tokens) if u else (0, 0)
+    out["tokens_reasoning"] = getattr(getattr(u, "completion_tokens_details", None), "reasoning_tokens", 0) or 0
+    out["model_version"], out["params"] = getattr(resp, "model", None) or model, params
     return out
 
 
@@ -212,15 +233,16 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
             "price": candles[-1]["close"], "bench_as_of": bench[-1]["time"], "bench_price": bench[-1]["close"]}
     if bench2 and (q := completed(bench2, now)):
         base.update(qqq_as_of=q[-1]["time"], qqq_price=q[-1]["close"])
-    prompts = {arm: build_prompt(symbol, name, as_of, feats, items if arm == "news" else None) for arm in {a for _, a in todo}}
-    for arm, text in prompts.items():
+    kind = lambda arm: REPEATS.get(arm, arm)                  # 반복 판단은 원래 조건과 같은 입력을 받는다
+    prompts = {k: build_prompt(symbol, name, as_of, feats, items if k == "news" else None) for k in {kind(a) for _, a in todo}}
+    for k, text in prompts.items():
         if save_input:
-            save_input({"week": week, "symbol": symbol, "arm": arm, "prompt_sha": sha(text), "prompt": text})
+            save_input({"week": week, "symbol": symbol, "arm": k, "prompt_sha": sha(text), "prompt": text})
     out = []
     for model, arm in todo:
-        result = judge(settings, model, prompts[arm])
-        out.append({**base, "model": model, "arm": arm, "news_count": len(items[:12]) if arm == "news" else 0,
-                    "prompt_sha": sha(prompts[arm]), "system_sha": sha(_SYSTEM),
+        result = judge(settings, model, prompts[kind(arm)])
+        out.append({**base, "model": model, "arm": arm, "news_count": len(items[:12]) if kind(arm) == "news" else 0,
+                    "prompt_sha": sha(prompts[kind(arm)]), "system_sha": sha(_SYSTEM),
                     "made_at": (now or datetime.now(KST)).isoformat(timespec="seconds"), **result})
     return out
 
@@ -301,6 +323,24 @@ def paired(scored: list[dict]) -> list[dict]:
     for r in scored:
         seen.setdefault((r["week"], r["symbol"], r["arm"]), set()).add(r["model"])
     return [r for r in scored if seen.get((r["week"], r["symbol"], r["arm"])) == models] if len(models) > 1 else []
+
+
+def consistency(records: list[dict]) -> list[dict]:
+    """같은 입력을 두 번 물었을 때 판단이 같았나. (모델, 조건)별로 방향이 같았던 비율과 확신 차이의 평균."""
+    first = {(r["week"], r["symbol"], r["model"], r["arm"]): r for r in records if r["arm"] in ARMS}
+    rows = []
+    for rep, base in REPEATS.items():
+        pairs = [(first[k], r) for r in records if r["arm"] == rep and (k := (r["week"], r["symbol"], r["model"], base)) in first]
+        for model in sorted({b["model"] for _, b in pairs}):
+            g = [(a, b) for a, b in pairs if b["model"] == model]
+            row = {"model": model, "arm": base, "pairs": len(g)}
+            for h in HORIZONS:
+                row[f"same_d{h}_pct"] = round(sum(a[f"d{h}"] == b[f"d{h}"] for a, b in g) / len(g) * 100, 1)
+                opposite = sum({a[f"d{h}"], b[f"d{h}"]} == {"outperform", "underperform"} for a, b in g)
+                row[f"opposite_d{h}_pct"] = round(opposite / len(g) * 100, 1)        # 강함 ↔ 약함으로 뒤집힌 비율
+                row[f"conf_gap_{h}"] = round(sum(abs(a[f"c{h}"] - b[f"c{h}"]) for a, b in g) / len(g), 1)
+            rows.append(row)
+    return rows
 
 
 def weeks_table(records: list[dict]) -> list[dict]:

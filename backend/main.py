@@ -945,8 +945,8 @@ def judge_symbols() -> list[tuple[str, bool]]:
 
 def judge_plan() -> list[tuple[str, bool, list[tuple[str, str]]]]:
     """이번 주에 적어야 할 것: (종목, 내 종목인지, [(모델, 조건)]). 첫 번째 모델은 전 종목, 나머지는 judgments.PREMIUM 만."""
-    models = get_settings().openai_judge_models
-    return [(s, mine, [(m, a) for m in judgments.models_for(s, models) for a in judgments.ARMS]) for s, mine in judge_symbols()]
+    models, week = get_settings().openai_judge_models, judgments.week_key()
+    return [(s, mine, judgments.combos_for(s, models, week)) for s, mine in judge_symbols()]
 
 
 def judge_left(week: str) -> int:
@@ -978,7 +978,7 @@ def judge_run(only: list[str] | None = None) -> dict:
                 if len(candles) < 260:
                     raise ValueError("일봉이 260개보다 적어요")
                 name = info.get("name", symbol)
-                items = stock_news(symbol, ai=False)["items"] if any(a == "news" for _, a in todo) else []
+                items = stock_news(symbol, ai=False)["items"] if any(judgments.REPEATS.get(a, a) == "news" for _, a in todo) else []
                 for rec in judgments.make_records(settings, week, symbol, name, mine, candles, bench, items, todo,
                                                   save_input=judge_log.append_input, bench2=bench2):
                     judge_log.append(rec)
@@ -1038,6 +1038,7 @@ def judgments_summary(symbol: str | None = None):
         "state": judge_state, "weeks": judgments.weeks_table(records),
         "fixed": judgments.summarize(scored, fixed_only=True),
         "ndx": judgments.summarize(judgments.in_set(scored, judgments.NDX), fixed_only=False),
+        "consistency": judgments.consistency(records),
         "paired": judgments.summarize(judgments.paired(scored), fixed_only=True),      # 모델끼리 비교는 둘 다 판단한 기록만
         "mine": judgments.summarize([r for r in scored if r.get("mine")], fixed_only=False),
     }
