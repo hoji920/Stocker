@@ -85,6 +85,50 @@ def test_uptrend_channel_is_parallel():
     assert 7 < ch["upper"] - ch["lower"] < 10
 
 
+def _uptrend_then_drop(bars=3, to=132.0):
+    """상승 추세선(오늘 값 ≈ 140)을 마지막 몇 봉이 종가로 내준 시장."""
+    rows = _uptrend()
+    for r in rows[-bars:]:
+        r.update(open=to, high=to + 0.3, low=to - 0.3, close=to)
+    return rows
+
+
+def test_recently_broken_trendline_is_kept_as_broken():
+    from backend.analysis import broken_trendlines
+    assert broken_trendlines(pd.DataFrame(_uptrend())) == []          # 안 깨졌으면 없다
+    df = pd.DataFrame(_uptrend_then_drop())
+    assert all(tl["price"] < 132 for tl in find_trendlines(df) if tl["kind"] == "support")   # 살아 있는 선 목록에서는 빠진다
+    b = next(x for x in broken_trendlines(df) if x["kind"] == "support")
+    assert b["id"] == "broken-support" and b["label"] == "깨진 상승 추세선" and b["broken"]
+    assert b["touches"] >= 3 and b["bars_ago"] == 2 and b["broken_at"] == df["time"].iloc[-3]
+    assert b["price"] > 132 and not b["reclaimed"]
+    assert "아래로 내려갔어요" in b["why"] and "2봉 전" in b["why"]
+    out = analyze(_uptrend_then_drop(), lambda p: f"${p:.2f}")
+    assert out["broken_trendlines"][0]["id"] == "broken-support"
+    assert any(c["kind"] == "broken" for c in out["insights"])
+    assert all(t["id"] != "broken-support" for t in out["trendlines"] + out["trend_candidates"]["support"])
+
+
+def test_trendline_broken_long_ago_is_not_shown():
+    from backend.analysis import broken_trendlines
+    df = pd.DataFrame(_uptrend_then_drop(bars=15))                    # 10봉보다 전에 깨진 선은 지나간 일
+    out = broken_trendlines(df)
+    assert all(x["bars_ago"] < 10 for x in out)
+    assert all(x["points"][0]["time"] != "2025-01-31" for x in out)   # 14봉 전에 깨진 6번 닿은 선은 안 나온다
+
+
+def test_channel_marks_other_side_far_from_price():
+    df = pd.DataFrame(_uptrend())
+    assert find_channel(df, find_trendlines(df))["other_far"] is False          # 폭 8 짜리 채널은 양쪽 다 가깝다
+    # 폭이 60 인 채널의 바닥 근처(현재가 ≈ 140): 천장은 40% 넘게 위
+    t = pd.date_range("2025-01-01", periods=192, freq="B")
+    rows = [{"time": t[i].date().isoformat(), "open": c, "high": c + 0.3, "low": c - 0.3, "close": c, "volume": 1e6}
+            for i, c in ((i, 100 + 0.2 * i + 30 * (np.sin(i / 8) + 1)) for i in range(192))]
+    wide = pd.DataFrame(rows)
+    ch = find_channel(wide, [tl for tl in find_trendlines(wide) if tl["kind"] == "support"])
+    assert ch["other_kind"] == "resistance" and ch["other_far"] is True and ch["other_distance_pct"] > 25
+
+
 def test_alert_lines_include_channel_other_side():
     out = alert_lines(_uptrend(), [])
     assert any(lv.get("id") == "auto-channel" for lv in out["support"] + out["resistance"])

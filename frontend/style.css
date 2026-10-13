@@ -199,6 +199,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 #ind-menu .item.on { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .ind-chip.layer { border-style: dashed; }
 .card.channel b { color: #74c0fc; } .card.trendline b { color: var(--text); }
+.card.broken { border-style: dashed; } .card.broken b { color: var(--muted); }
 .ind-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line);
             border-radius: 999px; font-size: 12px; }
 .ind-chip .sw { width: 10px; height: 3px; border-radius: 2px; }
@@ -371,7 +372,8 @@ button.ghost.on { border-color: var(--accent); color: var(--accent); }
 .reading p { margin: 0 0 6px; }
 .reading ul { margin: 0 0 8px; padding-left: 18px; }
 .reading li { margin-bottom: 4px; } .reading li b { display: inline; margin: 0; font-size: inherit; }
-.reading-sum { font-weight: 600; }
+.reading b.reading-sum, .reading-note b { display: inline; margin: 0; font-size: inherit; font-weight: 600; }
+.reading-note { color: var(--muted); }
 .reading-warn { color: var(--resistance); font-size: 12px; }
 /* ── 판단 기록 탭 ── */
 .judge-facts { margin: 0 0 8px; padding-left: 18px; font-size: 13px; line-height: 1.7; color: var(--muted); }

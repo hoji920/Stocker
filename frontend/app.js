@@ -140,11 +140,18 @@ function autoItems() {
       tentative: tl.tentative,
     }));
   }
+  // 최근에 깨진 추세선: 말없이 사라지지 않게 흐리게 남긴다 (알림·신호·내 규칙에는 안 쓰인다)
+  for (const tl of d.broken_trendlines || []) items.push({
+    id: tl.id, group: "trend", layer: "trend", kind: tl.kind, rank: 1, name: tl.label, why: tl.why,
+    now: tl.price, points: tl.points, touch_points: tl.touch_points, defaultVisible: true, broken: true, reclaimed: tl.reclaimed,
+  });
   if (d.channel) {
     const ch = d.channel;
+    const side = ch.other_kind === "resistance" ? "천장" : "바닥";
     items.push({
       id: "channel", group: "channel", layer: "channel", kind: ch.base_kind, rank: 1, name: ch.label,
-      why: `${ch.why}. 지금 채널 안 ${ch.position_pct.toFixed(0)}% 위치 (0%=바닥, 100%=천장)`,
+      why: `${ch.why}. 지금 채널 안 ${ch.position_pct.toFixed(0)}% 위치 (0%=바닥, 100%=천장)`
+        + (ch.other_far ? `. ${side}(${fmt(ch.other_price)})은 현재가에서 ${Math.abs(ch.other_distance_pct).toFixed(0)}% 떨어져 있어서 이 줄을 골랐을 때만 그려요` : ""),
       now: ch.base_kind === "support" ? ch.lower : ch.upper, channel: ch, touch_points: ch.touch_points, defaultVisible: true,
     });
   }
@@ -267,6 +274,11 @@ function renderTrendlines() {
   const shownTrendIds = new Set();
   for (const it of items.filter((x) => x.group === "trend" && isVisible(x))) {
     const focused = state.focus === it.id;
+    if (it.broken) {                                                // 깨진 선: 점선, 흐리게. 가격축 범위도 안 건드린다
+      line(it.points, trendColor(it.kind) + (focused ? "" : "80"), {
+        width: focused ? 3 : 2, style: LW.LineStyle.Dotted, title: focused ? it.name : "", quiet: true });
+      continue;
+    }
     line(it.points, faded(trendColor(it.kind), focused || it.rank === 1), {
       width: focused ? 3 : it.rank === 1 ? 2 : 1, style: focused ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed,
       title: focused ? it.name : "",
@@ -280,7 +292,8 @@ function renderTrendlines() {
     const color = baseShown ? trendColor(ch.base_kind) : CHANNEL_COLOR;
     // 기준 추세선이 이미 그려져 있으면 평행선만 같은 색 점선으로 → 어느 선의 짝인지 한눈에
     if (!baseShown) line(ch.base, color, { width: focused ? 3 : 2 });
-    line(ch.other, color, { width: focused ? 3 : 2, style: LW.LineStyle.Dotted, title: focused ? "평행선" : "" });
+    // 반대편 선이 현재가에서 너무 멀면(넓은 채널) 차트가 위아래로 눌린다 → 채널을 골랐을 때만 그린다
+    if (!ch.other_far || focused) line(ch.other, color, { width: focused ? 3 : 2, style: LW.LineStyle.Dotted, title: focused ? "평행선" : "" });
   }
   // 차트 패턴 (노랑: 지표·지지저항 색과 안 겹침). 고른 패턴만 굵게, 아무것도 안 골랐으면 전부 보통
   if (on("patterns") && isDaily()) {
@@ -1259,7 +1272,7 @@ function renderSide() {
     });
   }
   // 차트에 꺼둔 레이어의 설명 카드는 숨긴다 (추세/RSI 요약은 항상)
-  const layerOf = { support: "levels", resistance: "levels", alert: "levels", trendline: "trend", channel: "channel", holding: "avg" };   // 52주 최고·최저 카드는 항상
+  const layerOf = { support: "levels", resistance: "levels", alert: "levels", trendline: "trend", broken: "trend", channel: "channel", holding: "avg" };   // 52주 최고·최저 카드는 항상
   const visible = cards.filter((c) => !layerOf[c.kind] || on(layerOf[c.kind]));
   $("#insights").replaceChildren(...visible.map((i) =>
     el("div", { class: `card ${i.kind}` }, el("b", {}, i.title), el("p", {}, i.body))));
@@ -1308,6 +1321,8 @@ function renderAutoLines() {
           el("i", { style: `background:${color}` }),
           el("span", { class: "nm" }, it.name, it.rank > 1 ? el("span", { class: "rk" }, `후보${it.rank}`) : "",
             it.tentative ? el("span", { class: "rk", title: "두 점만 이은 선. 세 번째로 닿아야 확인된 추세선으로 봐요" }, "임시") : "",
+            it.broken ? el("span", { class: "rk", title: "최근에 종가가 이 선을 넘었어요. 참고용으로만 흐리게 남겨 둔 선이에요" }, it.reclaimed ? "깨졌다 회복" : "최근 깨짐") : "",
+            it.channel?.other_far ? el("span", { class: "rk", title: "채널 반대편 선이 현재가에서 너무 멀어요. 이 줄을 고르면 그려요" }, "반대편 멂") : "",
             it.atPrice ? el("span", { class: "rk", title: "현재가가 이 가격대에 걸쳐 있어요. 종가가 허용폭 넘게 벗어나야 뚫린 걸로 봐요" }, "걸쳐 있음") : ""),
           el("span", { class: "px" }, `${fmt(it.now)} ${dist >= 0 ? "+" : ""}${dist.toFixed(1)}%`)),
         focused ? el("p", { class: "why" }, `차트의 점들이 이 선이 닿은 곳이에요. ${it.why}`) : "",
@@ -1446,9 +1461,7 @@ async function loadChart(symbol) {
   // 로그: 가격축을 로그 눈금으로 (같은 % 움직임이 같은 높이). 서버도 추세선·채널을 로그 가격에서 그어서, 두 점을 이은 선이 화면에서 곧게 보인다
   candles.priceScale().applyOptions({ mode: d.log_scale ? LW.PriceScaleMode.Logarithmic : LW.PriceScaleMode.Normal });
   $("#log-scale").classList.toggle("on", !!d.log_scale);
-  // lightweight-charts 는 넘긴 객체의 time 을 자기 형식으로 바꿔버려서, 원본(날짜 문자열 비교에 씀) 대신 복사본을 준다
-  candles.setData(d.candles.map((c) => ({ ...c })));
-  volume.setData(d.candles.map((c) => ({ time: c.time, value: c.volume, color: (c.close >= c.open ? css("--up") : css("--down")) + "55" })));
+  setBars(d);
   renderPrice(d.candles.at(-1).close);
   renderSide();
   renderIndicators();
@@ -1466,6 +1479,29 @@ async function loadChart(symbol) {
   // autoSize 가 첫 레이아웃 후에 폭을 잡기 때문에 한 프레임 뒤에 범위를 지정해야 안 찌그러진다
   requestAnimationFrame(() => setTimeout(() =>
     chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 3 }), 50));
+  if (isDaily() && !d.demo) loadOlder(d);
+}
+
+function setBars(d) {
+  // lightweight-charts 는 넘긴 객체의 time 을 자기 형식으로 바꿔버려서, 원본(날짜 문자열 비교에 씀) 대신 복사본을 준다
+  candles.setData(d.candles.map((c) => ({ ...c })));
+  volume.setData(d.candles.map((c) => ({ time: c.time, value: c.volume, color: (c.close >= c.open ? css("--up") : css("--down")) + "55" })));
+}
+
+// 일봉 차트의 왼쪽: 서버가 분석에 쓰는 최근 400봉보다 앞선 봉(약 8년치)을 뒤따라 받아 붙인다.
+// 선·신호는 그대로고(최근 봉으로 계산한 것), 차트와 보조지표만 길어진다. 보고 있던 자리는 그대로 둔다
+async function loadOlder(d) {
+  const res = await fetch(`/api/chart/${encodeURIComponent(d.symbol)}/older?before=${d.candles[0].time}`).catch(() => null);
+  if (!res?.ok || state.data !== d) return;
+  const older = (await res.json()).candles;
+  if (!older.length || state.data !== d) return;
+  const r = chart.timeScale().getVisibleLogicalRange();
+  d.candles = [...older, ...d.candles];
+  setBars(d);
+  renderIndicators();
+  renderDrawings();
+  renderMarkers();
+  if (r) chart.timeScale().setVisibleLogicalRange({ from: r.from + older.length, to: r.to + older.length });
 }
 
 // 로그 버튼: 서버 설정을 바꾼다 (신호·알림·내 규칙도 같은 추세선을 쓰게) → 차트를 다시 받아 그린다
@@ -1532,12 +1568,12 @@ async function loadReading(make = false) {
   }
   box.replaceChildren(el("div", { class: "reading" },
     el("div", { class: "reading-head" }, el("b", {}, "구조 읽기"), el("span", { class: "muted" }, `${r.as_of} · ${r.price} 기준 · AI`)),
-    el("p", {}, r.structure),
+    el("p", {}, r.structure, " ", el("b", { class: "reading-sum" }, r.summary)),
     el("ul", {}, ...r.below.map((t, i) => el("li", {}, el("b", {}, i ? "" : "아래쪽 "), t)),
-      ...r.above.map((t, i) => el("li", {}, el("b", {}, i ? "" : "위쪽 "), t))),
-    el("p", { class: "reading-sum" }, r.summary),
+      ...r.above.map((t, i) => el("li", {}, el("b", {}, i ? "" : "반대로 "), t))),
+    r.note ? el("p", { class: "reading-note" }, el("b", {}, "참고 "), r.note) : "",
     r.unverified.length ? el("p", { class: "reading-warn" }, `확인 필요: 자료에 없는 숫자가 섞였어요 (${r.unverified.join(", ")})`) : "",
-    el("p", { class: "muted hint" }, "선의 위치를 풀어 쓴 것이지 전망이 아니에요. 이 앱의 검증에서 자동 선은 무작위 선보다 잘 지켜지지 않았어요.")));
+    el("p", { class: "muted hint" }, "지금까지의 움직임을 읽은 것이지 예측이 아니에요. 이 앱의 검증에서 자동 선은 무작위 선보다 잘 지켜지지 않았어요.")));
 }
 
 // ── 판단 기록 ──

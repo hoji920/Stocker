@@ -293,16 +293,37 @@ def load_bars(symbol: str, interval: str, daily: list[dict]) -> list[dict]:
             size, pages = bars.MINUTE[interval]
             raw = cached(f"min:{symbol}:{pages}", 60, lambda: toss().minute_candles(symbol, pages))
             return bars.aggregate_minutes(raw, size)
-        pages = bars.DAILY[interval]
-        # 더 긴 일봉을 이미 받아뒀으면 (예: 년봉 본 뒤 월봉) 그걸 재사용 — 긴 기록은 수십 페이지라 느리다
-        for p in sorted({v for v in bars.DAILY.values() if v > pages}, reverse=True):
-            hit = _cache.get(f"days:{symbol}:{p}")
-            if hit and time.time() - hit[0] < 3600:
-                return bars.aggregate_days(hit[1], interval)
-        long_daily = cached(f"days:{symbol}:{pages}", 3600, lambda: toss().daily_candles(symbol, pages))
-        return bars.aggregate_days(long_daily, interval)
+        return bars.aggregate_days(long_days(symbol, bars.DAILY[interval]), interval)
     except TossApiError as error:
         raise HTTPException(status_code=502, detail=f"토스 API 오류 {error.status}: {error.payload}")
+
+
+def long_days(symbol: str, pages: int) -> list[dict]:
+    """일봉 pages 페이지 (200일/페이지, 1시간 캐시). 더 긴 일봉을 이미 받아뒀으면 (예: 년봉 본 뒤 월봉) 그걸 재사용 — 긴 기록은 수십 페이지라 느리다."""
+    for p in sorted({v for v in bars.DAILY.values() if v > pages}, reverse=True):
+        hit = _cache.get(f"days:{symbol}:{p}")
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1]
+    return cached(f"days:{symbol}:{pages}", 3600, lambda: toss().daily_candles(symbol, pages))
+
+
+@app.get("/api/chart/{symbol}/older")
+def chart_older(symbol: str, before: str):
+    """일봉 차트의 왼쪽을 채울 옛 봉 (before 보다 앞선 날짜, 약 8년치). 화면이 차트를 그린 뒤에 따로 받아 붙인다.
+    보여주기만 한다 — 선·신호·내 규칙·판단 기록은 지금처럼 최근 일봉(load_stock)만 쓴다."""
+    symbol = symbol.strip().upper()
+    try:
+        if macro.is_macro(symbol):
+            days = macro.daily_candles(symbol)
+        elif not get_settings().toss_enabled:
+            days = []
+        else:
+            days = long_days(symbol, bars.DAILY["1w"])
+    except TossApiError as error:
+        raise HTTPException(status_code=502, detail=f"토스 API 오류 {error.status}: {error.payload}")
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"옛 일봉을 못 받았어요: {error}")
+    return {"candles": [c for c in days if c["time"] < before]}
 
 
 # ── 차트 / 뉴스 ──
@@ -734,7 +755,7 @@ def chart_reading(symbol: str, make: bool = False, price: float | None = None):
     data = chart(symbol, "1d")
     if data["macro"]:
         return {"enabled": False, "reading": None}
-    key = f"reading:{symbol}:{data['candles'][-1]['time']}:{analysis.LOG_TRENDS}"
+    key = f"reading2:{symbol}:{data['candles'][-1]['time']}:{analysis.LOG_TRENDS}"
     done = cache_peek(key, 6 * 3600)
     if done is None and make:
         now = live_price(symbol, data["candles"][-1]["close"], price)

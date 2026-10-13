@@ -180,11 +180,14 @@ def _far(last_close: float, last_atr: float, atrs: float, pct: float) -> float:
 
 # ── 추세선 ──
 def _rank_trendlines(df: pd.DataFrame, points: list[tuple[int, float]], kind: str,
-                     tol: float, k: int = 3, recent: int = 90, lookback: int = 200) -> list[dict]:
+                     tol: float, k: int = 3, recent: int = 90, lookback: int = 200, broken_within: int = 0) -> list[dict]:
     """스윙 포인트 두 개를 잇는 선 중 이후 종가가 선을 뚫지 않은 선들을, 신뢰도 순으로 k개 (서로 겹치는 선은 하나만).
 
     support: 저점끼리 연결, 종가가 선 아래로 tol 이상 내려가면 무효
     resistance: 고점끼리 연결, 종가가 선 위로 tol 이상 올라가면 무효
+
+    broken_within=N 이면 반대로 '최근 N봉 안에 처음 뚫린 선'을 찾는다 (그 전까지는 한 번도 안 뚫렸던 선).
+    뚫린 선은 후보에서 말없이 사라지는데, 방금 깨졌다는 사실이 지금 가장 궁금한 정보일 때가 많다.
     """
     n = len(df)
     log = bool(df.attrs.get("log"))                       # 로그 프레임이면 아래 값들은 전부 로그 가격, 내보낼 때만 되돌린다
@@ -195,6 +198,8 @@ def _rank_trendlines(df: pd.DataFrame, points: list[tuple[int, float]], kind: st
     # 가파른 선을 오늘까지 늘이면 현재가와 동떨어진 값이 된다 (예: 현재가 35 인데 지지 추세선 12) → 그런 선은 후보에서 뺀다
     last_atr = float(np.nan_to_num(atr(df).iloc[-1]))
     far = max(6 * last_atr, float(np.log(1.2))) if log else _far(float(close[-1]), last_atr, atrs=6, pct=0.20)
+    if broken_within:
+        far /= 2                                          # 깨진 뒤 가격이 멀리 가 버린 선은 다시 볼 자리가 아니다
     cands = []
     for i, (a, pa) in enumerate(pts):
         for b, pb in pts[i + 1:]:
@@ -205,14 +210,22 @@ def _rank_trendlines(df: pd.DataFrame, points: list[tuple[int, float]], kind: st
             if (not log and line[-1] <= 0) or abs(line[-1] - close[-1]) > far:
                 continue
             seg = close[a:]
-            if kind == "support" and (seg < line - tol).any():
-                continue
-            if kind == "resistance" and (seg > line + tol).any():
-                continue
-            touched = [j for j, pj in pts if j >= a and abs(pj - (pa + slope * (j - a))) <= tol]
+            breaks = np.flatnonzero(seg < line - tol if kind == "support" else seg > line + tol)
+            if not broken_within:
+                if breaks.size:
+                    continue
+                end = n - 1
+            else:                                                 # 처음 뚫린 날이 최근 N봉 안이고, 두 번째 점보다 뒤여야 한다
+                if not breaks.size or a + breaks[0] < n - broken_within or a + breaks[0] <= b:
+                    continue
+                end = a + int(breaks[0])
+            touched = [j for j, pj in pts if a <= j <= end and abs(pj - (pa + slope * (j - a))) <= tol]
             stars, score, why = _quality(len(touched), touched[0], touched[-1], n)
-            cands.append((score, len(touched), a, pa, slope, touched, stars, why))
-    cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
+            cands.append((score, len(touched), a, pa, slope, touched, stars, why, end))
+    if broken_within:   # 깨진 선은 많이 닿았던 선 먼저, 같으면 가장 늦게까지 버틴 선 (두 점짜리 선은 얼마든지 있어서 점수만으론 못 고른다)
+        cands.sort(key=lambda c: (min(c[1], 4), c[8], c[0]), reverse=True)
+    else:
+        cands.sort(key=lambda c: (c[0], c[1]), reverse=True)
 
     chosen: list[tuple] = []
     for c in cands:
@@ -227,21 +240,31 @@ def _rank_trendlines(df: pd.DataFrame, points: list[tuple[int, float]], kind: st
             break
 
     out = []
-    for rank, (score, touches, a, pa, slope, touched, stars, why) in enumerate(chosen):
+    for rank, (score, touches, a, pa, slope, touched, stars, why, end) in enumerate(chosen):
         now = pa + slope * (n - 1 - a)
         rising = slope > 0
         label = ("상승 추세선" if rising else "지지 추세선") if kind == "support" \
             else ("하락 추세선" if not rising else "저항 추세선")
+        broken = {}
+        if broken_within:                                 # 지금 종가가 선 안쪽으로 돌아와 있으면 그것도 알려 준다 (잠깐 뚫렸다 회복)
+            back = close[-1] >= now if kind == "support" else close[-1] <= now
+            way = "아래로 내려갔어요" if kind == "support" else "위로 올라갔어요"
+            ago = n - 1 - end
+            when = "마지막 봉에서, 마감 전이면 바뀔 수 있어요" if ago == 0 else f"{ago}봉 전"
+            why = (f"{_t(df, end)} 종가가 이 선 {way} ({when}). 그 전까지 {touches}번 닿은 선이에요."
+                   + (" 지금 종가는 다시 선 안쪽이에요." if back else ""))
+            broken = {"broken": True, "broken_at": _t(df, end), "bars_ago": ago, "reclaimed": bool(back)}
         out.append({
-            "id": f"auto-{kind}" if rank == 0 else f"auto-{kind}-{rank + 1}",
+            **broken,
+            "id": (f"broken-{kind}" if broken_within else f"auto-{kind}") + ("" if rank == 0 else f"-{rank + 1}"),
             "rank": rank + 1,
             "kind": kind,
-            "label": label,
+            "label": f"깨진 {label}" if broken_within else label,
             "touches": touches,
             "tentative": touches < 3,       # 두 점은 언제나 선이 된다 → 세 번째로 닿아야 확인된 선
             "stars": stars,
             "score": score,
-            "why": why + (" · 아직 두 점만 이은 임시 선" if touches < 3 else ""),
+            "why": why + ("" if broken_within else " · 아직 두 점만 이은 임시 선" if touches < 3 else ""),
             "points": [{"time": _t(df, a), "value": round(val(pa), 4)},
                        {"time": _t(df, -1), "value": round(val(now), 4)}],
             "touch_points": [{"time": _t(df, j), "value": round(val(pa + slope * (j - a)), 4)} for j in touched],
@@ -275,6 +298,22 @@ def trendline_candidates(df: pd.DataFrame, window: int = 5, k: int = 3) -> dict:
     highs = [(i, p) for i, p, t in swings if t == "high"]
     return {"support": _rank_trendlines(df, lows, "support", tol, k),
             "resistance": _rank_trendlines(df, highs, "resistance", tol, k)}
+
+
+def broken_trendlines(df: pd.DataFrame, window: int = 5, within: int = 10) -> list[dict]:
+    """최근 within 봉 안에 종가로 처음 뚫린 추세선 (방향별 가장 믿을 만했던 것 하나씩). 화면에 흐리게 남겨 둔다.
+    보여주기만 한다 — 알림·신호·내 규칙은 살아 있는 선만 쓴다."""
+    if len(df) < 60:
+        return []
+    if LOG_TRENDS and not df.attrs.get("log"):
+        df = _log_frame(df)
+    tol = _trend_tol(df)
+    swings = swing_points(df, window)
+    out = []
+    for kind, side in (("support", "low"), ("resistance", "high")):
+        pts = [(i, p) for i, p, t in swings if t == side]
+        out += _rank_trendlines(df, pts, kind, tol, k=1, broken_within=within)
+    return out
 
 
 def find_trendlines(df: pd.DataFrame, window: int = 5) -> list[dict]:
@@ -320,6 +359,10 @@ def find_channel(df: pd.DataFrame, trendlines: list[dict]) -> dict | None:
     other_touched = [i for i, p in opp_pts if abs(p - (line_at(i) + offset)) <= tol]
     lower_now, upper_now = sorted([now, now + offset])
     last = float(df["close"].iloc[-1])
+    # 넓은 채널은 반대편 선이 현재가와 동떨어진 값이 된다 (예: 현재가 154 인데 채널 바닥 81) → 추세선 후보와 같은 기준으로 표시해 둔다
+    last_atr = float(np.nan_to_num(atr(df).iloc[-1]))
+    far = max(6 * last_atr, float(np.log(1.2))) if log else _far(last, last_atr, atrs=6, pct=0.20)
+    other_far = abs(now + offset - last) > far
     base_idx = [times.index(tp["time"]) for tp in base.get("touch_points", [])]
     all_touch = sorted(set(base_idx + other_touched)) or [a]
     stars, score, why = _quality(len(all_touch), all_touch[0], all_touch[-1], n)
@@ -333,6 +376,8 @@ def find_channel(df: pd.DataFrame, trendlines: list[dict]) -> dict | None:
                   {"time": base["points"][1]["time"], "value": round(val(now + offset), 4)}],
         "other_kind": "resistance" if opp == "high" else "support",
         "other_price": round(val(now + offset), 4),
+        "other_far": bool(other_far),                    # 반대편 선이 현재가에서 너무 멀다 (화면은 흐리게, 구조 읽기는 뺀다)
+        "other_distance_pct": round((val(now + offset) / val(last) - 1) * 100, 1),
         "upper": round(val(upper_now), 4),
         "lower": round(val(lower_now), 4),
         "width_pct": round((val(upper_now) / val(lower_now) - 1) * 100, 2),
@@ -489,6 +534,9 @@ def channel_insight(ch: dict, fmt) -> dict:
         where = "채널 바닥 근처예요. 여기서 반등을 기대하는 사람이 많지만, 과거 검증에선 무작위로 그은 선과 차이가 없었어요."
     else:
         where = "채널 가운데쯤이에요."
+    if ch.get("other_far"):
+        side = "천장" if ch["other_kind"] == "resistance" else "바닥"
+        where += f" 채널 {side}은 현재가에서 {abs(ch['other_distance_pct']):.0f}% 떨어져 있어서 지금 참고할 선은 아니에요."
     return {
         "kind": "channel",
         "title": f"{ch['label']} 안 {pos:.0f}% 위치",
@@ -636,13 +684,16 @@ def analyze(candles: list[dict], fmt, unit: str = "일") -> dict:
     insights = build_insights(df, levels, fmt, trendlines, unit)
     # 추세선 카드 바로 뒤, 이평/RSI 카드 앞
     at = next((i for i, c in enumerate(insights) if c["kind"] in ("extremes", "trend", "rsi")), len(insights))
+    broken = broken_trendlines(df)
     extra = [trend_pattern(trendlines, float(df["close"].iloc[-1])),
-             channel_insight(channel, fmt) if channel else None]
+             channel_insight(channel, fmt) if channel else None,
+             *({"kind": "broken", "title": f"{b['label']} {fmt(b['price'])} ({b['distance_pct']:+.1f}%)", "body": b["why"]} for b in broken)]
     insights[at:at] = [c for c in extra if c]
     return {
         "levels": levels,
         "trendlines": trendlines,
         "trend_candidates": candidates,     # 방향별 후보 (1번 = trendlines 에 있는 선)
+        "broken_trendlines": broken,        # 최근에 깨진 선 (보여주기만 — 알림·신호·내 규칙은 안 쓴다)
         "channel": channel,
         "atr": float(np.nan_to_num(atr(df).iloc[-1])),       # 마지막 봉의 ATR (내 규칙 대조가 다시 계산하지 않게)
         "extremes": extremes(df, unit),
