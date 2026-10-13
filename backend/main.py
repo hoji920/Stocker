@@ -681,12 +681,28 @@ def holding_of(symbol: str) -> dict | None:
         return None
 
 
-def check_rules(symbol: str) -> dict:
+def live_price(symbol: str, last_close: float, given: float | None = None, batch: dict | None = None) -> float:
+    """내 규칙을 대조할 '지금 가격'. 화면이 실시간 가격을 주면 그걸, 아니면 토스 현재가(15초 캐시), 그것도 안 되면 마지막 일봉 종가.
+    일봉 캐시(평소 5분)만 쓰면 카드의 가격·판정이 화면의 실시간 가격과 어긋난다."""
+    if given and 0.5 * last_close <= given <= 2 * last_close:       # 엉뚱한 값은 무시
+        return float(given)
+    if batch and symbol in batch:
+        return batch[symbol]
+    if not get_settings().toss_enabled:
+        return last_close
+    try:
+        return cached(f"px1:{symbol}", 15, lambda: toss().prices([symbol])).get(symbol, last_close)
+    except TossApiError:
+        return last_close
+
+
+def check_rules(symbol: str, price: float | None = None, batch: dict | None = None) -> dict:
     symbol = symbol.strip().upper()
     data = chart(symbol, "1d")
     if data["macro"]:
         raise HTTPException(status_code=400, detail="지수·금리 같은 지표에는 매매 규칙을 대조하지 않아요")
-    return rules.evaluate(data, my_rules(), price_formatter(data["currency"]), holding_of(symbol))
+    now = live_price(symbol, data["candles"][-1]["close"], price, batch)
+    return rules.evaluate(data, my_rules(), price_formatter(data["currency"]), holding_of(symbol), price=now)
 
 
 @app.get("/api/rules")
@@ -706,9 +722,9 @@ def put_rules(body: RulesBody):
 
 
 @app.get("/api/rules/check/{symbol}")
-def rules_check(symbol: str):
-    """지금 가격이 내 규칙의 어디에 해당하는지 (계산만, AI 를 안 부른다)."""
-    return check_rules(symbol)
+def rules_check(symbol: str, price: float | None = None):
+    """지금 가격이 내 규칙의 어디에 해당하는지 (계산만, AI 를 안 부른다). price = 화면에 떠 있는 실시간 가격."""
+    return check_rules(symbol, price)
 
 
 def _chart_summary(symbol: str) -> dict:
@@ -739,10 +755,16 @@ def scan_rules(scope: str = "watchlist") -> dict:
     """관심종목·보유 종목 전체를 내 규칙에 대조 (계산만). 매수 조건 충족 → 구간이지만 미달 → 목표 근처 → 해당 없음 순."""
     held = [h["symbol"] for h in holdings().get("items", [])] if scope in ("holdings", "all") else []
     symbols = list(dict.fromkeys((store.watchlist() if scope in ("watchlist", "all") else []) + held))
+    batch: dict[str, float] = {}                    # 지금 가격은 한 번에 받아서 종목마다 따로 부르지 않는다
+    if symbols and get_settings().toss_enabled:
+        try:
+            batch = cached("px-scan:" + ",".join(sorted(symbols)), 15, lambda: toss().prices(symbols))
+        except TossApiError:
+            pass
 
     def one(symbol: str) -> dict:
         try:
-            r = check_rules(symbol)
+            r = check_rules(symbol, batch=batch)
         except Exception as error:
             return {"symbol": symbol, "error": getattr(error, "detail", type(error).__name__)}
         pick = lambda k: {"price": r[k]["text"], "pct": round(r[k]["pct"], 1)} if r.get(k) else None

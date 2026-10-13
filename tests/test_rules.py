@@ -67,6 +67,27 @@ def test_backtest_buys_in_zone_and_sells_at_target_or_stop(monkeypatch):
     assert r["buy_and_hold_pct"] == -10.0 and "10번 미만" in r["caution"]          # 같은 기간 그냥 보유: 100 → 90
 
 
+def test_live_price_overrides_last_close():
+    ch = {"label": "상승 채널", "position_pct": 50.0, "lower": 90.0, "upper": 130.0}
+    chart = _chart(100, support=[99], resistance=[110], channel=ch)
+    held = {"quantity": 1, "avg_price": 100.0, "pl_rate": 0.0}
+    r = rules.evaluate(chart, rules.DEFAULT, fmt, held, price=108.0)                # 일봉 종가는 100, 지금은 108
+    assert r["price"] == 108.0 and r["price_text"] == "$108.00"
+    assert r["tone"] == "sell"                                                       # 지지(99)에서 멀어지고 저항(110) 근처
+    assert r["channel"]["position_pct"] == 45.0                                      # (108−90) ÷ (130−90)
+    assert r["holding"]["pl_rate"] == 8.0                                            # 평단 대비도 같은 가격으로
+    assert rules.evaluate(chart, rules.DEFAULT, fmt)["price"] == 100.0               # 안 주면 마지막 종가
+
+
+def test_live_price_source_order(monkeypatch):
+    from backend import main
+    s = main.get_settings()
+    monkeypatch.setattr(main, "get_settings", lambda: __import__("dataclasses").replace(s, toss_client_id="", toss_client_secret=""))
+    assert main.live_price("X", 100.0, given=101.5) == 101.5                         # 화면이 준 실시간 가격
+    assert main.live_price("X", 100.0, given=5000) == 100.0                          # 엉뚱한 값은 무시 → (토스 없음) 마지막 종가
+    assert main.live_price("X", 100.0, batch={"X": 99.0}) == 99.0                    # 전체 대조는 한 번에 받은 가격
+
+
 def test_clean_clamps_bad_input():
     c = rules.clean({"min_rr": "abc", "buy_channel_pct": 999, "stop_atr": -3, "note": "x" * 900, "hack": 1})
     assert c["min_rr"] == rules.DEFAULT["min_rr"] and c["buy_channel_pct"] == 60 and c["stop_atr"] == 0.1

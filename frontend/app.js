@@ -1504,7 +1504,9 @@ async function loadRulesCheck() {
   const box = $("#rules-card");
   if (d.macro) return box.replaceChildren(el("p", { class: "muted" }, "지수·금리 같은 지표에는 매매 규칙을 대조하지 않아요."));
   if (state.rulesCheck?.symbol !== d.symbol) box.replaceChildren(el("p", { class: "muted" }, "규칙에 대조하는 중…"));
-  const res = await fetch(`/api/rules/check/${encodeURIComponent(d.symbol)}`);
+  // 화면에 떠 있는 실시간 가격으로 대조한다 (서버의 일봉은 몇 분씩 캐시돼서 헤더 가격과 어긋났다)
+  const live = state.lastShown ? `?price=${state.lastShown}` : "";
+  const res = await fetch(`/api/rules/check/${encodeURIComponent(d.symbol)}${live}`);
   if (state.data?.symbol !== d.symbol) return;
   const body = await res.json();
   if (!res.ok) return box.replaceChildren(el("p", { class: "muted" }, body.detail || "규칙을 대조하지 못했어요"));
@@ -1906,10 +1908,18 @@ function updateLastBar(price, tsIso) {
   refreshIndicatorsLive();
 }
 
+// 가격이 움직이면 '내 규칙' 카드도 따라간다. 체결마다 다시 부르지 않고 5초에 한 번만 (탭이 열려 있을 때)
+let rulesRefresh = null;
+function queueRulesRefresh() {
+  if (rulesRefresh || state.stockTab !== "ask") return;
+  rulesRefresh = setTimeout(() => { rulesRefresh = null; loadRulesCheck(); }, 5000);
+}
+
 function onTick(symbol, tick) {
   if (symbol === state.data?.symbol) {
     renderPrice(tick.price);
     updateLastBar(tick.price, tick.ts);
+    queueRulesRefresh();
   }
   const w = state.watchSummary[symbol];
   if (w && !w.error) {

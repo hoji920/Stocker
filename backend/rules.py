@@ -48,11 +48,14 @@ def _nearest(lines: list[dict], price: float, below: bool) -> dict | None:
     return min(side, key=lambda l: abs(l["price"] - price)) if side else None
 
 
-def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None) -> dict:
-    """chart = /api/chart 의 일봉 결과. fmt = 가격 표시 함수."""
+def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None, price: float | None = None) -> dict:
+    """chart = /api/chart 의 일봉 결과. fmt = 가격 표시 함수.
+    price = 지금 가격 (실시간). 안 주면 마지막 일봉 종가 — 일봉은 몇 분씩 캐시돼서 화면의 실시간 가격과 어긋날 수 있다.
+    선은 일봉으로 그은 그대로 두고, '지금 어디에 있나'만 이 가격으로 본다."""
     r = clean(rules)
     candles = chart["candles"]
-    price = candles[-1]["close"]
+    live = bool(price) and price != candles[-1]["close"]
+    price = price or candles[-1]["close"]
     atr = float(chart["atr"] if chart.get("atr") else analysis.atr(analysis.to_frame(candles)).iloc[-1])
     pct = lambda v: (v / price - 1) * 100
 
@@ -63,6 +66,8 @@ def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None) -> dict
         return horiz + trend
 
     sup, res, ch = _nearest(lines("support"), price, True), _nearest(lines("resistance"), price, False), chart.get("channel")
+    if ch and live and ch["upper"] != ch["lower"]:            # 채널 안 위치도 지금 가격으로 다시
+        ch = {**ch, "position_pct": round((price - ch["lower"]) / (ch["upper"] - ch["lower"]) * 100, 1)}
     reasons, checks, near_support, in_channel_low = [], [], False, False     # checks = 화면의 체크 목록 (조건 하나씩 맞는지)
     if sup:
         gap = (price - sup["price"]) / atr
@@ -130,7 +135,8 @@ def evaluate(chart: dict, rules: dict, fmt, holding: dict | None = None) -> dict
     }
     if holding:
         avg = holding["avg_price"]
-        out["holding"] = {"quantity": holding["quantity"], "avg_price": avg, "avg_text": fmt(avg), "pl_rate": holding["pl_rate"],
+        out["holding"] = {"quantity": holding["quantity"], "avg_price": avg, "avg_text": fmt(avg),
+                          "pl_rate": round((price / avg - 1) * 100, 2) if avg else holding["pl_rate"],      # 카드의 현재가와 같은 가격으로
                           "target_from_avg_pct": (target / avg - 1) * 100 if target else None,
                           "stop_from_avg_pct": (stop / avg - 1) * 100 if stop is not None else None}
     return out
