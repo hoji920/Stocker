@@ -28,25 +28,27 @@
         <div id="title-row">
           <h2 id="name">-</h2>
           <span id="price"></span>
+          <button id="price-cur" class="cur-switch" title="현재가를 원화로 / 달러로 보기 (토스 매매기준율)" aria-label="현재가 통화 바꾸기" hidden><span data-cur="krw">원</span><span data-cur="usd">$</span></button>
           <span id="live-dot" class="live" title="토스 실시간 체결 연결 상태 (초록=연결됨)">● 실시간</span>
-          <button id="why-btn" class="ghost" title="오늘 왜 이만큼 움직였는지 최근 뉴스에서 찾아봐요">왜 움직였지?</button>
           <button id="watch-toggle" class="ghost">☆ 관심종목</button>
         </div>
         <div id="intervals" class="intervals" role="tablist" aria-label="봉 단위"></div>
-        <p id="daily-only" class="muted hint" hidden>뉴스·매매 신호·내가 비스듬히 그은 선은 '일' 봉에서 보여요. 분봉은 한국 시간 기준이에요.</p>
+        <p id="daily-only" class="muted hint" hidden>뉴스·차트 신호·내가 비스듬히 그은 선은 '일' 봉에서 보여요. 분봉은 한국 시간 기준이에요.</p>
         <!-- 왼쪽: 켜진 항목 칩 (개수에 따라 줄바꿈) / 오른쪽: 도구 버튼 (항상 오른쪽 위 고정) -->
         <div id="toggles">
           <div id="ind-chips"></div>
           <div class="tools">
             <button id="draw-trend" class="ghost small" title="차트에서 시작점과 끝점을 차례로 클릭하세요. 오늘까지 자동으로 연장되고, 닿으면 알림이 와요.">✏️ 추세선 긋기</button>
             <button id="draw-hline" class="ghost small" title="차트에서 원하는 가격을 한 번 클릭하세요. 닿으면 알림이 와요.">― 수평선 긋기</button>
-            <button id="draw-channel" class="ghost small" title="① 기준 추세선 시작점 ② 끝점 ③ 반대편 고점(저점)을 차례로 클릭. 평행 채널이 그려지고 두 선 모두 알림 대상이에요.">⫽ 채널 긋기</button>
+            <button id="draw-channel" class="ghost small" title="누르면 찍을 자리 ①②③을 추천해줘요. 그대로 쓰거나, 기준선이 지날 저점 두 곳과 반대편 고점을 직접 클릭하세요. 같은 폭으로 위아래 층이 그려져요.">⫽ 채널 긋기</button>
+            <button id="log-scale" class="ghost small" title="가격축을 로그 눈금으로 바꾸고, 자동 추세선·채널도 로그 가격에서 그어요. 몇 배씩 오르내린 종목은 같은 % 움직임이 같은 높이로 보여서 긴 추세선이 자연스러워져요. 수평 지지/저항과 내가 그은 선은 그대로예요. 켜면 신호·알림·내 규칙도 로그 추세선을 써요.">로그</button>
             <div class="dropdown">
               <button id="add-ind" class="small" title="차트에 표시할 선·지표를 골라 넣고 빼요">+ 추가</button>
               <div id="ind-menu" hidden></div>
             </div>
           </div>
         </div>
+        <div id="channel-hint" hidden></div>
         <div class="chart-wrap">
           <div id="chart"></div>
           <div id="legend" title="선을 누르면 근거(닿은 지점)를 보여줘요"></div>
@@ -62,17 +64,20 @@
           <button class="stab" data-st="overview">한눈에 보기</button>
           <button class="stab" data-st="lines">자동으로 그은 선</button>
           <button class="stab" data-st="patterns">차트 패턴</button>
-          <button class="stab" data-st="signals">매매 신호</button>
+          <button class="stab" data-st="signals">차트 신호</button>
           <button class="stab" data-st="news">뉴스</button>
           <button class="stab" data-st="drawings">내가 그은 선</button>
+          <button class="stab" data-st="ask">내 규칙</button>
+          <button class="stab" data-st="judge">판단 기록</button>
         </div>
-        <div data-stpanel="overview"><div id="why-box"></div><div id="insights"></div></div>
+        <div data-stpanel="overview"><div id="company-box"></div><div id="reading-box"></div><div id="insights"></div></div>
         <div data-stpanel="lines" hidden>
           <p class="muted hint">선을 누르면 그 선이 실제로 닿은 지점이 차트에 점으로 보여요. 선은 사람들이 보는 가격대를 보여줄 뿐, 반등·돌파를 예측하지 않아요.</p>
+          <p class="muted hint">기준: 모든 선은 꼬리(고가·저가)를 이어요. 뚫렸는지는 종가로 봐요 (장중에 꼬리만 넘은 건 뚫린 걸로 치지 않아요).</p>
           <div id="auto-lines"></div>
         </div>
         <div data-stpanel="patterns" hidden>
-          <p class="muted hint">일봉에서 이중 바닥·역헤드앤숄더·상승 삼각수렴·상승 깃발형·컵앤핸들 모양을 찾아요. 누르면 차트에 모양이 그려져요.</p>
+          <p class="muted hint">일봉에서 상승형(이중 바닥·역헤드앤숄더·상승 삼각수렴·상승 깃발형·컵앤핸들)과 하락형(쌍봉·헤드앤숄더·하락 삼각수렴) 모양을 찾아요. 누르면 차트에 모양이 그려져요.</p>
           <ul id="pattern-list"></ul>
         </div>
         <div data-stpanel="signals" hidden>
@@ -84,10 +89,33 @@
           <ul id="signals"></ul>
         </div>
         <div data-stpanel="news" hidden>
+          <div id="why-row" class="h3-row">
+            <span class="muted">기사로 오늘 등락 이유를 찾아봐요 (AI)</span>
+            <button id="why-btn" class="ghost small" title="오늘 왜 이만큼 움직였는지 최근 뉴스에서 찾아봐요">오늘 왜 움직였지?</button>
+          </div>
+          <div id="why-box"></div>
           <div id="news-summary"></div>
           <ul id="news"></ul>
         </div>
         <div data-stpanel="drawings" hidden><ul id="drawings"></ul></div>
+        <div data-stpanel="ask" hidden>
+          <div class="ask-head">
+            <div><b>내 규칙 대조</b><span class="muted">내가 정한 조건에 지금 가격이 해당하는지 계산해요. 추천이 아니에요.</span></div>
+            <button id="rules-edit-btn" class="ghost small" title="매수 구간·목표·손절 기준 바꾸기">규칙 고치기</button>
+          </div>
+          <div id="rules-form" hidden></div>
+          <div id="rules-card"></div>
+          <button id="ask-open" class="ghost small">💬 이 종목 물어보기</button>
+        </div>
+        <div data-stpanel="judge" hidden>
+          <div class="ask-head">
+            <div><b>판단 기록</b><span class="muted">AI 가 "시장보다 더 오를지"를 미리 적어 두고, 기간이 지나면 시세로 채점해요. 추천이 아니에요.</span></div>
+            <button id="judge-run" class="ghost small" hidden>이번 주 판단 남기기</button>
+          </div>
+          <div id="judge-status"></div>
+          <div id="judge-board"></div>
+          <div id="judge-symbol"></div>
+        </div>
       </section>
     </main>
 
@@ -95,8 +123,8 @@
       <div class="side-head">
         <h3 id="side-title">내 투자</h3>
         <span class="side-actions">
-          <button id="hold-watch" class="ghost small" title="보유종목 전부를 관심종목(알림 대상)에 추가">전부 관심종목에</button>
           <button id="list-refresh" class="ghost small" title="새로고침">↻</button>
+          <button id="chat-clear" class="ghost small" title="대화를 지우고 새로 시작" hidden>새 대화</button>
         </span>
       </div>
 
@@ -112,7 +140,7 @@
       </div>
 
       <div data-panel="watch" hidden>
-        <p class="muted hint">이 종목들만 지지/저항·매매 신호 알림이 와요. 차트의 ☆ 또는 검색창에 '엔비디아, MSFT'처럼 쉼표로 붙여넣어 추가.</p>
+        <p class="muted hint">이 종목들만 지지/저항·차트 신호 알림이 와요. 차트의 ☆ 또는 검색창에 '엔비디아, MSFT'처럼 쉼표로 붙여넣어 추가.</p>
         <ul id="watch-list" class="stock-list"></ul>
       </div>
 
@@ -121,7 +149,16 @@
       </div>
 
       <div data-panel="market" hidden>
-        <p class="muted hint">미국 지수·선물·국채·원자재는 야후 파이낸스 기준이라 몇 분 늦을 수 있어요. 누르면 차트가 열려요.</p>
+        <div id="fx-box" class="fx">
+          <div class="fx-row">
+            <label class="fx-in"><span>$</span><input id="fx-usd" inputmode="decimal" value="1" aria-label="달러"></label>
+            <span class="fx-eq">=</span>
+            <label class="fx-in"><input id="fx-krw" inputmode="numeric" aria-label="원"><span>원</span></label>
+          </div>
+          <p id="fx-rate" class="muted"></p>
+        </div>
+        <div id="market-brief" hidden></div>
+        <p class="muted hint">미국 지수·선물·국채·원자재는 야후 파이낸스 기준이라 실시간이 아니에요 (몇 분 늦을 수 있어요). 누르면 차트가 열려요.</p>
         <div id="market-list"></div>
       </div>
 
@@ -133,6 +170,19 @@
         </div>
         <ul id="alerts"></ul>
       </div>
+
+      <div data-panel="ask" hidden>
+        <p class="muted hint">차트·뉴스·시장·보유 종목을 찾아보고 답해요. 주문은 하지 않아요. 물어볼 때만 AI 를 불러요.</p>
+        <div id="chat-context"></div>
+        <div id="chat-log" hidden></div>
+        <div id="chat-composer">
+          <div id="chat-starters"></div>
+          <form id="chat-form">
+            <input id="chat-input" type="text" autocomplete="off" placeholder="궁금한 걸 물어보세요">
+            <button id="chat-send" title="묻기" aria-label="묻기">↑</button>
+          </form>
+        </div>
+      </div>
     </aside>
 
     <nav id="rail" aria-label="목록">
@@ -143,6 +193,7 @@
       <button class="rail-btn" data-tab="recent"><span class="ic">🕘</span>최근 본</button>
       <button class="rail-btn" data-tab="market"><span class="ic">🌐</span>시장</button>
       <button class="rail-btn" data-tab="alerts"><span class="ic">🔔</span>알림<span id="alert-badge" class="badge" hidden></span></button>
+      <button class="rail-btn" data-tab="ask"><span class="ic">💬</span>질문</button>
     </nav>
   </div>
 

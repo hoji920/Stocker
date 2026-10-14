@@ -42,3 +42,34 @@ def test_current_reports_forming_pattern_with_drawable_lines():
     db = [p for p in cur if p["type"] == "pat_db"]
     assert db and db[0]["status"] == "형성 중" and db[0]["distance_pct"] > 0
     assert all(len(ln["points"]) >= 2 for ln in db[0]["lines"])
+
+
+def test_double_top_is_mirror_of_double_bottom():
+    # 상승 70→100, 눌림 →88, 재상승 →99.5, 넥라인(88) 이탈 →82
+    closes = [70.0] * 20 + _seg(70, 100, 40) + _seg(100, 88, 12) + _seg(88, 99.5, 12) + _seg(99.5, 82, 20) + [82] * 5
+    df = _frame(closes)
+    ev = [e for e in patterns.events(df) if e[1] == "pat_dt"]
+    assert len(ev) == 1
+    k = ev[0][0]
+    assert df.close[k] < 88 <= df.close[k - 1]            # 넥라인 아래로 처음 내려간 그날
+    assert not [e for e in patterns.events(df) if e[1] == "pat_db"]
+
+
+def test_forming_double_top_reports_bear_side_and_invalid_line():
+    closes = [70.0] * 20 + _seg(70, 100, 40) + _seg(100, 88, 12) + _seg(88, 99.5, 12) + _seg(99.5, 92, 8)
+    cur = [p for p in patterns.current(_frame(closes), lambda p: f"{p:.2f}") if p["type"] == "pat_dt"]
+    assert cur and cur[0]["status"] == "형성 중" and cur[0]["dir"] == "bear" and cur[0]["distance_pct"] < 0
+    assert cur[0]["invalid"] > 100                         # 두 고점 위 = 무효선
+    assert any(ln["label"] == "무효선" for ln in cur[0]["lines"])
+
+
+def _cup(prior):
+    """prior 에서 100 까지 오른 뒤(앞선 상승) 컵 100→80→100, 손잡이 →96, 테두리 돌파."""
+    return ([prior] * 30 + _seg(prior, 100, 40) + [100 - 20 * np.sin(np.pi * i / 60) for i in range(1, 60)]
+            + [100.0] + _seg(100, 96, 6) + _seg(96, 99, 4) + [102, 103, 104])
+
+
+def test_cup_and_handle_needs_prior_uptrend():
+    has = lambda closes: [e for e in patterns.events(_frame(closes)) if e[1] == "pat_cup"]
+    assert has(_cup(70.0))            # 70 → 100 (43% 상승) 뒤의 컵
+    assert not has(_cup(95.0))        # 앞선 상승이 거의 없으면 컵앤핸들이 아님

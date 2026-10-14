@@ -7,19 +7,24 @@ import asyncio
 import base64
 import hmac
 import json
+import mimetypes
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, time as dtime
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import analysis, bars, demo, macro, movers, news, patterns, search, signals, underlying
+from backend import (agent, analysis, bars, company, demo, judgments, macro, market_brief, movers, news, patterns, reading, rules, search,
+                     signals, underlying)
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
 from backend.config import get_settings, market_of
@@ -37,6 +42,12 @@ def cached(key: str, ttl: float, fn):
     value = fn()
     _cache[key] = (time.time(), value)
     return value
+
+
+def cache_peek(key: str, ttl: float):
+    """저장된 값이 아직 쓸 만하면 그 값, 아니면 None (새로 만들지는 않는다)."""
+    hit = _cache.get(key)
+    return hit[1] if hit and time.time() - hit[0] < ttl else None
 
 
 @lru_cache
@@ -57,6 +68,15 @@ def price_formatter(currency: str):
 MACRO_CURRENCY = {"pt": "PT", "pct": "PCT", "usd": "USD", "krw": "KRW"}
 
 
+def candle_ttl(now: datetime | None = None) -> int:
+    """일봉을 몇 초 동안 다시 안 받을지. 평소 5분, 새 일봉이 생기는 시간대(평일 한국 시간 08:55~10:15: 국내 개장, 미국 주간거래 시작)엔 30초.
+    등락률은 '마지막 일봉의 바로 전 봉'과 비교하는데, 새 장의 첫 체결이 들어온 뒤에도 옛 일봉을 쓰고 있으면
+    그 사이(최대 5분) 이틀 치 등락률이 나온다."""
+    now = now or datetime.now(ZoneInfo("Asia/Seoul"))
+    opening = now.weekday() < 5 and dtime(8, 55) <= now.time() <= dtime(10, 15)
+    return 30 if opening else 300
+
+
 def load_stock(symbol: str) -> tuple[dict, list[dict], bool]:
     """(종목정보, 일봉, 데모여부). 지수·선물·금리·원자재(매크로)는 야후 일봉."""
     market = market_of(symbol)
@@ -71,7 +91,7 @@ def load_stock(symbol: str) -> tuple[dict, list[dict], bool]:
         return demo.demo_info(symbol, market), demo.demo_candles(symbol, market), True
     try:
         info = cached(f"info:{symbol}", 3600, lambda: toss().stock_info(symbol))
-        candles = cached(f"candles:{symbol}", 300, lambda: toss().daily_candles(symbol))
+        candles = cached(f"candles:{symbol}", candle_ttl(), lambda: toss().daily_candles(symbol))
     except TossApiError as error:
         hint = " (허용 IP에 내 공인 IP를 등록했는지 확인)" if error.status == 403 else ""
         raise HTTPException(status_code=502, detail=f"토스 API 오류 {error.status}{hint}: {error.payload}")
@@ -90,7 +110,7 @@ def levels_for_alert(symbol: str) -> tuple[str, str, dict]:
 
 def signals_for(symbol: str, candles: list[dict]) -> dict:
     """확정 봉 기준 신호. 봉 날짜가 같으면 결과도 같아서 날짜로 캐시."""
-    key = f"sig:{symbol}:{candles[-1]['time']}:{len(candles)}"
+    key = f"sig:{symbol}:{candles[-1]['time']}:{len(candles)}:{analysis.LOG_TRENDS}"
     return cached(key, 600, lambda: signals.detect(candles, market_of(symbol)))
 
 
@@ -101,7 +121,10 @@ def alert_types() -> list[str]:
 def stat_sentence(st: dict | None) -> str:
     if not st or not st.get("n20"):
         return "이 종목에선 과거 기록이 부족해요."
-    return (f"과거 이 종목에서 {st['count']}번, 20거래일 뒤 평균 {st['avg20']:+.1f}% "
+    if st["n20"] < signals.MIN_SAMPLE:
+        return f"이 종목에선 과거 {st['n20']}번뿐이라 숫자로 판단하기 어려워요."
+    base = f", 아무 날 샀을 때는 {st['base20']:+.1f}%" if st.get("base20") is not None else ""
+    return (f"과거 이 종목에서 {st['count']}번, 20거래일 뒤 평균 {st['avg20']:+.1f}%{base} "
             f"(오른 경우 {st['up20']}/{st['n20']}). 과거 통계일 뿐 앞으로를 보장하진 않아요.")
 
 
@@ -134,9 +157,9 @@ def signal_alerts(symbol: str) -> list[dict]:
 
 
 def prev_close_of(symbol: str, daily: list[dict]) -> float:
-    """전일 종가: 오늘 일봉이 이미 있으면 그 전날, 없으면 마지막 일봉."""
-    today = signals.market_today(market_of(symbol))
-    return daily[-2]["close"] if daily[-1]["time"] == today and len(daily) > 1 else daily[-1]["close"]
+    """전일 종가 = 마지막 일봉의 바로 전 봉. 토스 앱의 '오늘 등락'과 같은 기준.
+    (날짜로 '오늘 봉인지' 따지면 틀린다: 미국 주식 주간거래는 미국 날짜로 전날인데 이미 새 일봉이 생겨 있다)"""
+    return daily[-2]["close"] if len(daily) > 1 else daily[-1]["close"]
 
 
 def change_now(symbol: str, price: float | None = None) -> tuple[float, float]:
@@ -190,6 +213,7 @@ def move_alerts(symbol: str, price: float, seen) -> list[dict]:
 
 
 store = Store(get_settings().data_dir)
+analysis.LOG_TRENDS = bool(store.settings().get("log_trends"))     # 추세선·채널을 로그 가격에서 그을지 (차트의 '로그' 버튼)
 monitor = Monitor(get_settings(), store, levels_for_alert,
                   lambda symbols: toss().prices(symbols), price_formatter, signal_alerts, move_alerts)
 
@@ -203,6 +227,9 @@ async def lifespan(_: FastAPI):
     if get_settings().toss_enabled:
         tasks = [asyncio.create_task(monitor.run_forever()), asyncio.create_task(hub.run_forever())]
         asyncio.create_task(asyncio.to_thread(universe))   # 검색 목록 미리 받아두기 (~7초)
+        asyncio.create_task(asyncio.to_thread(lambda: judge_scored(judge_log.read())))   # 판단 기록 채점도 미리
+        if get_settings().judge_auto:
+            tasks.append(asyncio.create_task(judge_scheduler()))
     yield
     for t in tasks:
         t.cancel()
@@ -267,16 +294,62 @@ def load_bars(symbol: str, interval: str, daily: list[dict]) -> list[dict]:
             size, pages = bars.MINUTE[interval]
             raw = cached(f"min:{symbol}:{pages}", 60, lambda: toss().minute_candles(symbol, pages))
             return bars.aggregate_minutes(raw, size)
-        pages = bars.DAILY[interval]
-        # 더 긴 일봉을 이미 받아뒀으면 (예: 년봉 본 뒤 월봉) 그걸 재사용 — 긴 기록은 수십 페이지라 느리다
-        for p in sorted({v for v in bars.DAILY.values() if v > pages}, reverse=True):
-            hit = _cache.get(f"days:{symbol}:{p}")
-            if hit and time.time() - hit[0] < 3600:
-                return bars.aggregate_days(hit[1], interval)
-        long_daily = cached(f"days:{symbol}:{pages}", 3600, lambda: toss().daily_candles(symbol, pages))
-        return bars.aggregate_days(long_daily, interval)
+        return bars.aggregate_days(long_days(symbol, bars.DAILY[interval]), interval)
     except TossApiError as error:
         raise HTTPException(status_code=502, detail=f"토스 API 오류 {error.status}: {error.payload}")
+
+
+def long_days(symbol: str, pages: int) -> list[dict]:
+    """일봉 pages 페이지 (200일/페이지, 1시간 캐시). 더 긴 일봉을 이미 받아뒀으면 (예: 년봉 본 뒤 월봉) 그걸 재사용 — 긴 기록은 수십 페이지라 느리다."""
+    for p in sorted({v for v in (*bars.DAILY.values(), bars.DAILY_ALL) if v > pages}, reverse=True):
+        hit = _cache.get(f"days:{symbol}:{p}")
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1]
+    return cached(f"days:{symbol}:{pages}", 3600, lambda: toss().daily_candles(symbol, pages))
+
+
+@app.get("/api/chart/{symbol}/older")
+def chart_older(symbol: str, before: str, interval: str = "1d"):
+    """차트의 왼쪽을 채울 옛 봉. 화면이 차트를 그린 뒤에 따로 받아 붙인다.
+    일·주·월봉은 상장 이후 전부, 분봉은 bars.MINUTE_LONG 페이지만큼 (1분봉 약 5일 ~ 60분봉 약 6주). 년봉은 처음부터 전부라 없다.
+    차트의 첫 봉과 같은 기간의 봉까지 주고 replace_first 로 알린다: 첫 봉은 받은 범위의 시작에서 잘려
+    덜 찬 봉일 수 있어서(분봉의 앞 몇 분, 주봉의 앞 며칠) 화면이 꽉 찬 봉으로 바꿔 낀다.
+    보여주기만 한다 — 선·신호·내 규칙·판단 기록은 지금처럼 차트 응답의 봉만 쓴다."""
+    symbol = symbol.strip().upper()
+    if interval not in ("1d", "1w", "1M", *bars.MINUTE):
+        raise HTTPException(status_code=400, detail=f"옛 봉을 붙이지 않는 봉 단위: {interval}")
+    try:
+        if interval in bars.MINUTE:
+            if macro.is_macro(symbol) or not get_settings().toss_enabled:
+                return {"candles": [], "replace_first": False}
+            size, _ = bars.MINUTE[interval]
+            out, key = bars.aggregate_minutes(long_minutes(symbol, bars.MINUTE_LONG[interval]), size), (lambda t: t)
+            cut = int(before)
+        else:
+            if macro.is_macro(symbol):
+                days = macro.daily_candles(symbol)
+            elif not get_settings().toss_enabled:
+                days = []
+            else:
+                days = long_days(symbol, bars.DAILY_ALL)
+            out, key = bars.aggregate_days(days, interval), (lambda t: bars.period(t, interval))
+            cut = key(before)
+    except TossApiError as error:
+        raise HTTPException(status_code=502, detail=f"토스 API 오류 {error.status}: {error.payload}")
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"옛 봉을 못 받았어요: {error}")
+    keep = [c for c in out if key(c["time"]) <= cut]
+    return {"candles": keep, "replace_first": bool(keep) and key(keep[-1]["time"]) == cut}
+
+
+def long_minutes(symbol: str, pages: int) -> list[dict]:
+    """1분봉 pages 페이지. 지난 분봉은 안 바뀌니까 30분 동안 다시 안 받고, 더 긴 걸 받아뒀으면 그걸 쓴다
+    (차트 첫 봉보다 앞선 봉만 쓰므로 30분 묵어도 괜찮다)."""
+    for p in sorted({v for v in bars.MINUTE_LONG.values() if v > pages}, reverse=True):
+        hit = _cache.get(f"min-long:{symbol}:{p}")
+        if hit and time.time() - hit[0] < 1800:
+            return hit[1]
+    return cached(f"min-long:{symbol}:{pages}", 1800, lambda: toss().minute_candles(symbol, pages))
 
 
 # ── 차트 / 뉴스 ──
@@ -292,11 +365,7 @@ def chart(symbol: str, interval: str = "1d"):
     if len(candles) < 2:
         raise HTTPException(status_code=404, detail="이 봉 단위로 볼 데이터가 부족해요")
     currency = currency_of(info, symbol)
-    # 전일 종가: 등락률 계산용. 오늘 일봉이 이미 있으면 그 전날, 없으면 마지막 일봉
-    tz_today = signals.market_today(market_of(symbol))
-    prev_close = daily[-2]["close"] if daily[-1]["time"] == tz_today else daily[-1]["close"]
-    if info.get("macro"):            # 지표(야후)는 실시간이 없어 마지막 봉이 곧 최신값 → 바로 전 봉과 비교
-        prev_close = daily[-2]["close"]
+    prev_close = prev_close_of(symbol, daily)      # 등락률 계산용
     return {
         "symbol": symbol,
         "name": info.get("name", symbol),
@@ -308,15 +377,31 @@ def chart(symbol: str, interval: str = "1d"):
         "macro": bool(info.get("macro")),          # 지수·선물·금리·원자재: 실시간·관심종목·보유 없음
         "prev_close": prev_close,
         "candles": candles,
+        "log_scale": analysis.LOG_TRENDS,          # 추세선·채널을 로그 가격에서 그었나 (화면의 가격축도 로그로 맞춘다)
         **analysis.analyze(candles, price_formatter(currency), bars.UNIT_WORD[interval]),
-        # 매매 신호는 '장 마감 확정 일봉' 기준이라 일봉에서만
+        # 차트 신호는 '장 마감 확정 일봉' 기준이라 일봉에서만
         "signals": signals_for(symbol, daily) if interval == "1d" else None,
         # 차트 패턴(형성 중·최근 돌파)도 일봉 기준 + 검증 숫자
         "patterns": cached(f"pat:{symbol}:{daily[-1]['time']}:{daily[-1]['close']}", 120,
                            lambda: patterns.current(analysis.to_frame(daily), price_formatter(currency)))
                     if interval == "1d" else [],
         "pattern_evidence": cached("pat-evidence", 3600, patterns.evidence),
+        # '채널 긋기'에서 찍을 점 추천 (비스듬히 그은 선은 일봉 전용)
+        "channel_suggestions": analysis.channel_suggestions(analysis.to_frame(daily)) if interval == "1d" else [],
     }
+
+
+class ScaleBody(BaseModel):
+    log: bool
+
+
+@app.put("/api/settings/scale")
+def put_scale(body: ScaleBody):
+    """추세선·채널을 로그 가격에서 그을지. 화면만이 아니라 신호·알림·내 규칙도 같은 선을 쓰게 서버 설정으로 둔다.
+    수평 지지/저항과 내가 그은 선은 그대로다."""
+    store.update_settings(log_trends=body.log)
+    analysis.LOG_TRENDS = body.log
+    return {"log": analysis.LOG_TRENDS}
 
 
 @app.get("/api/live")
@@ -368,16 +453,27 @@ def put_signal_settings(body: SignalSettings):
     return {"catalog": signals.CATALOG, "alert_types": types}
 
 
+NEWS_AI_TTL = 3600       # AI 로 거르고 요약한 뉴스는 종목당 1시간 그대로 쓴다 (토큰 아끼기)
+
+
 @app.get("/api/news/{symbol}")
-def stock_news(symbol: str):
+def stock_news(symbol: str, ai: bool = False):
+    """ai=0(차트를 열 때): 기사 목록만, AI 를 안 부른다. ai=1(뉴스 탭을 열 때): 무관한 기사 거르기 + 3줄 요약.
+    1시간 안에 이미 AI 로 정리한 게 있으면 ai=0 이어도 그걸 준다."""
     symbol = symbol.strip().upper()
     settings = get_settings()
     info, _, _ = load_stock(symbol)
     name = info.get("name", symbol).replace("(데모)", "")
     if info.get("macro"):
-        return {"items": [], "summary": None, "source_enabled": True, "summary_enabled": settings.summary_enabled}
-    return cached(f"news:{symbol}", 600,
-                  lambda: news.get_news(settings, market_of(symbol), symbol, name))
+        return {"items": [], "summary": None, "source_enabled": True, "summary_enabled": settings.summary_enabled,
+                "ai_pending": False}
+    done = cache_peek(f"news-ai:{symbol}", NEWS_AI_TTL)
+    if done is not None:
+        return done
+    fetch = lambda use_ai: news.get_news(settings, market_of(symbol), symbol, name, ai=use_ai)
+    if ai:
+        return cached(f"news-ai:{symbol}", NEWS_AI_TTL, lambda: fetch(True))
+    return cached(f"news:{symbol}", 600, lambda: fetch(False))
 
 
 @app.get("/api/macro")
@@ -392,6 +488,29 @@ def macro_quotes():
         if not groups:
             raise HTTPException(status_code=502, detail=f"시장 지표를 못 받았어요: {error}")
     return {"groups": groups}
+
+
+_brief_lock = threading.Lock()
+
+
+@app.get("/api/macro/summary")
+def macro_summary(refresh: bool = False):
+    """시장 탭 맨 위: 미국 시장을 움직인 소식 + 지수·금리·원자재 3줄.
+    하루에 한 번만 만든다 (그날 처음 열 때 만들고 파일에 저장 → 다음 날 처음 열 때까지 그대로). refresh=1 이면 지금 다시."""
+    settings = get_settings()
+    if not settings.summary_enabled:
+        return {"enabled": False, "summary": None}
+    day = market_brief.brief_day()
+    with _brief_lock:                          # 만드는 데 20초쯤 걸린다 → 그 사이 온 요청이 또 만들지 않게
+        summary = None if refresh else market_brief.load_saved(settings.data_dir, day)
+        if summary is None:
+            try:
+                groups = macro.quotes()
+                summary = market_brief.build(settings, groups, market_brief.headlines(settings, market_brief.as_of(groups)))
+            except Exception as error:
+                raise HTTPException(status_code=502, detail=f"시장 요약을 못 만들었어요 ({type(error).__name__})")
+            market_brief.save(settings.data_dir, day, summary)
+    return {"enabled": True, "summary": summary}
 
 
 def live_etf_quotes() -> list[dict]:
@@ -572,8 +691,7 @@ def watchlist_summary():
             items.append({"symbol": s, "name": s, "error": True})
             continue
         last = prices.get(s, candles[-1]["close"])
-        # 장중엔 오늘 봉이 이미 있으니, 오늘 봉 날짜면 그 전날 종가와 비교
-        prev = candles[-2]["close"] if len(candles) > 1 else last
+        prev = prev_close_of(s, candles)
         lv = analysis.find_levels(analysis.to_frame(candles))
         near = lambda xs: round((xs[0]["price"] / last - 1) * 100, 2) if xs else None
         items.append({
@@ -616,6 +734,485 @@ async def alert_stream():
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+# ── 내 규칙 + 채팅 에이전트 (조회·대조만. 주문 기능은 없다) ──
+def my_rules() -> dict:
+    return rules.clean(store.settings().get("rules"))
+
+
+def holding_of(symbol: str) -> dict | None:
+    try:
+        return next((h for h in holdings().get("items", []) if h["symbol"] == symbol), None)
+    except Exception:                       # 계좌 조회가 안 돼도 규칙 대조는 한다
+        return None
+
+
+def live_price(symbol: str, last_close: float, given: float | None = None, batch: dict | None = None) -> float:
+    """내 규칙을 대조할 '지금 가격'. 화면이 실시간 가격을 주면 그걸, 아니면 토스 현재가(15초 캐시), 그것도 안 되면 마지막 일봉 종가.
+    일봉 캐시(평소 5분)만 쓰면 카드의 가격·판정이 화면의 실시간 가격과 어긋난다."""
+    if given and 0.5 * last_close <= given <= 2 * last_close:       # 엉뚱한 값은 무시
+        return float(given)
+    if batch and symbol in batch:
+        return batch[symbol]
+    if not get_settings().toss_enabled:
+        return last_close
+    try:
+        return cached(f"px1:{symbol}", 15, lambda: toss().prices([symbol])).get(symbol, last_close)
+    except TossApiError:
+        return last_close
+
+
+def check_rules(symbol: str, price: float | None = None, batch: dict | None = None) -> dict:
+    symbol = symbol.strip().upper()
+    data = chart(symbol, "1d")
+    if data["macro"]:
+        raise HTTPException(status_code=400, detail="지수·금리 같은 지표에는 매매 규칙을 대조하지 않아요")
+    now = live_price(symbol, data["candles"][-1]["close"], price, batch)
+    return rules.evaluate(data, my_rules(), price_formatter(data["currency"]), holding_of(symbol), price=now)
+
+
+@app.get("/api/reading/{symbol}")
+def chart_reading(symbol: str, make: bool = False, price: float | None = None):
+    """한눈에 보기의 '구조 읽기'. make=0 이면 오늘 이미 만든 것만 돌려주고(없으면 null), make=1 일 때만 AI 를 부른다.
+    같은 종목은 그날의 마지막 봉·눈금 설정이 같으면 다시 만들지 않는다 (6시간)."""
+    symbol = symbol.strip().upper()
+    settings = get_settings()
+    if not settings.summary_enabled:
+        return {"enabled": False, "reading": None}
+    data = chart(symbol, "1d")
+    if data["macro"]:
+        return {"enabled": False, "reading": None}
+    key = f"reading2:{symbol}:{data['candles'][-1]['time']}:{analysis.LOG_TRENDS}"
+    done = cache_peek(key, 6 * 3600)
+    if done is None and make:
+        now = live_price(symbol, data["candles"][-1]["close"], price)
+        try:
+            done = cached(key, 6 * 3600, lambda: reading.read(settings, data, now, price_formatter(data["currency"])))
+        except Exception as error:
+            raise HTTPException(status_code=502, detail=f"구조 읽기를 만들지 못했어요 ({type(error).__name__})")
+    return {"enabled": True, "reading": done}
+
+
+@app.get("/api/rules")
+def get_rules():
+    return {"rules": my_rules(), "defaults": rules.DEFAULT}
+
+
+class RulesBody(BaseModel):
+    rules: dict
+
+
+@app.put("/api/rules")
+def put_rules(body: RulesBody):
+    saved = rules.clean(body.rules)
+    store.update_settings(rules=saved)
+    return {"rules": saved, "defaults": rules.DEFAULT}
+
+
+@app.get("/api/rules/check/{symbol}")
+def rules_check(symbol: str, price: float | None = None):
+    """지금 가격이 내 규칙의 어디에 해당하는지 (계산만, AI 를 안 부른다). price = 화면에 떠 있는 실시간 가격."""
+    return check_rules(symbol, price)
+
+
+def _chart_summary(symbol: str) -> dict:
+    """에이전트에게 줄 차트 요약 (봉 데이터·좌표는 빼고 읽을 것만)."""
+    d = chart(symbol.strip().upper(), "1d")
+    last = d["candles"][-1]["close"]
+    line = lambda l: {"price": round(l["price"], 2), "distance_pct": l["distance_pct"], "why": l["why"]}
+    ch = d.get("channel")
+    return {
+        "symbol": d["symbol"], "name": d["name"], "currency": d["currency"], "price": last,
+        "change_pct": round((last / d["prev_close"] - 1) * 100, 2),
+        "support": [line(l) for l in d["levels"]["support"][:3]], "resistance": [line(l) for l in d["levels"]["resistance"][:3]],
+        "trendlines": [{"label": t["label"], **line(t), "tentative": t.get("tentative")} for t in d["trendlines"]],
+        "channel": {k: ch[k] for k in ("label", "lower", "upper", "position_pct", "why")} if ch else None,
+        "week52": d.get("extremes"),
+        "insights": [f"{i['title']} — {i['body']}" for i in d.get("insights", [])],
+        "patterns": [{"name": p["name"], "status": p["status"], "why": p["why"]} for p in d.get("patterns", [])],
+        "recent_signals": [{"date": e["time"], "name": e["name"], "dir": e["dir"]} for e in (d.get("signals") or {}).get("events", [])[-5:]],
+    }
+
+
+def _news_for_agent(symbol: str) -> dict:
+    n = stock_news(symbol, ai=True)
+    return {"summary": n.get("summary"), "items": [{k: it[k] for k in ("date", "source", "title", "sentiment")} for it in n["items"][:12]]}
+
+
+def scan_rules(scope: str = "watchlist") -> dict:
+    """관심종목·보유 종목 전체를 내 규칙에 대조 (계산만). 매수 조건 충족 → 구간이지만 미달 → 목표 근처 → 해당 없음 순."""
+    held = [h["symbol"] for h in holdings().get("items", [])] if scope in ("holdings", "all") else []
+    symbols = list(dict.fromkeys((store.watchlist() if scope in ("watchlist", "all") else []) + held))
+    batch: dict[str, float] = {}                    # 지금 가격은 한 번에 받아서 종목마다 따로 부르지 않는다
+    if symbols and get_settings().toss_enabled:
+        try:
+            batch = cached("px-scan:" + ",".join(sorted(symbols)), 15, lambda: toss().prices(symbols))
+        except TossApiError:
+            pass
+
+    def one(symbol: str) -> dict:
+        try:
+            r = check_rules(symbol, batch=batch)
+        except Exception as error:
+            return {"symbol": symbol, "error": getattr(error, "detail", type(error).__name__)}
+        pick = lambda k: {"price": r[k]["text"], "pct": round(r[k]["pct"], 1)} if r.get(k) else None
+        return {"symbol": symbol, "name": r["name"], "price": r["price_text"], "verdict": r["verdict"], "tone": r["tone"], "rr": r["rr"],
+                "support": pick("support"), "target": pick("target"), "stop": pick("stop"),
+                "holding_pl_pct": r["holding"]["pl_rate"] if r.get("holding") else None}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = list(pool.map(one, symbols))
+    order = {"buy": 0, "wait": 1, "sell": 2, "none": 3}
+    rows.sort(key=lambda r: (order.get(r.get("tone"), 9), -(r.get("rr") or 0)))
+    return {"scope": scope, "count": len(rows), "matched": sum(r.get("tone") == "buy" for r in rows), "items": rows,
+            "caution": "내가 정한 규칙에 맞는지만 본 거예요. 추천이 아니에요."}
+
+
+def backtest_rules(symbol: str, years: int = 3) -> dict:
+    """내 규칙을 이 종목의 과거에 적용했다면 (같은 규칙·같은 날이면 결과가 같아서 1시간 캐시)."""
+    symbol = symbol.strip().upper()
+    info, _, _ = load_stock(symbol)
+    if info.get("macro") or not get_settings().toss_enabled:
+        raise HTTPException(status_code=400, detail="토스에서 일봉을 받을 수 있는 종목만 과거에 대조할 수 있어요")
+    years = max(1, min(int(years), 5))
+    pages = (years * 252 + rules.LOOKBACK) // 200 + 1
+    candles = cached(f"days:{symbol}:{pages}", 3600, lambda: toss().daily_candles(symbol, pages))
+    mine = my_rules()
+    key = f"rule-bt:{symbol}:{years}:{candles[-1]['time']}:{analysis.LOG_TRENDS}:{json.dumps(mine, sort_keys=True)}"
+    return cached(key, 3600, lambda: rules.backtest(candles, mine, price_formatter(currency_of(info, symbol)), symbol,
+                                                    info.get("name", symbol), bars=years * 252))
+
+
+def portfolio() -> dict:
+    """보유 종목을 비중·오늘 손익 기여로 정리 (원화 기준)."""
+    h = holdings()
+    items, s = h.get("items", []), h.get("summary")
+    if not items or not s:
+        return {"items": [], "note": "보유 종목이 없거나 계좌를 조회하지 못했어요"}
+    total = sum(i["market_value_krw"] for i in items)
+    rows = [{"symbol": i["symbol"], "name": i["name"], "weight_pct": round(i["market_value_krw"] / total * 100, 1),
+             "value_krw": round(i["market_value_krw"]), "quantity": i["quantity"], "avg_price": i["avg_price"], "last_price": i["last_price"],
+             "pl_pct": i["pl_rate"], "pl_krw": round(i["pl_amount_krw"]), "today_pct": i["daily_rate"], "today_krw": round(i["daily_amount_krw"])}
+            for i in sorted(items, key=lambda i: i["market_value_krw"], reverse=True)]
+    return {"total_value_krw": round(s["market_value"]["krw"]), "total_pl_krw": round(s["profit"]["krw"]), "total_pl_pct": s["profit_rate"],
+            "today_krw": round(s["daily"]["krw"]), "today_pct": s["daily_rate"], "count": len(rows),
+            "top_weight": {"symbol": rows[0]["symbol"], "name": rows[0]["name"], "weight_pct": rows[0]["weight_pct"]},
+            "top3_weight_pct": round(sum(r["weight_pct"] for r in rows[:3]), 1), "items": rows}
+
+
+# 에이전트가 '대신 실행'하는 일은 전부 여기를 거친다: 에이전트는 제안(propose)만 하고, 사용자가 화면에서 확인을 눌러야 실행(act)된다
+RULE_NAMES = {"buy_support_atr": "지지 근처(ATR 배수)", "buy_channel_pct": "채널 하단(%)", "target_near_atr": "목표 근처(ATR 배수)",
+              "stop_atr": "손절 기준(ATR 배수)", "min_rr": "최소 손익비", "min_risk_atr": "손익비의 최소 위험(ATR 배수)"}
+
+
+def normalize_action(kind: str, symbol: str | None = None, price: float | None = None, changes: dict | None = None) -> dict:
+    """제안·실행 양쪽에서 같은 검사를 한다. 반환 {kind, …, label}. 잘못된 요청은 ValueError."""
+    if kind == "rules_update":
+        cur, new = my_rules(), rules.clean({**my_rules(), **{k: v for k, v in (changes or {}).items() if k in rules.LIMITS}})
+        diff = {k: new[k] for k in rules.LIMITS if new[k] != cur[k]}
+        if not diff:
+            raise ValueError("바꿀 규칙 값이 없어요 (바꿀 수 있는 것: " + ", ".join(RULE_NAMES.values()) + ")")
+        return {"kind": kind, "changes": diff,
+                "label": "내 규칙 바꾸기: " + ", ".join(f"{RULE_NAMES[k]} {cur[k]:g} → {v:g}" for k, v in diff.items())}
+    if kind not in ("watch_add", "watch_remove", "alert_line"):
+        raise ValueError(f"할 수 없는 일이에요: {kind}")
+    symbol = (symbol or "").strip().upper()
+    try:
+        info, daily, _ = load_stock(symbol)
+    except HTTPException:
+        raise ValueError(f"종목을 찾지 못했어요: {symbol or '(없음)'}")
+    name = info.get("name", symbol)
+    if info.get("macro"):
+        raise ValueError("지수·금리 같은 지표는 관심종목·알림 대상이 아니에요")
+    if kind == "watch_add":
+        if symbol in store.watchlist():
+            raise ValueError(f"{name}은(는) 이미 관심종목이에요")
+        return {"kind": kind, "symbol": symbol, "label": f"{name}({symbol}) 관심종목에 추가"}
+    if kind == "watch_remove":
+        if symbol not in store.watchlist():
+            raise ValueError(f"{name}은(는) 관심종목이 아니에요")
+        return {"kind": kind, "symbol": symbol, "label": f"{name}({symbol}) 관심종목에서 빼기"}
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        raise ValueError("선을 그을 가격이 필요해요")
+    last = daily[-1]["close"]
+    if not 0.2 * last <= price <= 5 * last:
+        raise ValueError(f"현재가({last:g})와 너무 먼 가격이에요: {price:g}")
+    text = price_formatter(currency_of(info, symbol))(price)
+    extra = "" if symbol in store.watchlist() else " + 관심종목에 추가(알림은 관심종목만 와요)"
+    return {"kind": kind, "symbol": symbol, "price": price, "label": f"{name}({symbol}) {text}에 수평선 긋기 (닿으면 알림){extra}"}
+
+
+def propose_action(kind: str, symbol: str | None = None, price: float | None = None, changes: dict | None = None) -> dict:
+    try:
+        action = normalize_action(kind, symbol, price, changes)
+    except ValueError as error:
+        return {"error": str(error)}
+    return {"action": action, "status": "확인 버튼을 사용자에게 보여줬어요. 아직 실행되지 않았어요. 사용자가 확인을 눌러야 실행돼요."}
+
+
+class ActBody(BaseModel):
+    kind: str
+    symbol: str | None = None
+    price: float | None = None
+    changes: dict | None = None
+
+
+@app.post("/api/agent/act")
+def agent_act(body: ActBody):
+    """채팅에서 확인 버튼을 눌렀을 때만 온다. 할 수 있는 일은 관심종목·수평선(알림)·내 규칙뿐 (주문 없음)."""
+    try:
+        a = normalize_action(body.kind, body.symbol, body.price, body.changes)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if a["kind"] == "rules_update":
+        store.update_settings(rules=rules.clean({**my_rules(), **a["changes"]}))
+    elif a["kind"] == "watch_add":
+        store.set_watchlist(store.watchlist() + [a["symbol"]])
+    elif a["kind"] == "watch_remove":
+        store.set_watchlist([s for s in store.watchlist() if s != a["symbol"]])
+    else:
+        _, daily, _ = load_stock(a["symbol"])
+        line = {"id": f"agent-{int(time.time() * 1000)}", "type": "horizontal", "p1": {"time": daily[-1]["time"], "price": a["price"]},
+                "p2": None, "p3": None}
+        store.set_drawings(a["symbol"], (store.drawings(a["symbol"]) + [line])[:30])
+        if a["symbol"] not in store.watchlist():
+            store.set_watchlist(store.watchlist() + [a["symbol"]])
+    return {"done": a["label"], "kind": a["kind"], "symbol": a.get("symbol")}
+
+
+AGENT_TOOLS = {
+    "check_my_rules": check_rules,
+    "scan_my_rules": scan_rules,
+    "backtest_my_rules": backtest_rules,
+    "read_chart": _chart_summary,
+    "get_news": _news_for_agent,
+    "why_moved": lambda symbol: why(symbol),
+    "market_brief": lambda: macro_summary().get("summary") or {"error": "시장 요약을 만들 수 없어요"},
+    "my_portfolio": portfolio,
+    "find_symbol": lambda query: search_stocks(query, 5)["items"],
+    "propose_action": propose_action,
+}
+
+
+class ChatBody(BaseModel):
+    messages: list[dict]
+    symbol: str | None = None
+
+
+@app.post("/api/agent/chat")
+def agent_chat(body: ChatBody):
+    settings = get_settings()
+    if not settings.summary_enabled:
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY 가 있어야 질문할 수 있어요")
+    symbol = (body.symbol or "").strip().upper() or None
+    try:
+        return agent.chat(settings, AGENT_TOOLS, body.messages, symbol, my_rules()["note"], about=symbol_facts(symbol))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"답을 만들지 못했어요 ({type(error).__name__})")
+
+
+def symbol_facts(symbol: str | None) -> str:
+    """챗봇에 같이 넘길 '지금 보는 종목'의 기본 사실 (티커만 넘겼더니 KORU 가 한국 ETF 인지 미국 ETF 인지 되물었다).
+    이미 받아둔 것만 쓴다: 토스 종목 정보 + 저장된 회사 정보. 못 받으면 빈 문자열."""
+    if not symbol or macro.is_macro(symbol):
+        return ""
+    try:
+        info = load_stock(symbol)[0]
+    except Exception:
+        info = {}
+    path = get_settings().data_dir / "company" / f"{symbol}.json"
+    c = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    kind = {"ETF": "ETF", "EQUITY": "주식"}.get(c.get("type") or "", "ETF" if info.get("securityType") == "ETF" else "")
+    listed = "한국 상장" if market_of(symbol) == "KR" else "미국 상장"
+    parts = [info.get("name"), info.get("englishName"),
+             f"{listed} ({info['market']})" if info.get("market") else listed,
+             kind, f"{info.get('leverageFactor')}배 레버리지" if info.get("leverageFactor") else "",
+             f"보수(expense ratio) {c['expense_ratio'] * 100:.2f}%" if c.get("expense_ratio") is not None else "",
+             f"{c.get('sector_ko')} › {c.get('industry_ko')}" if c.get("industry_ko") else "",
+             c.get("summary") or ""]
+    return " · ".join(p for p in parts if p)
+
+
+# ── 판단 기록 (에이전트의 판단을 미리 적어 두고 나중에 시세로 채점. 추천이 아니다) ──
+# 기록은 레포 안 judgments/ 에 둔다 (data/ 는 PC 마다 따로라, 두 PC 를 오가면 기록이 갈라진다 → 커밋해서 맞춘다)
+judge_log = judgments.Log(Path(__file__).resolve().parent.parent / "judgments")
+judge_state = {"running": False, "week": None, "done": 0, "total": 0, "tokens": 0, "errors": [], "started": None, "finished": None}
+_judge_lock = threading.Lock()
+
+
+def judge_symbols() -> list[tuple[str, bool]]:
+    """(종목, 내 종목인지). 고정 100종목 + 나스닥 100 + 지금의 관심·보유 종목."""
+    try:
+        held = [h["symbol"] for h in holdings().get("items", [])]
+    except Exception:
+        held = []
+    mine = {s for s in store.watchlist() + held if market_of(s) == "US" and not macro.is_macro(s)}
+    return [(s, s in mine) for s in dict.fromkeys(judgments.symbols_for(judgments.week_key()) + sorted(mine))]
+
+
+def judge_plan() -> list[tuple[str, bool, list[tuple[str, str]]]]:
+    """이번 주에 적어야 할 것: (종목, 내 종목인지, [(모델, 조건)]). 첫 번째 모델은 전 종목, 나머지는 judgments.PREMIUM 만."""
+    models, week = get_settings().openai_judge_models, judgments.week_key()
+    return [(s, mine, judgments.combos_for(s, models, week)) for s, mine in judge_symbols()]
+
+
+def judge_left(week: str) -> int:
+    """이번 주 계획 중 아직 안 적은 건수."""
+    done = judge_log.done_keys(week)
+    return sum((s, *c) not in done for s, _, combos in judge_plan() for c in combos)
+
+
+def judge_run(only: list[str] | None = None) -> dict:
+    """이번 주 판단을 남긴다. 이미 적은 (종목, 모델, 조건)은 건너뛰어서, 중간에 끊겨도 이어서 할 수 있다."""
+    settings = get_settings()
+    if not settings.summary_enabled or not settings.toss_enabled:
+        raise HTTPException(status_code=400, detail="토스 키와 OPENAI_API_KEY 가 있어야 판단을 남길 수 있어요")
+    if not _judge_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="이미 판단을 남기는 중이에요")
+    try:
+        week, done = judgments.week_key(), judge_log.done_keys(judgments.week_key())
+        jobs = [(s, mine, [c for c in combos if (s, *c) not in done]) for s, mine, combos in judge_plan() if not only or s in only]
+        jobs = [j for j in jobs if j[2]]
+        judge_state.update(running=True, week=week, done=0, total=sum(len(j[2]) for j in jobs), tokens=0, errors=[],
+                           started=datetime.now(judgments.KST).isoformat(timespec="seconds"), finished=None)
+        _, bench, _ = load_stock(judgments.BENCH)
+        _, bench2, _ = load_stock(judgments.BENCH2)
+
+        def one(job):
+            symbol, mine, todo = job
+            try:
+                info, candles, _ = load_stock(symbol)
+                if len(candles) < 260:
+                    raise ValueError("일봉이 260개보다 적어요")
+                name = info.get("name", symbol)
+                items = stock_news(symbol, ai=False)["items"] if any(judgments.REPEATS.get(a, a) == "news" for _, a in todo) else []
+                for rec in judgments.make_records(settings, week, symbol, name, mine, candles, bench, items, todo,
+                                                  save_input=judge_log.append_input, bench2=bench2):
+                    judge_log.append(rec)
+                    judge_state["done"] += 1
+                    judge_state["tokens"] += rec["tokens"]
+            except Exception as error:
+                judge_state["errors"].append(f"{symbol}: {type(error).__name__}: {str(getattr(error, 'detail', error))[:120]}")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(one, jobs))
+        return dict(judge_state)
+    finally:
+        judge_state.update(running=False, finished=datetime.now(judgments.KST).isoformat(timespec="seconds"))
+        _judge_lock.release()
+
+
+async def judge_scheduler():
+    """JUDGE_AUTO=1 일 때만: 그 주 판단이 아직 다 안 적혔고 때가 됐으면(화요일 07:00 이후) 남긴다. 15분마다 확인."""
+    while True:
+        try:
+            if judgments.is_due() and not judge_state["running"]:
+                if judge_left(judgments.week_key()) and not judge_state["errors"]:
+                    await asyncio.to_thread(judge_run)
+        except Exception as error:
+            print(f"[judgments] {type(error).__name__}: {error}")
+        await asyncio.sleep(900)
+
+
+class JudgeRunBody(BaseModel):
+    symbols: list[str] | None = None        # 일부 종목만 (시험용). 없으면 전체
+
+
+@app.post("/api/judgments/run")
+def judgments_run(body: JudgeRunBody):
+    only = [s.strip().upper() for s in body.symbols] if body.symbols else None
+    if judge_state["running"]:
+        raise HTTPException(status_code=409, detail="이미 판단을 남기는 중이에요")
+    threading.Thread(target=lambda: judge_run(only), daemon=True).start()
+    return {"started": True}
+
+
+JUDGE_SCORE_TTL = 3600
+_judge_score: dict = {}                  # {"at", "n", "value"}: 마지막 채점
+_judge_score_lock = threading.Lock()
+
+
+def judge_scored(records: list[dict]) -> list[dict]:
+    """채점 결과. 채점은 하루에 한 번 생기는 확정 봉으로 하니까 1시간 동안 같은 값을 쓴다.
+    1시간이 지났으면 지난 값을 바로 돌려주고 뒤에서 새로 계산한다 (탭을 열 때 기다리지 않게).
+    기록 수가 바뀌었으면(새 주 기록) 기다려서 새로 계산한다. 동시에 여러 번 불려도 계산은 한 번만."""
+    hit = dict(_judge_score)                              # 복사: 뒤에서 새로 계산한 값이 이 호출의 답을 바꾸지 않게
+    if hit.get("n") == len(records):
+        if time.time() - hit["at"] < JUDGE_SCORE_TTL:
+            return hit["value"]
+        if _judge_score_lock.acquire(blocking=False):
+            def refresh():
+                try:
+                    _store_judge_score(records)
+                finally:
+                    _judge_score_lock.release()
+            threading.Thread(target=refresh, daemon=True).start()
+        return hit["value"]
+    with _judge_score_lock:
+        if _judge_score.get("n") != len(records):         # 기다리는 사이 다른 요청이 이미 계산했으면 그걸 쓴다
+            _store_judge_score(records)
+        return _judge_score["value"]
+
+
+def _store_judge_score(records: list[dict]) -> None:
+    value = judgments.score(records, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: load_stock(s)[1]))
+    _judge_score.update(at=time.time(), n=len(records), value=value)
+
+
+@app.get("/api/judgments")
+def judgments_summary(symbol: str | None = None):
+    """기록 현황 + 채점 (읽을 때마다 지금 시세로 계산). symbol 을 주면 그 종목의 기록도."""
+    settings = get_settings()
+    records = judge_log.read()
+    scored = judge_scored(records)
+    week = judgments.week_key()
+    plan = judge_plan()
+    out = {
+        "protocol": {"universe": len(judgments.UNIVERSE), "ndx": len(judgments.NDX), "ndx_from": judgments.NDX_FROM, "symbols": len(plan),
+                     "premium": len(judgments.PREMIUM), "horizons": judgments.HORIZONS,
+                     "primary": judgments.PRIMARY, "bench": judgments.BENCH, "models": settings.openai_judge_models,
+                     "arms": judgments.ARMS, "auto": settings.judge_auto},
+        "week": week, "due": judgments.is_due(), "planned": sum(len(c) for _, _, c in plan), "left": judge_left(week),
+        "by_model": {m: sum(sum(x[0] == m for x in c) for _, _, c in plan) for m in settings.openai_judge_models},
+        "recorded_this_week": len(judge_log.done_keys(week)),
+        "state": judge_state, "weeks": judgments.weeks_table(records),
+        "fixed": judgments.summarize(scored, fixed_only=True),
+        "ndx": judgments.summarize(judgments.in_set(scored, judgments.NDX), fixed_only=False),
+        "consistency": judgments.consistency(records),
+        "paired": judgments.summarize(judgments.paired(scored), fixed_only=True),      # 모델끼리 비교는 둘 다 판단한 기록만
+        "mine": judgments.summarize([r for r in scored if r.get("mine")], fixed_only=False),
+    }
+    if symbol:
+        s = symbol.strip().upper()
+        out["symbol_records"] = [r for r in scored if r["symbol"] == s][-12:]
+    return out
+
+
+@app.get("/api/company/{symbol}")
+def company_info(symbol: str):
+    """어떤 섹터·업종의 어떤 회사인지 (야후 프로필 + AI 한국어 요약, 30일 저장)."""
+    symbol = symbol.strip().upper()
+    if macro.is_macro(symbol) or market_of(symbol) == "KR":
+        return {"company": None}
+    try:
+        info = load_stock(symbol)[0] if get_settings().toss_enabled else {}
+        return {"company": company.profile(get_settings(), symbol, info)}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"회사 정보를 못 받았어요 ({type(error).__name__})")
+
+
+@app.get("/api/fx")
+def fx():
+    """달러→원 환율. 토스 매매기준율(1분마다 바뀜)을 1분 캐시. 토스 키가 없으면 야후 원/달러(몇 분 늦음)."""
+    try:
+        if get_settings().toss_enabled:
+            rate = cached("usd_krw:live", 60, lambda: toss().usd_krw())
+            return {"usd_krw": rate, "source": "토스 매매기준율", "at": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%H:%M")}
+        bars_ = cached("usd_krw:yahoo", 300, lambda: macro.daily_candles("KRW=X"))
+        return {"usd_krw": bars_[-1]["close"], "source": "야후 파이낸스 (몇 분 늦음)", "at": bars_[-1]["time"]}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"환율을 못 받았어요: {error}")
+
+
 @app.get("/healthz")
 def healthz():
     """배포 서버 상태 확인용. 아무 정보도 내보내지 않는다."""
@@ -638,4 +1235,6 @@ def index():
     return FileResponse(FRONTEND / "index.html")
 
 
+# Windows 는 레지스트리 설정에 따라 .js 를 text/plain 으로 내보내서 module 스크립트가 막힌다
+mimetypes.add_type("text/javascript", ".js")
 app.mount("/static", StaticFiles(directory=FRONTEND), name="static")

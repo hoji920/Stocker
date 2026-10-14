@@ -25,7 +25,8 @@ _LABELS = {
     ("support", "up"): ("reclaim", "회복", "{name} {side} {lv} 위로 다시 올라왔어요."),
     ("resistance", "down"): ("reject", "아래 복귀", "{name} {side} {lv} 아래로 다시 내려왔어요."),
 }
-_HISTORY = {"support": " 과거 {t}번 반등했던 가격대예요.", "resistance": " 과거 {t}번 막혔던 가격대예요."}
+# 수평선은 고점·저점이 섞여 묶인다 (막혔던 가격을 뚫고 올라오면 지지선) → '반등'·'막힘'으로 단정하지 않는다
+_HISTORY = {"support": " 과거 {t}번 방향이 바뀌었던 가격대예요.", "resistance": " 과거 {t}번 방향이 바뀌었던 가격대예요."}
 
 
 def subject(name: str) -> str:
@@ -132,7 +133,7 @@ class Monitor:
     def __init__(self, settings: Settings, store: Store, load_levels, fetch_prices, formatter, load_signals=None,
                  check_move=None):
         """load_levels(symbol) -> (name, currency, levels) / fetch_prices(symbols) -> {symbol: price}
-        load_signals(symbol) -> [알림 이벤트] : 가장 최근 확정 봉에서 새로 난 매매 신호 (key 포함)."""
+        load_signals(symbol) -> [알림 이벤트] : 가장 최근 확정 봉에서 새로 난 차트 신호 (key 포함)."""
         self.settings = settings
         self.store = store
         self.load_levels = load_levels
@@ -177,7 +178,7 @@ class Monitor:
         prices = await asyncio.to_thread(self.fetch_prices, symbols)
         new_events = []
         for symbol in symbols:
-            # 확정 매매 신호: key 에 봉 날짜가 들어 있어서, 재시작해도 알림 기록에 있으면 다시 안 보낸다
+            # 확정 차트 신호: key 에 봉 날짜가 들어 있어서, 재시작해도 알림 기록에 있으면 다시 안 보낸다
             if self.load_signals:
                 try:
                     for ev in await asyncio.to_thread(self.load_signals, symbol):

@@ -11,7 +11,7 @@ import math
 from datetime import date, datetime, timedelta
 
 from backend import news
-from backend.config import Settings
+from backend.config import Settings, llm_args
 
 MARKET_PROXY = {"US": ("SPY", "S&P500(SPY)"), "KR": ("069500", "코스피200(KODEX 200)")}
 
@@ -36,8 +36,8 @@ def recent_news(settings: Settings, market: str, symbol: str, name: str, days: i
         except Exception as error:      # 뉴스가 안 돼도 알림 자체는 보낸다
             print(f"[movers] {symbol} 뉴스 실패: {error}")
             return []
-    items = safe(news.fetch_us_news, settings, symbol, limit=10, days=days) if market == "US" \
-        else safe(news.fetch_kr_news, settings, name, limit=10)
+    items = safe(news.fetch_us_news, settings, symbol, limit=10, days=days) + safe(news.fetch_kr_news_about, settings, name, limit=5) \
+        if market == "US" else safe(news.fetch_kr_news, settings, name, limit=10)
     if underlying:
         if underlying.get("news_category"):
             items += safe(news.fetch_market_news, settings, underlying["news_category"], underlying["keywords"], limit=8, days=days)
@@ -97,7 +97,7 @@ def explain(settings: Settings, *, symbol: str, name: str, market: str, change_p
     try:
         from openai import OpenAI
         resp = OpenAI(api_key=settings.openai_api_key).chat.completions.create(
-            model=settings.openai_model, temperature=0.1, response_format={"type": "json_object"},
+            model=settings.openai_model, response_format={"type": "json_object"}, **llm_args(settings.openai_model, 0.1),
             messages=[{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
         )
         data = json.loads(resp.choices[0].message.content or "{}")

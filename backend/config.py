@@ -20,6 +20,10 @@ class Settings:
     finnhub_api_key: str
     openai_api_key: str
     openai_model: str
+    openai_brief_model: str     # 시장 요약 전용 (하루 한 번만 부르니 더 좋은 모델을 쓴다)
+    openai_agent_model: str     # 채팅 에이전트 (도구를 골라 쓰는 일이라 mini 보다 한 단계 위)
+    openai_judge_models: tuple[str, ...]    # 판단 기록(judgments.py)을 남길 모델들. 여러 개면 같은 입력으로 각각 판단해 비교한다
+    judge_auto: bool            # 주 1회 판단 기록을 서버가 알아서 남길지 (토큰이 든다 → 기본은 꺼 둔다)
     token_cache_path: Path
     data_dir: Path
     alert_poll_sec: int
@@ -60,6 +64,10 @@ def get_settings() -> Settings:
         finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        openai_brief_model=os.getenv("OPENAI_BRIEF_MODEL", "gpt-5.5"),
+        openai_agent_model=os.getenv("OPENAI_AGENT_MODEL", "gpt-5.4-mini"),
+        openai_judge_models=tuple(m.strip() for m in os.getenv("OPENAI_JUDGE_MODELS", "gpt-5.4-mini,gpt-5.5").split(",") if m.strip()),
+        judge_auto=os.getenv("JUDGE_AUTO", "0") == "1",
         # 서버(Render 등)에선 DATA_DIR 로 저장 위치를 바꿀 수 있게 (영구 디스크를 붙이면 거기로)
         token_cache_path=Path(os.getenv("DATA_DIR", ROOT / "data")) / ".token_cache.json" if os.getenv("DATA_DIR")
         else ROOT / ".token_cache.json",
@@ -76,3 +84,9 @@ def get_settings() -> Settings:
 def market_of(symbol: str) -> str:
     """KRX 종목은 숫자로 시작하는 6자리 (신규 코드는 0047P0 처럼 영문 섞임), 그 외는 미국 티커."""
     return "KR" if len(symbol) == 6 and symbol[0].isdigit() and symbol.isalnum() else "US"
+
+
+def llm_args(model: str, temperature: float, effort: str = "low") -> dict:
+    """모델 계열에 맞는 옵션. gpt-4 계열은 temperature 를 받고, 그 뒤 모델(gpt-5 …)은 temperature 를 못 바꾸는 대신
+    reasoning_effort 를 받는다. 호출마다 temperature 를 박아 두면 OPENAI_MODEL 만 바꿔도 요청이 통째로 실패한다."""
+    return {"temperature": temperature} if model.startswith("gpt-4") else {"reasoning_effort": effort}

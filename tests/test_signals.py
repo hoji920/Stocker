@@ -55,3 +55,22 @@ def test_monitor_sends_signal_once_even_after_restart(tmp_path):
                            lambda syms: {"X": 100.0}, lambda c: str, lambda s: [dict(ev)])
     assert len(asyncio.run(make().tick())) == 1
     assert asyncio.run(make().tick()) == []          # 새 Monitor(=재시작)여도 기록에 있으면 안 보냄
+
+
+def test_stats_carry_baseline_so_uptrend_is_not_credited_to_signal():
+    # 꾸준히 오르는 종목: 어떤 신호든 20일 뒤 +. 기준선(아무 날)도 똑같이 + 여야 한다
+    closes = list(100 * 1.003 ** np.arange(300))
+    r = signals.detect(_candles(closes), "US", datetime(2030, 1, 1, tzinfo=NY))
+    st = r["stats"]["gc"]
+    assert abs(st["base20"] - (1.003 ** 20 - 1) * 100) < 0.05 and st["base_up20"] == 100
+    assert r["min_sample"] == signals.MIN_SAMPLE
+
+
+def test_rsi_exit_fires_once_per_overheated_stretch():
+    # RSI 가 70 을 세 번 오르내리지만 50 까지는 한 번만 식는다 → '과열 해소'는 두 번 (구간당 한 번)
+    r = pd.Series([60, 75, 68, 74, 66, 72, 69, 45, 60, 76, 65], dtype=float)
+    fired = list(np.flatnonzero(signals._rearmed_cross(r, 70.0, up=False).to_numpy()))
+    assert fired == [2, 10]
+    # 과매도 쪽도 같은 규칙
+    r = pd.Series([40, 25, 32, 28, 33, 55, 27, 31], dtype=float)
+    assert list(np.flatnonzero(signals._rearmed_cross(r, 30.0, up=True).to_numpy())) == [2, 7]
