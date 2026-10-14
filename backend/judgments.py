@@ -40,10 +40,12 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from backend import analysis
@@ -248,22 +250,38 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
 
 
 # ── 채점 (저장하지 않는다: 읽을 때마다 지금 시세로 계산) ──
-def score(records: list[dict], candles_of) -> list[dict]:
-    """candles_of(symbol) -> 일봉. 기록마다 {h: {ret, bench, excess, hit}} 를 붙인다. 아직 기간이 안 지났으면 그 h 는 없다."""
-    cache: dict[str, tuple[list[str], list[float]] | None] = {}
+def _may_be_due(as_of: str, today: str) -> bool:
+    """가장 짧은 기간(5거래일)이 지났을 수도 있나. 평일 수 ≥ 거래일 수라서, 평일로도 안 지났으면 확실히 채점할 게 없다.
+    날짜 꼴이 아니면(테스트) 일단 채점해 본다."""
+    try:
+        return int(np.busday_count(np.datetime64(as_of) + 1, np.datetime64(today) + 1)) >= min(HORIZONS)
+    except ValueError:
+        return True
 
-    def series(symbol: str):
-        if symbol not in cache:
-            try:
-                cs = candles_of(symbol)
-                cache[symbol] = ([c["time"] for c in cs], [c["close"] for c in cs])
-            except Exception:
-                cache[symbol] = None
-        return cache[symbol]
+
+def score(records: list[dict], candles_of, today: str | None = None, workers: int = 6) -> list[dict]:
+    """candles_of(symbol) -> 일봉. 기록마다 {h: {ret, bench, excess, hit}} 를 붙인다. 아직 기간이 안 지났으면 그 h 는 없다.
+    시세는 채점할 게 있을 수 있는 기록의 종목만, 여러 개를 한꺼번에 받는다 (종목이 200개라 하나씩 받으면 10초 넘게 걸렸다)."""
+    today = today or datetime.now(ET).date().isoformat()
+    due = [_may_be_due(r["as_of"], today) for r in records]
+    symbols = sorted({r["symbol"] for r, d in zip(records, due) if d} | ({BENCH} if any(due) else set()))
+
+    def load(symbol: str):
+        try:
+            cs = candles_of(symbol)
+            return [c["time"] for c in cs], [c["close"] for c in cs]
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        cache = dict(zip(symbols, pool.map(load, symbols)))
 
     out = []
-    for r in records:
-        scored, s, b = {}, series(r["symbol"]), series(BENCH)
+    for r, d in zip(records, due):
+        if not d:
+            out.append({**r, "scored": {}})
+            continue
+        scored, s, b = {}, cache.get(r["symbol"]), cache.get(BENCH)
         if s and b and r["as_of"] in s[0] and r["bench_as_of"] in b[0]:
             i, j = s[0].index(r["as_of"]), b[0].index(r["bench_as_of"])
             for h in HORIZONS:

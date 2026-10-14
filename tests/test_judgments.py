@@ -178,6 +178,11 @@ def test_score_uses_price_at_judgment_and_same_exit_day():
     assert s[0]["scored"][20] == {"ret": 20.0, "bench": 5.0, "excess": 15.0, "exit_day": "d0030", "hit": True}
     assert s[0]["scored"][5]["hit"] is None                                          # neutral 은 판단 안 함
     assert s[1]["scored"][20]["hit"] is False and s[1]["scored"][5]["hit"] is True
+    asked = []
+    young = j.score([_rec(as_of="2026-10-09")], lambda s: asked.append(s) or data[s], today="2026-10-15")
+    assert young[0]["scored"] == {} and asked == []          # 평일로 4일 → 5일 기간도 안 지났으니 시세를 안 받는다
+    j.score([_rec(as_of="2026-10-09")], lambda s: asked.append(s) or data[s], today="2026-10-16")
+    assert sorted(asked) == ["AAA", "SPY"]                   # 평일 5일이 지나면 받아서 채점해 본다
     fresh = j.score([_rec(as_of="d0030")], data.__getitem__)[0]["scored"]            # 아직 20봉이 안 지남
     assert 20 not in fresh and 5 in fresh
 

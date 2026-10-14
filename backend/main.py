@@ -227,6 +227,7 @@ async def lifespan(_: FastAPI):
     if get_settings().toss_enabled:
         tasks = [asyncio.create_task(monitor.run_forever()), asyncio.create_task(hub.run_forever())]
         asyncio.create_task(asyncio.to_thread(universe))   # 검색 목록 미리 받아두기 (~7초)
+        asyncio.create_task(asyncio.to_thread(lambda: judge_scored(judge_log.read())))   # 판단 기록 채점도 미리
         if get_settings().judge_auto:
             tasks.append(asyncio.create_task(judge_scheduler()))
     yield
@@ -1077,12 +1078,44 @@ def judgments_run(body: JudgeRunBody):
     return {"started": True}
 
 
+JUDGE_SCORE_TTL = 3600
+_judge_score: dict = {}                  # {"at", "n", "value"}: 마지막 채점
+_judge_score_lock = threading.Lock()
+
+
+def judge_scored(records: list[dict]) -> list[dict]:
+    """채점 결과. 채점은 하루에 한 번 생기는 확정 봉으로 하니까 1시간 동안 같은 값을 쓴다.
+    1시간이 지났으면 지난 값을 바로 돌려주고 뒤에서 새로 계산한다 (탭을 열 때 기다리지 않게).
+    기록 수가 바뀌었으면(새 주 기록) 기다려서 새로 계산한다. 동시에 여러 번 불려도 계산은 한 번만."""
+    hit = dict(_judge_score)                              # 복사: 뒤에서 새로 계산한 값이 이 호출의 답을 바꾸지 않게
+    if hit.get("n") == len(records):
+        if time.time() - hit["at"] < JUDGE_SCORE_TTL:
+            return hit["value"]
+        if _judge_score_lock.acquire(blocking=False):
+            def refresh():
+                try:
+                    _store_judge_score(records)
+                finally:
+                    _judge_score_lock.release()
+            threading.Thread(target=refresh, daemon=True).start()
+        return hit["value"]
+    with _judge_score_lock:
+        if _judge_score.get("n") != len(records):         # 기다리는 사이 다른 요청이 이미 계산했으면 그걸 쓴다
+            _store_judge_score(records)
+        return _judge_score["value"]
+
+
+def _store_judge_score(records: list[dict]) -> None:
+    value = judgments.score(records, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: load_stock(s)[1]))
+    _judge_score.update(at=time.time(), n=len(records), value=value)
+
+
 @app.get("/api/judgments")
 def judgments_summary(symbol: str | None = None):
     """기록 현황 + 채점 (읽을 때마다 지금 시세로 계산). symbol 을 주면 그 종목의 기록도."""
     settings = get_settings()
     records = judge_log.read()
-    scored = cached(f"judge-scored:{len(records)}:{candle_ttl()}", 300, lambda: judgments.score(records, lambda s: load_stock(s)[1]))
+    scored = judge_scored(records)
     week = judgments.week_key()
     plan = judge_plan()
     out = {

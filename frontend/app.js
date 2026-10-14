@@ -1585,10 +1585,15 @@ let judgePoll = null;
 
 async function loadJudgments() {
   if (state.stockTab !== "judge") return;
-  const sym = state.data && !state.data.macro ? `?symbol=${encodeURIComponent(state.data.symbol)}` : "";
-  const res = await fetch(`/api/judgments${sym}`);
-  if (!res.ok) return $("#judge-status").replaceChildren(el("p", { class: "muted" }, "판단 기록을 불러오지 못했어요"));
+  const symbol = state.data?.symbol;
+  const sym = state.data && !state.data.macro ? `?symbol=${encodeURIComponent(symbol)}` : "";
+  if (!state.judge) $("#judge-status").replaceChildren(el("p", { class: "muted" }, "판단 기록을 불러오는 중…"));
+  if (state.judge && state.judge.symbol !== symbol) $("#judge-symbol").replaceChildren();     // 앞 종목의 판단이 잠깐 남지 않게
+  const res = await fetch(`/api/judgments${sym}`).catch(() => null);
+  if (state.stockTab !== "judge" || state.data?.symbol !== symbol) return;      // 기다리는 사이 탭이나 종목이 바뀌었다
+  if (!res?.ok) return $("#judge-status").replaceChildren(el("p", { class: "muted" }, "판단 기록을 불러오지 못했어요"));
   const j = await res.json();
+  j.symbol = symbol;
   state.judge = j;
   renderJudgments();
   clearTimeout(judgePoll);
@@ -2023,8 +2028,19 @@ async function initAlerts() {
 // ── 실시간 시세 (서버가 토스 WebSocket 을 중계한 SSE) ──
 let liveSource = null, liveKey = "", listRenderQueued = false;
 
+// 브라우저는 한 서버에 연결을 6개까지만 연다. 탭마다 실시간(SSE)·알림(SSE)이 하나씩 붙들고 있어서 탭을 여러 개 열면
+// 나머지 요청(판단 기록, 차트 …)이 줄을 서서 안 뜨거나 한참 걸렸다 → 안 보이는 탭은 실시간 연결을 닫는다 (알림은 둔다: 백그라운드 알림용)
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    liveSource?.close();
+    liveSource = null;
+    liveKey = "";
+    $("#live-dot").classList.remove("on");
+  } else updateLiveSubscription();
+});
+
 function updateLiveSubscription() {
-  if (!state.toss) return;
+  if (!state.toss || document.hidden) return;
   const cur = state.data?.macro ? null : state.data?.symbol;      // 지표(야후)는 토스 실시간이 없음
   const symbols = [...new Set([cur, ...state.watchlist, ...state.holdings.map((h) => h.symbol), ...marketLiveSymbols()].filter(Boolean))].slice(0, 50);
   const key = symbols.slice().sort().join(",");
