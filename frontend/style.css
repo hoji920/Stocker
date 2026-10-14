@@ -114,6 +114,17 @@ button { white-space: nowrap; padding: 8px 12px; border: 0; border-radius: 8px; 
 #title-row h2 { margin: 0; font-size: 20px; }
 #price { font-size: 18px; font-weight: 600; }
 #price .chg { font-size: 14px; margin-left: 6px; }
+.cur-switch { display: inline-flex; padding: 2px; gap: 2px; border: 1px solid var(--line); border-radius: 8px; background: transparent; cursor: pointer; }
+.cur-switch span { min-width: 24px; padding: 2px 6px; border-radius: 6px; font-size: 12px; color: var(--muted); text-align: center; }
+.cur-switch span.on { background: var(--accent); color: #fff; font-weight: 600; }
+#price .krw { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 8px; font-variant-numeric: tabular-nums; }
+.fx { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; }
+.fx-row { display: flex; align-items: center; gap: 8px; }
+.fx-in { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+.fx-in input { flex: 1; min-width: 0; background: transparent; border: 0; color: var(--text); font-size: 15px; text-align: right; font-variant-numeric: tabular-nums; outline: none; padding: 0; }
+.fx-in span, .fx-eq { color: var(--muted); font-size: 13px; }
+.fx-in:focus-within { border-color: var(--accent); }
+#fx-rate { margin: 6px 0 0; font-size: 11px; }
 .up { color: var(--up); } .down { color: var(--down); }
 
 /* 칩은 왼쪽 칸에서 줄바꿈, 도구 버튼은 오른쪽 칸 맨 위에 고정 → 칩 개수가 바뀌어도 버튼이 안 움직인다 */
@@ -133,6 +144,8 @@ button { white-space: nowrap; padding: 8px 12px; border: 0; border-radius: 8px; 
 #legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
 #legend .st { color: #fab005; font-size: 10px; }
 #legend .v { color: var(--muted); }
+#legend .ohlc { cursor: default; font-variant-numeric: tabular-nums; }
+#legend .ohlc .v.up { color: var(--up); } #legend .ohlc .v.down { color: var(--down); }
 
 /* 마커에 마우스를 올렸을 때 설명 상자 */
 #tip { position: absolute; left: 0; top: 0; z-index: 5; pointer-events: none; max-width: 300px; padding: 8px 10px;
@@ -365,6 +378,11 @@ button.ghost.on { border-color: var(--accent); color: var(--accent); }
 .brief-meta + .brief-meta { margin-top: 2px !important; }
 .brief-again { background: transparent; color: var(--muted); padding: 0; font-size: 11px; text-decoration: underline; }
 /* ── 구조 읽기 (한눈에 보기) ── */
+.company { border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; margin-bottom: 10px; font-size: 13px; line-height: 1.6; }
+.company p { margin: 6px 0 0; }
+.company-facts { display: flex; flex-wrap: wrap; gap: 6px; }
+.company-facts span { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text); border-radius: 6px; padding: 1px 8px; font-size: 12px; }
+.company a { color: var(--accent); text-decoration: none; }
 .reading { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; font-size: 14px; line-height: 1.65; }
 .reading.empty { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
 .reading-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 6px; }

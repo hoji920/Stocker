@@ -63,7 +63,17 @@ _SYSTEM = (
     "그 뒤에 도움이 되면 규칙 대조 결과를 덧붙인다.\n"
     "7) 필요한 도구만 부른다 (토큰을 아낀다). 답은 보통 3~6문장, 숫자가 여러 개면 짧은 목록으로.\n"
     "8) 도구 이름(check_my_rules 등)이나 내부 용어를 답에 쓰지 않는다. '원하시면 ~해드릴게요'라고 묻지 말고, "
-    "질문에 답하는 데 필요하면 지금 도구를 불러서 답한다. 가격은 도구가 준 표기($384.56)를 그대로 쓴다."
+    "질문에 답하는 데 필요하면 지금 도구를 불러서 답한다. 가격은 도구가 준 표기($384.56)를 그대로 쓴다.\n"
+    "9) 용어·제도 질문인데 답이 경우마다 달라지면(예: ETF 보수 — 한국 ETF는 운용·판매·수탁·사무관리보수로 나눠 보이고 "
+    "미국 ETF는 총보수율(expense ratio) 하나로 보인다 / 세금·환전 — 국내 주식과 해외 주식이 다르다), "
+    "먼저 공통되는 핵심을 2~3문장으로 답하고, 경우마다 어떻게 다른지 한 줄로 짚은 뒤, "
+    "마지막에 사용자의 경우를 묻는 짧은 질문 하나로 끝낸다 (예: \"어떤 ETF 보고 계세요? 한국 ETF예요, 미국 ETF예요?\"). "
+    "   - '지금 보고 있는 종목'의 사실(상장 시장, ETF 인지, 보수 …)은 아래에 주어진다. 그걸로 갈림길이 풀리면 묻지 말고 "
+    "그 종목 기준으로 답한다 (예: KORU 를 보며 보수를 물으면 'KORU 는 미국 ETF 라 총보수율 하나로 보고, 1.32%예요'). "
+    "주어진 사실을 사용자에게 되묻는 건 금지. 그 종목으로도 안 풀리는 갈림길만 묻는다.\n"
+    "   - 질문이나 대화에 이미 나온 조건은 다시 묻지 않고, 아직 갈리는 것만 묻는다 "
+    "(예: '해외주식 세금'을 물었으면 국내·해외는 정해졌으니 '팔아서 남은 이익이에요, 배당이에요?'를 묻는다). 더 갈리는 게 없으면 묻지 않는다.\n"
+    "   - 이 되묻기는 8)의 '원하시면' 금지와 다르다: 해 줄 일을 제안하는 게 아니라, 맞는 답을 하려고 사용자의 상황을 묻는 것이다. 한 번에 하나만."
 )
 
 _sym = {"type": "object", "properties": {"symbol": {"type": "string", "description": "티커 (예: INTC, 005930)"}}, "required": ["symbol"]}
@@ -99,14 +109,14 @@ LABELS = {"check_my_rules": "내 규칙 대조", "read_chart": "차트 읽기", 
           "backtest_my_rules": "과거 대조", "propose_action": "할 일 제안"}
 
 
-def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | None, rules_note: str = "") -> dict:
+def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | None, rules_note: str = "", about: str = "") -> dict:
     """messages = [{role: user|assistant, content}]. 반환 {answer, steps: [도구 이름], tokens}."""
     from openai import OpenAI
     client = OpenAI(api_key=settings.openai_api_key)
     model = settings.openai_agent_model
     # gpt-5 계열은 이 API 에서 도구와 '생각(reasoning)'을 같이 못 쓴다 → 생각 없이 (도구 고르기엔 충분, 토큰도 덜 든다)
     extra = llm_args(model, 0.2, "none")
-    context = f"지금 보고 있는 종목: {symbol or '없음'}"
+    context = f"지금 보고 있는 종목: {symbol or '없음'}" + (f" — {about}" if about else "")
     if rules_note:
         context += f"\n사용자가 적어둔 원칙: {rules_note}"
     convo = [{"role": "system", "content": _SYSTEM}, {"role": "system", "content": context},

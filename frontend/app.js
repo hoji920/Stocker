@@ -346,11 +346,32 @@ function renderTrendlines() {
   renderLegend();
 }
 
+// 범례 맨 윗줄: 마우스를 올린 봉의 시가·고가·저가·종가 (안 올렸으면 마지막 봉). 등락은 바로 앞 봉 종가 대비
+function ohlcRow(param) {
+  const cs = state.data.candles;
+  const hover = param?.seriesData?.get(candles);
+  let i = cs.length - 1;
+  if (hover && param.time != null) {
+    const key = typeof param.time === "object" ? `${param.time.year}-${String(param.time.month).padStart(2, "0")}-${String(param.time.day).padStart(2, "0")}` : param.time;
+    const at = cs.findIndex((c) => c.time === key);
+    if (at >= 0) i = at;
+  }
+  const c = cs[i], prev = cs[i - 1];
+  const up = c.close >= (prev?.close ?? c.open);
+  const tone = (v) => el("span", { class: `v ${v >= (prev?.close ?? c.open) ? "up" : "down"}` }, fmt(v));
+  const when = state.data.intraday
+    ? new Date(c.time * 1000).toISOString().slice(5, 16).replace("T", " ")       // 서버가 한국 시간으로 옮겨 둔 유닉스 초
+    : String(c.time);
+  return el("span", { class: "lg ohlc" },
+    el("span", { class: "muted" }, when), " 시 ", tone(c.open), " 고 ", tone(c.high), " 저 ", tone(c.low), " 종 ", tone(c.close),
+    prev ? el("span", { class: `v ${up ? "up" : "down"}` }, ` ${up ? "+" : ""}${((c.close / prev.close - 1) * 100).toFixed(2)}%`) : "");
+}
+
 // 차트 왼쪽 위 범례: 지금 차트에 보이는 선과 보조지표 이름·값 (가격축 라벨 대신)
 function renderLegend(param) {
   const box = $("#legend");
   if (!state.data) return box.replaceChildren();
-  const rows = [];
+  const rows = [ohlcRow(param)];
   for (const it of autoItems().filter(isVisible)) {
     if (it.group === "level" && !it.nearest && state.focus !== it.id) continue;    // 범례도 핵심만
     const color = itemColor(it);
@@ -979,7 +1000,7 @@ $("#list-refresh").addEventListener("click", () => (state.tab === "watch" ? load
 $("#why-btn").addEventListener("click", async () => {
   const sym = state.data?.symbol;
   if (!sym) return;
-  setStockTab("overview");
+  setStockTab("news");
   const box = $("#why-box");
   box.replaceChildren(el("div", { class: "card why" }, el("b", {}, "오늘 움직임 이유 찾는 중…"),
     el("p", {}, "최근 뉴스와 시장 전체 움직임을 보고 있어요 (몇 초 걸려요)")));
@@ -1426,20 +1447,63 @@ function renderIntervalBar() {
   }));
 }
 
+// 현재가를 원화로 볼지 (브라우저에 기억)
+let priceInKrw = false;
+try { priceInKrw = localStorage.getItem("priceInKrw") === "1"; } catch {}
+$("#price-cur").addEventListener("click", () => {
+  priceInKrw = !priceInKrw;
+  try { localStorage.setItem("priceInKrw", priceInKrw ? "1" : "0"); } catch {}
+  if (state.lastShown != null) renderPrice(state.lastShown);
+});
+
 function renderPrice(price) {
   const d = state.data;
   const chg = (price / d.prev_close - 1) * 100;
   const prev = state.lastShown;
   state.lastShown = price;
   const box = $("#price");
-  box.replaceChildren(fmt(price),
-    el("span", { class: `chg ${chg >= 0 ? "up" : "down"}` }, `${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`));
+  // 미국 종목: '원으로' 버튼을 누르면 원화가 크게, 달러가 옆에 작게 (환율 = 토스 매매기준율)
+  const usd = d.currency === "USD" && state.fx;
+  $("#price-cur").hidden = !usd;
+  const inKrw = usd && priceInKrw;
+  $("#price-cur").querySelectorAll("span").forEach((s) => s.classList.toggle("on", (s.dataset.cur === "krw") === !!inKrw));
+  const krw = usd ? `${Math.round(price * state.fx.usd_krw).toLocaleString()}원` : "";
+  box.replaceChildren(inKrw ? krw : fmt(price),
+    el("span", { class: `chg ${chg >= 0 ? "up" : "down"}` }, `${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`),
+    usd ? el("span", { class: "krw", title: `${state.fx.source} ${state.fx.usd_krw.toLocaleString()}원 기준` }, `≈ ${inKrw ? fmt(price) : krw}`) : "");
   if (prev != null && prev !== price) {           // 토스처럼 바뀔 때 깜빡임
     box.classList.remove("flash-up", "flash-down");
     void box.offsetWidth;
     box.classList.add(price > prev ? "flash-up" : "flash-down");
   }
 }
+
+// ── 달러·원 변환 (시장 탭 맨 위 + 미국 종목 가격 옆 원화) ──
+// 환율은 토스 매매기준율 (1분마다 바뀜). 서버도 1분 캐시라 1분마다 다시 받는다
+async function loadFx() {
+  const res = await fetch("/api/fx").catch(() => null);
+  if (!res?.ok) return ($("#fx-rate").textContent = "환율을 못 받았어요");
+  state.fx = await res.json();
+  $("#fx-rate").textContent = `1달러 = ${state.fx.usd_krw.toLocaleString(undefined, { maximumFractionDigits: 2 })}원 · ${state.fx.source} · ${state.fx.at} 기준`;
+  convertFx(state.fxFrom || "usd");
+  if (state.data && state.lastShown != null && !state.data.macro) renderPrice(state.lastShown);
+}
+
+// 마지막으로 손댄 칸을 기준으로 다른 칸을 채운다 (환율이 바뀌어도 내가 넣은 숫자는 그대로)
+function convertFx(from) {
+  if (!state.fx) return;
+  state.fxFrom = from;
+  const num = (s) => Number(String(s).replace(/[^\d.]/g, ""));
+  const usd = $("#fx-usd"), krw = $("#fx-krw"), r = state.fx.usd_krw;
+  if (from === "usd") krw.value = usd.value.trim() ? Math.round(num(usd.value) * r).toLocaleString() : "";
+  else usd.value = krw.value.trim() ? (num(krw.value) / r).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "";
+}
+$("#fx-usd").addEventListener("input", () => convertFx("usd"));
+$("#fx-krw").addEventListener("input", () => convertFx("krw"));
+// 원 칸은 세 자리마다 쉼표를 다시 찍는다
+$("#fx-krw").addEventListener("blur", (e) => { const v = Number(e.target.value.replace(/[^\d]/g, "")); if (v) e.target.value = v.toLocaleString(); });
+loadFx();
+setInterval(loadFx, 60000);
 
 // 차트만 다시 (봉 단위 바꿀 때). 뉴스는 그대로 둔다
 async function loadChart(symbol) {
@@ -1471,15 +1535,16 @@ async function loadChart(symbol) {
   renderSignals();
   renderAutoLines();
   renderPatterns();
-  loadReading();                              // 구조 읽기: 오늘 이미 만든 게 있으면 보여주고, 없으면 버튼만 (일봉에서만)
+  loadReading();                              // 구조 읽기: 오늘 이미 만든 게 있으면 보여주고, 없으면 버튼만 (늘 일봉 기준)
+  loadCompany();
   $("#daily-only").hidden = isDaily();
   // 지수·선물·금리(야후)는 관심종목/이유찾기 대상이 아니고 토스 실시간도 없음
-  $("#watch-toggle").hidden = $("#why-btn").hidden = $("#live-dot").hidden = !!d.macro;
+  $("#watch-toggle").hidden = $("#why-row").hidden = $("#live-dot").hidden = !!d.macro;
   ["#draw-trend", "#draw-hline", "#draw-channel"].forEach((id) => ($(id).disabled = !isDaily()));
   // autoSize 가 첫 레이아웃 후에 폭을 잡기 때문에 한 프레임 뒤에 범위를 지정해야 안 찌그러진다
   requestAnimationFrame(() => setTimeout(() =>
     chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 3 }), 50));
-  if (isDaily() && !d.demo) loadOlder(d);
+  if (d.interval !== "1y" && !d.demo) loadOlder(d);           // 년봉은 처음부터 상장 이후 전부
 }
 
 function setBars(d) {
@@ -1488,20 +1553,25 @@ function setBars(d) {
   volume.setData(d.candles.map((c) => ({ time: c.time, value: c.volume, color: (c.close >= c.open ? css("--up") : css("--down")) + "55" })));
 }
 
-// 일봉 차트의 왼쪽: 서버가 분석에 쓰는 최근 400봉보다 앞선 봉(약 8년치)을 뒤따라 받아 붙인다.
+// 차트의 왼쪽: 서버가 분석에 쓰는 봉보다 앞선 봉(일·주·월봉은 상장 이후 전부, 분봉은 5일~6주)을 뒤따라 받아 붙인다.
 // 선·신호는 그대로고(최근 봉으로 계산한 것), 차트와 보조지표만 길어진다. 보고 있던 자리는 그대로 둔다
 async function loadOlder(d) {
-  const res = await fetch(`/api/chart/${encodeURIComponent(d.symbol)}/older?before=${d.candles[0].time}`).catch(() => null);
+  const first = d.candles[0].time;
+  const res = await fetch(`/api/chart/${encodeURIComponent(d.symbol)}/older?interval=${d.interval}&before=${first}`).catch(() => null);
   if (!res?.ok || state.data !== d) return;
-  const older = (await res.json()).candles;
-  if (!older.length || state.data !== d) return;
+  const body = await res.json();
+  const older = body.candles;
+  // 마지막 옛 봉이 첫 봉과 같은 기간이면 그걸로 바꿔 낀다 (첫 봉은 받은 범위 시작에서 잘려 덜 찬 봉일 수 있다)
+  const swap = !!body.replace_first;
+  if (!older.length || state.data !== d || (swap && older.length === 1)) return;
   const r = chart.timeScale().getVisibleLogicalRange();
-  d.candles = [...older, ...d.candles];
+  const added = older.length - (swap ? 1 : 0);
+  d.candles = [...older, ...d.candles.slice(swap ? 1 : 0)];
   setBars(d);
   renderIndicators();
   renderDrawings();
   renderMarkers();
-  if (r) chart.timeScale().setVisibleLogicalRange({ from: r.from + older.length, to: r.to + older.length });
+  if (r) chart.timeScale().setVisibleLogicalRange({ from: r.from + added, to: r.to + added });
 }
 
 // 로그 버튼: 서버 설정을 바꾼다 (신호·알림·내 규칙도 같은 추세선을 쓰게) → 차트를 다시 받아 그린다
@@ -1546,11 +1616,39 @@ async function load(symbol) {
   refineNews();
 }
 
+// ── 회사 정보 (한눈에 보기 맨 위): 어떤 섹터·업종의 어떤 회사(ETF)인지. 야후 프로필 + AI 한국어 요약, 서버가 30일 저장 ──
+const bigUsd = (v) => (v >= 1e12 ? `${(v / 1e12).toFixed(2)}조 달러` : `${Math.round(v / 1e8).toLocaleString()}억 달러`);
+const bigKrw = (v) => (v >= 1e14 ? `${Math.round(v / 1e12).toLocaleString()}조 원` : v >= 1e12 ? `${(v / 1e12).toFixed(1)}조 원` : `${Math.round(v / 1e8).toLocaleString()}억 원`);
+
+async function loadCompany() {
+  const d = state.data, box = $("#company-box");
+  if (state.company?.symbol !== d?.symbol) box.replaceChildren();
+  if (!d || d.macro || d.market === "KR") return;
+  if (state.company?.symbol === d.symbol) return;               // 봉 단위만 바꿨으면 그대로
+  const res = await fetch(`/api/company/${encodeURIComponent(d.symbol)}`).catch(() => null);
+  if (!res?.ok || state.data?.symbol !== d.symbol) return;
+  const c = (await res.json()).company;
+  if (!c) return;
+  state.company = { symbol: d.symbol, c };
+  const etf = c.type === "ETF";
+  const facts = etf
+    ? ["ETF", c.fund_family, c.fund_category, c.expense_ratio != null ? `보수 ${(c.expense_ratio * 100).toFixed(2)}%` : null]
+    : [[c.sector_ko, c.industry_ko || c.industry].filter(Boolean).join(" › "),
+       c.country === "United States" ? "미국" : c.country,
+       c.employees ? `직원 ${c.employees.toLocaleString()}명` : null,
+       c.market_cap ? `시총 ${bigUsd(c.market_cap)}${state.fx ? ` (약 ${bigKrw(c.market_cap * state.fx.usd_krw)})` : ""}` : null];
+  box.replaceChildren(el("div", { class: "company" },
+    el("div", { class: "company-facts" }, ...facts.filter(Boolean).map((t) => el("span", {}, t))),
+    c.summary ? el("p", {}, c.summary) : c.summary_en ? el("p", { class: "muted" }, c.summary_en.slice(0, 300) + "…") : "",
+    el("p", { class: "muted hint" }, "야후 파이낸스 프로필 · 설명은 AI 가 한국어로 줄인 것",
+      c.website ? el("a", { href: c.website, target: "_blank", rel: "noopener" }, " · 홈페이지") : "")));
+}
+
 // ── 구조 읽기 (한눈에 보기 맨 위) ──
 // 아래 카드들(지지선, 추세선, 채널 …)을 AI 가 한 덩어리로 풀어 쓴 것. 버튼을 눌렀을 때만 만들고, 그날 이미 만든 게 있으면 바로 보여준다
 async function loadReading(make = false) {
   const d = state.data, box = $("#reading-box");
-  if (!d || d.macro || !isDaily()) return box.replaceChildren();
+  if (!d || d.macro) return box.replaceChildren();           // 서버가 늘 일봉으로 만들어서 주봉·분봉을 보고 있어도 띄운다
   if (make) box.replaceChildren(el("div", { class: "reading" }, el("div", { class: "reading-head" }, el("b", {}, "구조 읽기")),
     el("p", { class: "muted" }, "AI 가 선들을 묶어서 읽는 중…")));
   const q = make ? `?make=1${state.lastShown ? `&price=${state.lastShown}` : ""}` : "";
@@ -1567,7 +1665,7 @@ async function loadReading(make = false) {
       el("span", { class: "muted" }, "아래 선들을 묶어서 '지금 어떤 모양의 어디쯤인지' 한 번에 읽어줘요."), btn));
   }
   box.replaceChildren(el("div", { class: "reading" },
-    el("div", { class: "reading-head" }, el("b", {}, "구조 읽기"), el("span", { class: "muted" }, `${r.as_of} · ${r.price} 기준 · AI`)),
+    el("div", { class: "reading-head" }, el("b", {}, "구조 읽기"), el("span", { class: "muted" }, `일봉 ${r.as_of} · ${r.price} 기준 · AI`)),
     el("p", {}, r.structure, " ", el("b", { class: "reading-sum" }, r.summary)),
     el("ul", {}, ...r.below.map((t, i) => el("li", {}, el("b", {}, i ? "" : "아래쪽 "), t)),
       ...r.above.map((t, i) => el("li", {}, el("b", {}, i ? "" : "반대로 "), t))),
@@ -1778,10 +1876,14 @@ function richText(text) {
   });
 }
 
-state.chat = [];
+// 대화는 이 브라우저에 저장해서 새로고침해도 이어진다 (서버엔 안 남는다). '새 대화'를 누르면 지운다. 최근 50개까지만
+const CHAT_KEY = "stocking.chat";
+state.chat = store.load(CHAT_KEY, []).map((m) => ({ ...m, actions: (m.actions || []).map((a) => (a.state === "busy" ? { ...a, state: "" } : a)) }));
+const saveChat = () => store.save(CHAT_KEY, state.chat.slice(-50));
 const CHAT_STARTERS = ["지금 내 규칙으로 어때?", "관심종목 중 내 규칙에 맞는 건?", "내 규칙이 이 종목 과거엔 어땠어?", "내 계좌 비중 정리해줘",
   "오늘 왜 움직였어?", "목표가에 알림 걸어줘"];
 function renderChat(pending) {
+  saveChat();                                                     // 대화·확인 버튼 상태가 바뀔 때마다 여기를 지난다
   const log = $("#chat-log");
   log.hidden = !state.chat.length && !pending;
   log.replaceChildren(...state.chat.map((m) => el("div", { class: `chat-msg ${m.role}` },
@@ -1869,7 +1971,9 @@ async function askAgent(text) {
   renderChat(true);
   try {
     const res = await fetch("/api/agent/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: state.chat.map(({ role, content }) => ({ role, content })), symbol: state.data?.macro ? null : state.data?.symbol }) });
+      // 오류 안내는 대화가 아니라서 AI 에 안 보낸다
+      body: JSON.stringify({ messages: state.chat.filter((m) => m.meta !== "오류").map(({ role, content }) => ({ role, content })),
+        symbol: state.data?.macro ? null : state.data?.symbol }) });
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "답을 받지 못했어요");
     state.chat.push({ role: "assistant", content: body.answer, actions: body.actions || [],

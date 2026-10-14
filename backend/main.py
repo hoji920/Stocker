@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import (agent, analysis, bars, demo, judgments, macro, market_brief, movers, news, patterns, reading, rules, search,
+from backend import (agent, analysis, bars, company, demo, judgments, macro, market_brief, movers, news, patterns, reading, rules, search,
                      signals, underlying)
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
@@ -301,7 +301,7 @@ def load_bars(symbol: str, interval: str, daily: list[dict]) -> list[dict]:
 
 def long_days(symbol: str, pages: int) -> list[dict]:
     """일봉 pages 페이지 (200일/페이지, 1시간 캐시). 더 긴 일봉을 이미 받아뒀으면 (예: 년봉 본 뒤 월봉) 그걸 재사용 — 긴 기록은 수십 페이지라 느리다."""
-    for p in sorted({v for v in bars.DAILY.values() if v > pages}, reverse=True):
+    for p in sorted({v for v in (*bars.DAILY.values(), bars.DAILY_ALL) if v > pages}, reverse=True):
         hit = _cache.get(f"days:{symbol}:{p}")
         if hit and time.time() - hit[0] < 3600:
             return hit[1]
@@ -309,22 +309,47 @@ def long_days(symbol: str, pages: int) -> list[dict]:
 
 
 @app.get("/api/chart/{symbol}/older")
-def chart_older(symbol: str, before: str):
-    """일봉 차트의 왼쪽을 채울 옛 봉 (before 보다 앞선 날짜, 약 8년치). 화면이 차트를 그린 뒤에 따로 받아 붙인다.
-    보여주기만 한다 — 선·신호·내 규칙·판단 기록은 지금처럼 최근 일봉(load_stock)만 쓴다."""
+def chart_older(symbol: str, before: str, interval: str = "1d"):
+    """차트의 왼쪽을 채울 옛 봉. 화면이 차트를 그린 뒤에 따로 받아 붙인다.
+    일·주·월봉은 상장 이후 전부, 분봉은 bars.MINUTE_LONG 페이지만큼 (1분봉 약 5일 ~ 60분봉 약 6주). 년봉은 처음부터 전부라 없다.
+    차트의 첫 봉과 같은 기간의 봉까지 주고 replace_first 로 알린다: 첫 봉은 받은 범위의 시작에서 잘려
+    덜 찬 봉일 수 있어서(분봉의 앞 몇 분, 주봉의 앞 며칠) 화면이 꽉 찬 봉으로 바꿔 낀다.
+    보여주기만 한다 — 선·신호·내 규칙·판단 기록은 지금처럼 차트 응답의 봉만 쓴다."""
     symbol = symbol.strip().upper()
+    if interval not in ("1d", "1w", "1M", *bars.MINUTE):
+        raise HTTPException(status_code=400, detail=f"옛 봉을 붙이지 않는 봉 단위: {interval}")
     try:
-        if macro.is_macro(symbol):
-            days = macro.daily_candles(symbol)
-        elif not get_settings().toss_enabled:
-            days = []
+        if interval in bars.MINUTE:
+            if macro.is_macro(symbol) or not get_settings().toss_enabled:
+                return {"candles": [], "replace_first": False}
+            size, _ = bars.MINUTE[interval]
+            out, key = bars.aggregate_minutes(long_minutes(symbol, bars.MINUTE_LONG[interval]), size), (lambda t: t)
+            cut = int(before)
         else:
-            days = long_days(symbol, bars.DAILY["1w"])
+            if macro.is_macro(symbol):
+                days = macro.daily_candles(symbol)
+            elif not get_settings().toss_enabled:
+                days = []
+            else:
+                days = long_days(symbol, bars.DAILY_ALL)
+            out, key = bars.aggregate_days(days, interval), (lambda t: bars.period(t, interval))
+            cut = key(before)
     except TossApiError as error:
         raise HTTPException(status_code=502, detail=f"토스 API 오류 {error.status}: {error.payload}")
     except Exception as error:
-        raise HTTPException(status_code=502, detail=f"옛 일봉을 못 받았어요: {error}")
-    return {"candles": [c for c in days if c["time"] < before]}
+        raise HTTPException(status_code=502, detail=f"옛 봉을 못 받았어요: {error}")
+    keep = [c for c in out if key(c["time"]) <= cut]
+    return {"candles": keep, "replace_first": bool(keep) and key(keep[-1]["time"]) == cut}
+
+
+def long_minutes(symbol: str, pages: int) -> list[dict]:
+    """1분봉 pages 페이지. 지난 분봉은 안 바뀌니까 30분 동안 다시 안 받고, 더 긴 걸 받아뒀으면 그걸 쓴다
+    (차트 첫 봉보다 앞선 봉만 쓰므로 30분 묵어도 괜찮다)."""
+    for p in sorted({v for v in bars.MINUTE_LONG.values() if v > pages}, reverse=True):
+        hit = _cache.get(f"min-long:{symbol}:{p}")
+        if hit and time.time() - hit[0] < 1800:
+            return hit[1]
+    return cached(f"min-long:{symbol}:{pages}", 1800, lambda: toss().minute_candles(symbol, pages))
 
 
 # ── 차트 / 뉴스 ──
@@ -979,10 +1004,33 @@ def agent_chat(body: ChatBody):
     settings = get_settings()
     if not settings.summary_enabled:
         raise HTTPException(status_code=400, detail="OPENAI_API_KEY 가 있어야 질문할 수 있어요")
+    symbol = (body.symbol or "").strip().upper() or None
     try:
-        return agent.chat(settings, AGENT_TOOLS, body.messages, (body.symbol or "").strip().upper() or None, my_rules()["note"])
+        return agent.chat(settings, AGENT_TOOLS, body.messages, symbol, my_rules()["note"], about=symbol_facts(symbol))
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"답을 만들지 못했어요 ({type(error).__name__})")
+
+
+def symbol_facts(symbol: str | None) -> str:
+    """챗봇에 같이 넘길 '지금 보는 종목'의 기본 사실 (티커만 넘겼더니 KORU 가 한국 ETF 인지 미국 ETF 인지 되물었다).
+    이미 받아둔 것만 쓴다: 토스 종목 정보 + 저장된 회사 정보. 못 받으면 빈 문자열."""
+    if not symbol or macro.is_macro(symbol):
+        return ""
+    try:
+        info = load_stock(symbol)[0]
+    except Exception:
+        info = {}
+    path = get_settings().data_dir / "company" / f"{symbol}.json"
+    c = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    kind = {"ETF": "ETF", "EQUITY": "주식"}.get(c.get("type") or "", "ETF" if info.get("securityType") == "ETF" else "")
+    listed = "한국 상장" if market_of(symbol) == "KR" else "미국 상장"
+    parts = [info.get("name"), info.get("englishName"),
+             f"{listed} ({info['market']})" if info.get("market") else listed,
+             kind, f"{info.get('leverageFactor')}배 레버리지" if info.get("leverageFactor") else "",
+             f"보수(expense ratio) {c['expense_ratio'] * 100:.2f}%" if c.get("expense_ratio") is not None else "",
+             f"{c.get('sector_ko')} › {c.get('industry_ko')}" if c.get("industry_ko") else "",
+             c.get("summary") or ""]
+    return " · ".join(p for p in parts if p)
 
 
 # ── 판단 기록 (에이전트의 판단을 미리 적어 두고 나중에 시세로 채점. 추천이 아니다) ──
@@ -1137,6 +1185,32 @@ def judgments_summary(symbol: str | None = None):
         s = symbol.strip().upper()
         out["symbol_records"] = [r for r in scored if r["symbol"] == s][-12:]
     return out
+
+
+@app.get("/api/company/{symbol}")
+def company_info(symbol: str):
+    """어떤 섹터·업종의 어떤 회사인지 (야후 프로필 + AI 한국어 요약, 30일 저장)."""
+    symbol = symbol.strip().upper()
+    if macro.is_macro(symbol) or market_of(symbol) == "KR":
+        return {"company": None}
+    try:
+        info = load_stock(symbol)[0] if get_settings().toss_enabled else {}
+        return {"company": company.profile(get_settings(), symbol, info)}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"회사 정보를 못 받았어요 ({type(error).__name__})")
+
+
+@app.get("/api/fx")
+def fx():
+    """달러→원 환율. 토스 매매기준율(1분마다 바뀜)을 1분 캐시. 토스 키가 없으면 야후 원/달러(몇 분 늦음)."""
+    try:
+        if get_settings().toss_enabled:
+            rate = cached("usd_krw:live", 60, lambda: toss().usd_krw())
+            return {"usd_krw": rate, "source": "토스 매매기준율", "at": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%H:%M")}
+        bars_ = cached("usd_krw:yahoo", 300, lambda: macro.daily_candles("KRW=X"))
+        return {"usd_krw": bars_[-1]["close"], "source": "야후 파이낸스 (몇 분 늦음)", "at": bars_[-1]["time"]}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"환율을 못 받았어요: {error}")
 
 
 @app.get("/healthz")
