@@ -1728,7 +1728,8 @@ async function loadReading(make = false) {
 // ── 판단 기록 ──
 // AI 의 판단을 미리 적어 두고 기간이 지나면 시세로 채점한다 (서버 judgments.py). 채점이 쌓이기 전의 판단은 근거 없는 의견이라
 // 종목별 판단은 접어 두고, 성적표를 먼저 보여준다.
-const ARM_NAMES = { news: "숫자 + 기사", nonews: "숫자만", news_r: "숫자 + 기사 (다시 물음)", nonews_r: "숫자만 (다시 물음)" };
+const ARM_NAMES = { news: "숫자 + 기사", nonews: "숫자만", news_r: "숫자 + 기사 (다시 물음)", nonews_r: "숫자만 (다시 물음)", asked: "질문 종합 검토" };
+const VIEW_NAMES = { strong: "강함", neutral: "중립", weak: "약함" };
 const DIR_NAMES = { outperform: "시장보다 강함", neutral: "판단 안 함", underperform: "시장보다 약함" };
 let judgePoll = null;
 
@@ -1789,6 +1790,15 @@ function renderJudgments() {
     ...table(j.ndx || [], "나스닥 100 성적"),
     ...table(j.paired || [], "모델 비교: 두 모델이 모두 판단한 종목·주만"),
     ...table(j.mine, "내 종목 성적 (참고)"),
+    ...table(j.asked || [], "내가 물어본 판단 (질문 탭의 종합 의견, 종목·날짜마다 처음 것만)"),
+    ...((j.asked_records || []).length ? [el("details", {}, el("summary", {}, `질문 탭에서 남긴 의견 최근 ${j.asked_records.length}건`),
+      ...j.asked_records.slice().reverse().map((r) => {
+        const s = r.scored[20];
+        return el("div", { class: "judge-rec" },
+          el("div", { class: "judge-rec-head" }, `${r.asked_at.slice(0, 16).replace("T", " ")} · ${r.name} (${r.symbol}) · 기준 ${r.as_of} ${fmt(r.price)}`),
+          el("div", {}, `20일: ${VIEW_NAMES[r.view]} (확신 ${r.c20})${s ? ` → 초과 ${sg(s.excess)} ${s.hit == null ? "" : s.hit ? "✓" : "✗"}` : " → 채점 대기"}`),
+          el("div", { class: "muted" }, r.reason), el("div", { class: "muted" }, `틀렸다고 볼 조건: ${r.invalid_if}`));
+      }))] : []),
     j.fixed.length && !anyScored ? el("p", { class: "muted hint" }, "아직 채점된 판단이 없어요. 5거래일 뒤에 첫 채점이, 20거래일 뒤에 주된 채점이 나와요.") : "",
     // 같은 입력을 한 번 더 물었을 때 판단이 얼마나 같았나 (성적과는 별개: 판단이 얼마나 흔들리는지)
     ...((j.consistency || []).length ? [el("div", { class: "brief-sub" }, "같은 입력에 다시 물었을 때"),
@@ -2027,8 +2037,9 @@ async function askAgent(text) {
         symbol: state.data?.macro ? null : state.data?.symbol }) });
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "답을 받지 못했어요");
+    const views = (body.views || []).map((v) => `판단 기록: ${v.symbol} ${VIEW_NAMES[v.view]}${v.counted ? "" : " (오늘 처음 것만 채점)"}`);
     state.chat.push({ role: "assistant", content: body.answer, actions: body.actions || [],
-      meta:`${body.steps.length ? `찾아본 것: ${body.steps.join(" → ")} · ` : ""}토큰 ${body.tokens.toLocaleString()}` });
+      meta: [body.steps.length ? `찾아본 것: ${body.steps.join(" → ")}` : "", ...views, `토큰 ${body.tokens.toLocaleString()}`].filter(Boolean).join(" · ") });
   } catch (error) {
     state.chat.push({ role: "assistant", content: error.message, meta: "오류" });
   } finally {

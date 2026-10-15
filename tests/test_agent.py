@@ -32,7 +32,7 @@ def test_agent_calls_tool_then_answers(monkeypatch):
     seen = []
     tools = {"check_my_rules": lambda symbol: seen.append(symbol) or {"verdict": "매수 구간이지만 손익비 미달"}}
     out = agent.chat(s, tools, [{"role": "user", "content": "지금 어때?"}], "INTC", "실적 전 주엔 안 산다")
-    assert out == {"answer": "규칙 기준으로는 조건 미달이에요.", "steps": ["내 규칙 대조"], "tokens": 200, "actions": []}
+    assert out == {"answer": "규칙 기준으로는 조건 미달이에요.", "steps": ["내 규칙 대조"], "tokens": 200, "actions": [], "views": []}
     assert seen == ["INTC"]
     assert "매수 구간이지만 손익비 미달" in sent[1]["messages"][-1]["content"]          # 도구 결과가 다음 요청에 들어간다
     assert "지금 보고 있는 종목: INTC" in sent[0]["messages"][1]["content"] and "실적 전 주엔" in sent[0]["messages"][1]["content"]

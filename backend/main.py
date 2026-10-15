@@ -991,6 +991,8 @@ AGENT_TOOLS = {
     "my_portfolio": portfolio,
     "find_symbol": lambda query: search_stocks(query, 5)["items"],
     "propose_action": propose_action,
+    "fundamentals": lambda symbol: company.fundamentals(symbol.strip().upper()),
+    "record_view": lambda **kw: record_view(**kw),
 }
 
 
@@ -1038,6 +1040,34 @@ def symbol_facts(symbol: str | None) -> str:
 judge_log = judgments.Log(Path(__file__).resolve().parent.parent / "judgments")
 judge_state = {"running": False, "week": None, "done": 0, "total": 0, "tokens": 0, "errors": [], "started": None, "finished": None}
 _judge_lock = threading.Lock()
+ASKED_PATH = judge_log.root / "asked" / "asked.jsonl"      # 질문 에이전트의 종합 의견 (주 1회 기록과 섞이지 않게 하위 폴더)
+_asked_lock = threading.Lock()
+
+
+def read_asked() -> list[dict]:
+    if not ASKED_PATH.exists():
+        return []
+    return [json.loads(line) for line in ASKED_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def record_view(symbol: str, view: str, confidence: int, reason: str, invalid_if: str) -> dict:
+    """에이전트 도구: 종합 의견을 판단 기록에 남긴다 (20거래일 뒤 SPY 대비로 채점). 사용자 확인 없이 적는다 — 적기만 하고 아무것도 바꾸지 않는다."""
+    symbol = symbol.strip().upper()
+    if view not in judgments.VIEW_DIR:
+        return {"error": "view 는 strong / neutral / weak 중 하나"}
+    if macro.is_macro(symbol):
+        return {"error": "지수·금리 같은 지표는 기록하지 않아요"}
+    info, candles, _ = load_stock(symbol)
+    rec = judgments.asked_record(symbol, info.get("name", symbol), get_settings().openai_agent_model, view, confidence, reason, invalid_if,
+                                 candles, load_stock(judgments.BENCH)[1], mine=symbol in store.watchlist())
+    with _asked_lock:
+        first = not any(r["symbol"] == symbol and r["as_of"] == rec["as_of"] for r in read_asked())
+        ASKED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with ASKED_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return {"view_record": {"symbol": symbol, "view": view, "as_of": rec["as_of"], "price": rec["price"], "counted": first},
+            "note": ("판단 기록에 남겼어요. " if first else "오늘 이 종목은 이미 남긴 의견이 있어서, 채점은 처음 것으로 해요. ")
+                    + f"{rec['as_of']} 종가 {rec['price']} 기준으로 20거래일 뒤 S&P 500 대비로 채점돼요."}
 
 
 def judge_symbols() -> list[tuple[str, bool]]:
@@ -1181,6 +1211,12 @@ def judgments_summary(symbol: str | None = None):
         "paired": judgments.summarize(judgments.paired(scored), fixed_only=True),      # 모델끼리 비교는 둘 다 판단한 기록만
         "mine": judgments.summarize([r for r in scored if r.get("mine")], fixed_only=False),
     }
+    # 내가 물어본 판단 (질문 에이전트의 종합 의견). 종목·기준일마다 처음 것만 채점
+    asked = judgments.first_per_day(read_asked())
+    asked_scored = cached(f"asked-scored:{len(asked)}", JUDGE_SCORE_TTL,
+                          lambda: judgments.score(asked, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: load_stock(s)[1])))
+    out["asked"] = judgments.summarize(asked_scored, fixed_only=False, arms=(judgments.ASKED_ARM,))
+    out["asked_records"] = asked_scored[-20:]
     if symbol:
         s = symbol.strip().upper()
         out["symbol_records"] = [r for r in scored if r["symbol"] == s][-12:]

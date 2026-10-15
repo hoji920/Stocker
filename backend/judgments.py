@@ -299,18 +299,46 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
     return out
 
 
+# ── 내가 물어본 판단: 질문 에이전트가 매수/매도 질문에 낸 종합 의견 ──
+# 위의 주 1회 기록(미리 정한 종목·방식)과 섞지 않는다. 같은 채점(SPY 대비 5·20거래일 초과수익)만 같이 쓴다.
+# 같은 종목·같은 기준일에 여러 번 물었으면 처음 것만 채점한다 (답이 마음에 들 때까지 다시 묻는 걸 막는다).
+ASKED_ARM = "asked"
+VIEW_DIR = {"strong": "outperform", "neutral": "neutral", "weak": "underperform"}
+
+
+def asked_record(symbol: str, name: str, model: str, view: str, confidence: int, reason: str, invalid_if: str,
+                 candles: list[dict], bench: list[dict], now: datetime | None = None, mine: bool = False) -> dict:
+    """끝난 미국 정규장 종가를 기준 가격으로 (판단 기록과 같은 기준). 의견은 20거래일을 보고 낸 것이라 5일도 같은 방향으로 채점."""
+    candles, bench = completed(candles, now), completed(bench, now)
+    d = VIEW_DIR[view]
+    c = int(max(0, min(100, confidence)))
+    return {"week": week_key(now), "symbol": symbol, "name": name, "mine": mine, "fixed": False, "arm": ASKED_ARM, "model": model,
+            "as_of": candles[-1]["time"], "price": candles[-1]["close"], "bench_as_of": bench[-1]["time"], "bench_price": bench[-1]["close"],
+            "d5": d, "d20": d, "c5": c, "c20": c, "view": view, "reason": reason[:400], "invalid_if": invalid_if[:300],
+            "asked_at": (now or datetime.now(KST)).astimezone(KST).isoformat(timespec="seconds")}
+
+
+def first_per_day(records: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for r in records:
+        if (r["symbol"], r["as_of"]) not in seen:
+            seen.add((r["symbol"], r["as_of"]))
+            out.append(r)
+    return out
+
+
 def in_set(records: list[dict], symbols: list[str]) -> list[dict]:
     """그 종목군의 기록만. 기록에 적힌 표시가 아니라 이 파일의 목록으로 가른다 (W42 기록에는 ndx 표시가 없다)."""
     keep = set(symbols)
     return [r for r in records if r["symbol"] in keep]
 
 
-def summarize(scored: list[dict], fixed_only: bool = True) -> list[dict]:
+def summarize(scored: list[dict], fixed_only: bool = True, arms: tuple = ARMS) -> list[dict]:
     """(모델, 조건, 기간)별 성적. always_up = 같은 기록에 전부 outperform 이라고 찍었을 때."""
     rows = []
     recs = in_set(scored, UNIVERSE) if fixed_only else scored
     for model in sorted({r["model"] for r in recs}):
-        for arm in ARMS:
+        for arm in arms:
             g = [r for r in recs if r["model"] == model and r["arm"] == arm]
             if not g:
                 continue
