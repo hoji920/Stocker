@@ -137,7 +137,7 @@ function autoItems() {
     (d.trend_candidates?.[kind] || []).forEach((tl) => items.push({
       id: tl.id, group: "trend", layer: "trend", kind, rank: tl.rank, name: tl.label, why: tl.why,
       now: tl.price, points: tl.points, touch_points: tl.touch_points, defaultVisible: tl.rank === 1,
-      tentative: tl.tentative,
+      tentative: tl.tentative, log: tl.log,
     }));
   }
   // 최근에 깨진 추세선: 말없이 사라지지 않게 흐리게 남긴다 (알림·신호·내 규칙에는 안 쓰인다)
@@ -258,16 +258,66 @@ function snapToBar(idx, price, x, y) {
   return best || { idx, price };
 }
 
+// ── 비스듬한 선을 마지막 봉 뒤로 늘리기 ──
+// 선이 현재 봉에서 딱 끊기면 '앞으로 어디쯤 지나가는지'가 안 보인다 → EXTEND 봉만큼 같은 기울기로 늘려 흐린 점선으로 그린다.
+// 시간축은 데이터가 있는 시각에만 칸을 만들어서, 늘린 구간의 봉 시각을 하나하나 만들어 넣어야 기울기가 맞게 그려진다
+const EXTEND = 20;
+function futureTimes(n) {
+  const d = state.data, last = d.candles.at(-1).time, out = [];
+  if (d.intraday) {
+    const step = MINUTES[d.interval] * 60;
+    for (let k = 1; k <= n; k++) out.push(last + step * k);
+    return out;
+  }
+  const dt = new Date(`${last}T00:00:00Z`);
+  while (out.length < n) {
+    if (d.interval === "1w") dt.setUTCDate(dt.getUTCDate() + 7);
+    else if (d.interval === "1M") { dt.setUTCDate(1); dt.setUTCMonth(dt.getUTCMonth() + 1); }
+    else if (d.interval === "1y") { dt.setUTCMonth(0, 1); dt.setUTCFullYear(dt.getUTCFullYear() + 1); }
+    else {                                                    // 일봉: 주말은 건너뛴다 (휴장일까지는 모른다)
+      dt.setUTCDate(dt.getUTCDate() + 1);
+      if (dt.getUTCDay() === 0 || dt.getUTCDay() === 6) continue;
+    }
+    out.push(dt.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+// points = [시작점, …, 끝점] (끝점 = 선을 계산한 마지막 봉). 끝점에서 마지막 봉까지 + 그 뒤 EXTEND 봉. 로그 선은 같은 비율로
+function extension(points, log = false) {
+  if (!state.data || !points || points.length < 2) return null;
+  const times = state.data.candles.map((c) => c.time);
+  const first = points[0], end = points.at(-1);
+  const a = times.indexOf(first.time), e = times.indexOf(end.time), last = times.length - 1;
+  if (a < 0 || e <= a || (log && (first.value <= 0 || end.value <= 0))) return null;
+  const f = log ? Math.log : (v) => v, g = log ? Math.exp : (v) => v;
+  const step = (f(end.value) - f(first.value)) / (e - a);
+  const at = (i) => g(f(end.value) + step * (i - e));
+  const out = [{ time: end.time, value: end.value }];
+  for (let i = e + 1; i <= last; i++) out.push({ time: times[i], value: at(i) });
+  futureTimes(EXTEND).forEach((t, k) => out.push({ time: t, value: at(last + 1 + k) }));
+  return out.filter((p) => p.value > 0).length > 1 ? out.filter((p) => p.value > 0) : null;
+}
+
 function renderTrendlines() {
   state.trendSeries.forEach((s) => chart.removeSeries(s));
   state.trendSeries = [];
   if (!state.data) return;
   // quiet: 가격축 자동 범위에 영향을 주지 않는 선 (층 선이 차트를 위아래로 벌려 놓지 않게)
-  const line = (points, color, { width = 2, style = LW.LineStyle.Solid, title = "", quiet = false } = {}) => {
+  // extend: 마지막 봉 뒤로 늘린 부분을 같은 색의 흐린 점선으로 (가격축 범위는 안 건드린다)
+  const line = (points, color, { width = 2, style = LW.LineStyle.Solid, title = "", quiet = false, extend = false, log = false } = {}) => {
     const s = chart.addLineSeries({ color, lineWidth: width, lineStyle: style, priceLineVisible: false,
       lastValueVisible: !!title, title, crosshairMarkerVisible: false, ...(quiet ? { autoscaleInfoProvider: () => null } : {}) });
     s.setData(points);
     state.trendSeries.push(s);
+    const more = extend && extension(points, log);
+    if (more) {
+      const x = chart.addLineSeries({ color: color.length === 7 ? color + "80" : color, lineWidth: Math.max(1, width - 1),
+        lineStyle: LW.LineStyle.Dotted, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+        autoscaleInfoProvider: () => null });
+      x.setData(more);
+      state.trendSeries.push(x);
+    }
     return s;
   };
   const items = autoItems();
@@ -281,7 +331,7 @@ function renderTrendlines() {
     }
     line(it.points, faded(trendColor(it.kind), focused || it.rank === 1), {
       width: focused ? 3 : it.rank === 1 ? 2 : 1, style: focused ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed,
-      title: focused ? it.name : "",
+      title: focused ? it.name : "", extend: true, log: it.log,
     });
     shownTrendIds.add(it.id);
   }
@@ -291,9 +341,10 @@ function renderTrendlines() {
     const baseShown = shownTrendIds.has(`auto-${ch.base_kind}`);
     const color = baseShown ? trendColor(ch.base_kind) : CHANNEL_COLOR;
     // 기준 추세선이 이미 그려져 있으면 평행선만 같은 색 점선으로 → 어느 선의 짝인지 한눈에
-    if (!baseShown) line(ch.base, color, { width: focused ? 3 : 2 });
+    if (!baseShown) line(ch.base, color, { width: focused ? 3 : 2, extend: true, log: ch.log });
     // 반대편 선이 현재가에서 너무 멀면(넓은 채널) 차트가 위아래로 눌린다 → 채널을 골랐을 때만 그린다
-    if (!ch.other_far || focused) line(ch.other, color, { width: focused ? 3 : 2, style: LW.LineStyle.Dotted, title: focused ? "평행선" : "" });
+    if (!ch.other_far || focused) line(ch.other, color, { width: focused ? 3 : 2, style: LW.LineStyle.Dotted, title: focused ? "평행선" : "",
+      extend: true, log: ch.log });
   }
   // 차트 패턴 (노랑: 지표·지지저항 색과 안 겹침). 고른 패턴만 굵게, 아무것도 안 골랐으면 전부 보통
   if (on("patterns") && isDaily()) {
@@ -323,13 +374,13 @@ function renderTrendlines() {
   if (!isDaily()) return renderLegend();                           // 비스듬한 선은 날짜로 저장돼서 일봉에서만
   const accent = css("--accent");
   const drawChannel = (d, strong) => {
-    drawingLines(d).forEach((ln) => line(ln.points, accent + (strong ? "" : "b3"), { style: strong ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed }));
+    drawingLines(d).forEach((ln) => line(ln.points, accent + (strong ? "" : "b3"), { style: strong ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed, extend: strong }));
     for (const ln of channelLayers(d)?.lines || []) line(ln.points, accent + (ln.quarter ? "40" : strong ? "a6" : "66"), {
       width: 1, style: ln.quarter ? LW.LineStyle.Dotted : LW.LineStyle.Solid, quiet: true });
   };
   if (on("drawings")) for (const d of state.drawings.filter((w) => w.type !== "horizontal")) {
     if (d.type === "channel") drawChannel(d, true);
-    else drawingLines(d).forEach((ln) => line(ln.points, accent));
+    else drawingLines(d).forEach((ln) => line(ln.points, accent, { extend: true }));
   }
   // 채널 긋는 중: 추천 채널 미리보기 + 찍을 자리 ①②③
   const sg = state.drawMode === "channel" && state.hint;
@@ -1543,7 +1594,7 @@ async function loadChart(symbol) {
   ["#draw-trend", "#draw-hline", "#draw-channel"].forEach((id) => ($(id).disabled = !isDaily()));
   // autoSize 가 첫 레이아웃 후에 폭을 잡기 때문에 한 프레임 뒤에 범위를 지정해야 안 찌그러진다
   requestAnimationFrame(() => setTimeout(() =>
-    chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 3 }), 50));
+    chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 12 }), 50));   // 오른쪽에 늘린 선이 조금 보이게
   if (d.interval !== "1y" && !d.demo) loadOlder(d);           // 년봉은 처음부터 상장 이후 전부
 }
 
