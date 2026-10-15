@@ -1072,7 +1072,7 @@ $("#why-btn").addEventListener("click", async () => {
 });
 
 // ── 오른쪽 아이콘 탭 (내 투자 / 관심 / 최근 본 / 알림) ──
-const SIDE_TITLES = { holdings: "내 투자", watch: "관심종목", recent: "최근 본 종목", market: "시장 한눈에", alerts: "알림", ask: "질문" };
+const SIDE_TITLES = { holdings: "내 투자", watch: "관심종목", recent: "최근 본 종목", market: "시장 한눈에", calendar: "증권 달력", alerts: "알림", ask: "질문" };
 function setTab(tab) {
   state.tab = tab;
   store.save("stocking.tab", tab);
@@ -1085,6 +1085,7 @@ function setTab(tab) {
   if (tab === "recent") renderRecent();
   if (tab === "market") loadMarket();
   else updateLiveSubscription();
+  if (tab === "calendar") loadCalendar();
   setCollapsed(false);
 }
 document.querySelectorAll(".rail-btn[data-tab]").forEach((b) => b.addEventListener("click", () => {
@@ -1093,6 +1094,37 @@ document.querySelectorAll(".rail-btn[data-tab]").forEach((b) => b.addEventListen
   setTab(b.dataset.tab);
 }));
 const isPhone = () => matchMedia("(max-width: 700px)").matches;
+
+// 오른쪽 패널 넓이: 왼쪽 끝을 끌어서 바꾸고 브라우저에 기억 (모든 탭 공통). 두 번 누르면 기본 340px
+const SIDE_W = { min: 260, def: 340 };
+const sideMax = () => Math.max(SIDE_W.min, Math.min(1000, window.innerWidth - 420));     // 차트 칸은 최소 350px 남긴다
+function setSideWidth(w, save = true) {
+  const px = Math.round(Math.max(SIDE_W.min, Math.min(sideMax(), w)));
+  document.documentElement.style.setProperty("--side-w", `${px}px`);
+  if (save) store.save("stocking.sideWidth", px);
+}
+setSideWidth(store.load("stocking.sideWidth", SIDE_W.def), false);
+$("#side-resize").addEventListener("pointerdown", (e) => {
+  if (isPhone()) return;
+  e.preventDefault();
+  const handle = e.currentTarget, railW = $("#rail").getBoundingClientRect().width;
+  handle.setPointerCapture(e.pointerId);
+  handle.classList.add("on");
+  document.body.classList.add("resizing");
+  const move = (ev) => setSideWidth(window.innerWidth - railW - ev.clientX, false);
+  const up = (ev) => {
+    setSideWidth(window.innerWidth - railW - ev.clientX);
+    handle.classList.remove("on");
+    document.body.classList.remove("resizing");
+    handle.removeEventListener("pointermove", move);
+    handle.removeEventListener("pointerup", up);
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", up);
+});
+$("#side-resize").addEventListener("dblclick", () => setSideWidth(SIDE_W.def));
+window.addEventListener("resize", () => setSideWidth(store.load("stocking.sideWidth", SIDE_W.def), false));   // 창이 커지면 원래 고른 넓이로
+
 function setCollapsed(c) {
   $("#app").classList.toggle("collapsed", c);
   $("#rail-collapse").textContent = c ? "«" : "»";
@@ -1527,6 +1559,65 @@ function renderPrice(price) {
     void box.offsetWidth;
     box.classList.add(price > prev ? "flash-up" : "flash-down");
   }
+}
+
+// ── 증권 달력 (오른쪽 '달력' 탭): 미국 경제지표 발표 + 실적 발표 ──
+// 거르기: 지표는 '중요한 것만(CPI·고용·FOMC …)' / '전체', 실적은 '내 종목만' / '주요 종목 포함'. 고른 건 브라우저에 기억
+const calFilter = { econ: store.load("stocking.cal.econ", "major"), earn: store.load("stocking.cal.earn", "all") };
+let calLoaded = 0;
+
+async function loadCalendar(force = false) {
+  const box = $("#cal-list");
+  if (!force && state.calendar && Date.now() - calLoaded < 30 * 60000) return renderCalendar();
+  if (!state.calendar) box.replaceChildren(el("p", { class: "muted" }, "달력 불러오는 중… (처음엔 10초쯤)"));
+  const res = await fetch("/api/calendar").catch(() => null);
+  if (!res?.ok) return box.replaceChildren(el("p", { class: "muted" }, "달력을 불러오지 못했어요"));
+  state.calendar = await res.json();
+  calLoaded = Date.now();
+  renderCalendar();
+}
+
+function renderCalendar() {
+  const c = state.calendar;
+  if (!c) return;
+  const chip = (group, value, label) => {
+    const b = el("button", { class: calFilter[group] === value ? "on" : "" }, label);
+    b.addEventListener("click", () => { calFilter[group] = value; store.save(`stocking.cal.${group}`, value); renderCalendar(); });
+    return b;
+  };
+  $("#cal-filters").replaceChildren(chip("econ", "major", "중요 지표만"), chip("econ", "all", "지표 전체"),
+    chip("earn", "all", "실적: 주요 종목 포함"), chip("earn", "mine", "실적: 내 종목만"));
+  const value = (v) => [v.actual ? `발표 ${v.actual}` : "", v.consensus ? `예상 ${v.consensus}` : "", v.previous ? `이전 ${v.previous}` : ""]
+    .filter(Boolean).join(" · ");
+  const rows = [];
+  for (const d of c.days) {
+    const econ = d.econ.filter((e) => calFilter.econ === "all" || e.level === 2);
+    const earn = d.earnings.filter((e) => calFilter.earn === "all" || e.mine);
+    const today = d.date === c.today, past = d.date < c.today;
+    if (!econ.length && !earn.length && !today) continue;
+    const items = [
+      ...econ.map((e) => el("li", { class: `cal-ev${e.level === 2 ? " major" : ""}` },
+        el("span", { class: "cal-time" }, e.time_kst ? e.time_kst.slice(6) : "–"),
+        el("div", {}, el("b", {}, e.name),
+          e.time_kst && e.time_kst.slice(0, 5) !== d.date.slice(5) ? el("span", { class: "muted" }, ` (한국 ${e.time_kst.slice(0, 5).replace("-", "/")})`) : "",
+          ...e.values.map((v) => el("div", { class: "cal-val" }, value(v))).filter((x) => x.textContent)))),
+      ...earn.map((e) => {
+        const li = el("li", { class: `cal-earn${e.mine ? " mine" : ""}`, title: "누르면 차트로" },
+          el("span", { class: "cal-time" }, e.when || "실적"),
+          el("div", {}, el("b", {}, e.symbol), e.mine ? el("span", { class: "rk" }, "내 종목") : "",
+            el("span", { class: "muted" }, ` ${e.quarter} 실적`),
+            e.eps_estimate != null ? el("div", { class: "cal-val" },
+              `EPS 예상 ${e.eps_estimate.toFixed(2)}${e.eps_actual != null ? ` · 발표 ${e.eps_actual.toFixed(2)}` : ""}`) : ""));
+        li.addEventListener("click", () => load(e.symbol));
+        return li;
+      }),
+    ];
+    rows.push(el("section", { class: `cal-day${today ? " today" : ""}${past ? " past" : ""}` },
+      el("div", { class: "cal-date" }, `${d.date.slice(5).replace("-", "/")} (${d.weekday})${today ? " · 오늘" : ""}`, el("span", { class: "muted" }, " 미국 날짜")),
+      items.length ? el("ul", {}, ...items) : el("p", { class: "muted hint" }, "고른 조건의 일정이 없어요")));
+  }
+  const errs = c.errors?.length ? el("p", { class: "muted hint" }, `일부를 못 받았어요: ${c.errors.join(", ")}`) : "";
+  $("#cal-list").replaceChildren(...rows, errs);
 }
 
 // ── 달러·원 변환 (시장 탭 맨 위 + 미국 종목 가격 옆 원화) ──

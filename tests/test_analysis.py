@@ -129,6 +129,17 @@ def test_channel_marks_other_side_far_from_price():
     assert ch["other_kind"] == "resistance" and ch["other_far"] is True and ch["other_distance_pct"] > 25
 
 
+def test_thin_session_spike_wick_is_ignored_for_lines_but_kept_in_extremes():
+    rows = _uptrend()
+    i = 150
+    rows[i] = {**rows[i], "low": rows[i]["low"] - 40}                 # 한 봉만 꼬리가 40 아래로 튐 (평소 봉 길이 ≈ 1.5)
+    out = analyze(rows, lambda p: f"${p:.2f}")
+    assert out["spikes"] == 1
+    assert all(lv["price"] > rows[i]["low"] + 30 for lv in out["levels"]["support"])        # 꼬리 끝을 지지선으로 안 잡는다
+    assert out["extremes"]["low"]["price"] == min(r["low"] for r in rows[-252:])           # 52주 최저는 실제 체결 그대로
+    assert analyze(_uptrend(), lambda p: f"${p:.2f}")["spikes"] == 0                       # 보통 봉은 건드리지 않는다
+
+
 def test_alert_lines_include_channel_other_side():
     out = alert_lines(_uptrend(), [])
     assert any(lv.get("id") == "auto-channel" for lv in out["support"] + out["resistance"])

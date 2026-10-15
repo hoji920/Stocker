@@ -119,6 +119,7 @@
       </section>
     </main>
 
+    <div id="side-resize" title="끌어서 넓이 바꾸기 · 두 번 누르면 기본 넓이"></div>
     <aside id="side">
       <div class="side-head">
         <h3 id="side-title">내 투자</h3>
@@ -162,6 +163,12 @@
         <div id="market-list"></div>
       </div>
 
+      <div data-panel="calendar" hidden>
+        <div id="cal-filters" class="mk-tabs"></div>
+        <p class="muted hint">미국 경제지표는 나스닥 일정, 실적은 Finnhub 기준이에요. 시각은 한국 시간. 실적일은 회사 발표 전까지 바뀔 수 있어요.</p>
+        <div id="cal-list"></div>
+      </div>
+
       <div data-panel="alerts" hidden>
         <p id="alert-status" class="muted hint"></p>
         <div class="alert-actions">
@@ -192,6 +199,7 @@
       <button class="rail-btn" data-tab="watch"><span class="ic">♥</span>관심<span id="watch-count" class="badge-n"></span></button>
       <button class="rail-btn" data-tab="recent"><span class="ic">🕘</span>최근 본</button>
       <button class="rail-btn" data-tab="market"><span class="ic">🌐</span>시장</button>
+      <button class="rail-btn" data-tab="calendar"><span class="ic">📅</span>달력</button>
       <button class="rail-btn" data-tab="alerts"><span class="ic">🔔</span>알림<span id="alert-badge" class="badge" hidden></span></button>
       <button class="rail-btn" data-tab="ask"><span class="ic">💬</span>질문</button>
     </nav>

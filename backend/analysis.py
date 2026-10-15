@@ -42,8 +42,28 @@ def _once(df: pd.DataFrame, key, compute):
     return _memo.values[key]
 
 
-def to_frame(candles: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame(candles)
+def to_frame(candles: list[dict], despike: bool = False) -> pd.DataFrame:
+    df = pd.DataFrame(candles)
+    return _despike(df) if despike and len(df) >= 20 else df
+
+
+# 선을 그을 때 튀는 꼬리 무시하기. 토스 봉은 장통합(프리·애프터·주간거래 포함)이라, 거래가 얇은 시간(프리마켓 시작, 애프터 끝)에
+# 한두 건 튄 체결이 몸통보다 훨씬 긴 꼬리로 찍힌다 (AAPL 5분봉: 몸통 $342.75 인데 꼬리 $331.58). 그 꼬리 끝을 지지선으로 잡으면 안 된다.
+# 꼬리가 '최근 봉 길이(고가−저가)의 중앙값'의 SPIKE_K 배를 넘으면 몸통에서 중앙값 하나만큼까지만 남긴다. 차트에 그리는 봉은 그대로.
+DESPIKE = True
+SPIKE_K = 3.0
+
+
+def _despike(df: pd.DataFrame, window: int = 100) -> pd.DataFrame:
+    o, h, l, c = (df[k].to_numpy(dtype=float) for k in _OHLC)
+    med = pd.Series(h - l).rolling(window, min_periods=20).median().bfill().to_numpy()   # 지난 봉들만 본다 (뒤 봉을 미리 보지 않음)
+    body_lo, body_hi = np.minimum(o, c), np.maximum(o, c)
+    low = np.where(body_lo - l > SPIKE_K * med, body_lo - med, l)
+    high = np.where(h - body_hi > SPIKE_K * med, body_hi + med, h)
+    out = df.copy()
+    out["low"], out["high"] = np.minimum(low, body_lo), np.maximum(high, body_hi)
+    out.attrs["spikes"] = int((low != l).sum() + (high != h).sum())
+    return out
 
 
 def _t(df: pd.DataFrame, i: int):
@@ -667,7 +687,7 @@ def build_insights(df: pd.DataFrame, levels: dict, fmt, trendlines: list[dict] |
 def lines_only(candles: list[dict]) -> dict:
     """analyze 와 같은 선(수평 지지/저항, 방향별 1등 추세선, 채널)과 ATR 만. 설명 문장·후보 목록은 만들지 않는다.
     내 규칙의 과거 대조처럼 봉마다 수천 번 부르는 곳에서 쓴다 (선은 analyze 와 똑같다)."""
-    df = to_frame(candles)
+    df = to_frame(candles, despike=DESPIKE)
     levels = find_levels(df)
     trendlines = find_trendlines(df)
     return {"levels": levels, "trendlines": trendlines, "channel": find_channel(df, trendlines),
@@ -675,8 +695,10 @@ def lines_only(candles: list[dict]) -> dict:
 
 
 def analyze(candles: list[dict], fmt, unit: str = "일") -> dict:
-    """보조지표 선은 프론트(indicators.js)에서 사용자가 고른 기간으로 계산한다."""
-    df = to_frame(candles)
+    """보조지표 선은 프론트(indicators.js)에서 사용자가 고른 기간으로 계산한다.
+    선은 튀는 꼬리를 자른 봉으로 긋는다 (_despike). 52주 최고·최저(extremes)는 실제 체결 그대로."""
+    raw = to_frame(candles)
+    df = _despike(raw) if DESPIKE and len(raw) >= 20 else raw
     levels = find_levels(df)
     candidates = trendline_candidates(df)
     trendlines = candidates["support"][:1] + candidates["resistance"][:1]
@@ -696,14 +718,15 @@ def analyze(candles: list[dict], fmt, unit: str = "일") -> dict:
         "broken_trendlines": broken,        # 최근에 깨진 선 (보여주기만 — 알림·신호·내 규칙은 안 쓴다)
         "channel": channel,
         "atr": float(np.nan_to_num(atr(df).iloc[-1])),       # 마지막 봉의 ATR (내 규칙 대조가 다시 계산하지 않게)
-        "extremes": extremes(df, unit),
+        "extremes": extremes(raw, unit),
         "insights": insights,
+        "spikes": int(df.attrs.get("spikes", 0)),      # 선을 그을 때 무시한 튀는 꼬리 수
     }
 
 
 def alert_lines(candles: list[dict], drawings: list[dict]) -> dict:
     """알림 감시용: 수평 지지/저항 + 자동 추세선 + 내가 그은 선의 '오늘 값'을 한 목록으로."""
-    df = to_frame(candles)
+    df = to_frame(candles, despike=DESPIKE)
     last = float(df["close"].iloc[-1])
     out = find_levels(df)
     trendlines = find_trendlines(df)

@@ -12,7 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import (agent, analysis, bars, company, demo, judgments, macro, market_brief, movers, news, patterns, reading, rules, search,
+from backend import (agent, analysis, bars, company, demo, judgments, market_calendar, macro, market_brief, movers, news, patterns, reading, rules, search,
                      signals, underlying)
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
@@ -387,7 +387,7 @@ def chart(symbol: str, interval: str = "1d"):
                     if interval == "1d" else [],
         "pattern_evidence": cached("pat-evidence", 3600, patterns.evidence),
         # '채널 긋기'에서 찍을 점 추천 (비스듬히 그은 선은 일봉 전용)
-        "channel_suggestions": analysis.channel_suggestions(analysis.to_frame(daily)) if interval == "1d" else [],
+        "channel_suggestions": analysis.channel_suggestions(analysis.to_frame(daily, despike=analysis.DESPIKE)) if interval == "1d" else [],
     }
 
 
@@ -692,7 +692,7 @@ def watchlist_summary():
             continue
         last = prices.get(s, candles[-1]["close"])
         prev = prev_close_of(s, candles)
-        lv = analysis.find_levels(analysis.to_frame(candles))
+        lv = analysis.find_levels(analysis.to_frame(candles, despike=analysis.DESPIKE))
         near = lambda xs: round((xs[0]["price"] / last - 1) * 100, 2) if xs else None
         items.append({
             "symbol": s, "name": info.get("name", s), "currency": currency_of(info, s),
@@ -831,6 +831,47 @@ def _chart_summary(symbol: str) -> dict:
         "patterns": [{"name": p["name"], "status": p["status"], "why": p["why"]} for p in d.get("patterns", [])],
         "recent_signals": [{"date": e["time"], "name": e["name"], "dir": e["dir"]} for e in (d.get("signals") or {}).get("events", [])[-5:]],
     }
+
+
+def price_check(symbol: str, price: float) -> dict:
+    """에이전트 도구: 사용자가 말한 특정 가격(예: '51불에 팔까')을 차트에서 본다.
+    그 가격 근처(허용폭 = max(ATR 절반, 가격의 1%))에서 방향이 바뀐 날(고점·저점), 그 뒤 10봉 동안 얼마나 밀렸나(올랐나),
+    최근 1년 종가가 그 가격 위에서 끝난 날 수, 근처의 자동 지지/저항선, 보유 중이면 그 가격에 팔 때 평단 대비 수익."""
+    symbol = symbol.strip().upper()
+    info, daily, _ = load_stock(symbol)
+    df = analysis.to_frame(daily, despike=analysis.DESPIKE)
+    close, high, low = df["close"].to_numpy(), df["high"].to_numpy(), df["low"].to_numpy()
+    times = df["time"].tolist()
+    last, atr = float(close[-1]), float(analysis.atr(df).iloc[-1])
+    tol = max(0.5 * atr, 0.01 * price)
+    fmt = price_formatter(currency_of(info, symbol))
+    turns = []
+    for i, p, kind in analysis.swing_points(df):
+        if abs(p - price) > tol:
+            continue
+        after = close[i + 1: i + 11]
+        move = ((after.min() if kind == "high" else after.max()) / p - 1) * 100 if len(after) else None
+        turns.append({"date": times[i], "kind": "고점 (여기서 밀림)" if kind == "high" else "저점 (여기서 반등)", "price": fmt(p),
+                      "next_10_bars_pct": round(move, 1) if move is not None else None})
+    yr = slice(max(0, len(close) - 252), len(close))
+    recent = slice(max(0, len(close) - 60), len(close))         # 1년은 길다: 레버리지 ETF 는 1년 전 가격이 지금의 몇 배라 '위에서 마감한 날'이 부풀었다
+    above = [times[i] for i in range(recent.start, recent.stop) if close[i] > price]
+    near = [{"kind": "저항선" if k == "resistance" else "지지선", "price": fmt(l["price"]), "touches": l["touches"], "why": l["why"]}
+            for k in ("resistance", "support") for l in analysis.find_levels(df)[k] if abs(l["price"] - price) <= 2 * tol]
+    held = holding_of(symbol)
+    out = {
+        "symbol": symbol, "asked_price": fmt(price), "price_now": fmt(last), "from_now_pct": round((price / last - 1) * 100, 1),
+        "atr": fmt(atr), "from_now_atr": round((price - last) / atr, 1), "tolerance": fmt(tol),
+        "turns_near_price": turns[-6:], "turn_count": len(turns),
+        "highest_high_last_year": fmt(float(high[yr].max())), "lowest_low_last_year": fmt(float(low[yr].min())),
+        "closes_above_price_last_60_bars": len(above), "last_close_above_price": above[-1] if above else None,
+        "auto_lines_near_price": near,
+    }
+    if held:
+        avg = held["avg_price"]
+        out["holding"] = {"quantity": held["quantity"], "avg_price": fmt(avg),
+                          "pl_at_asked_price_pct": round((price / avg - 1) * 100, 1), "pl_now_pct": round((last / avg - 1) * 100, 1)}
+    return out
 
 
 def _news_for_agent(symbol: str) -> dict:
@@ -992,6 +1033,7 @@ AGENT_TOOLS = {
     "find_symbol": lambda query: search_stocks(query, 5)["items"],
     "propose_action": propose_action,
     "fundamentals": lambda symbol: company.fundamentals(symbol.strip().upper()),
+    "price_check": price_check,
     "record_view": lambda **kw: record_view(**kw),
 }
 
@@ -1234,6 +1276,20 @@ def company_info(symbol: str):
         return {"company": company.profile(get_settings(), symbol, info)}
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"회사 정보를 못 받았어요 ({type(error).__name__})")
+
+
+@app.get("/api/calendar")
+def market_calendar_api(days: int = 28, back: int = 3):
+    """증권 달력: 오늘 기준 back 일 전부터 days 일 동안의 미국 경제지표 발표와 실적 발표 (내 관심·보유 + 주요 대형주)."""
+    days, back = max(7, min(int(days), 42)), max(0, min(int(back), 14))
+    try:
+        held = [h["symbol"] for h in holdings().get("items", [])]
+    except Exception:
+        held = []
+    mine = list(dict.fromkeys(store.watchlist() + held))
+    start = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=back)
+    key = f"calendar:{start}:{days}:{','.join(sorted(mine))}"
+    return cached(key, 1800, lambda: market_calendar.build(start, days + back, get_settings().finnhub_api_key, mine))
 
 
 @app.get("/api/fx")

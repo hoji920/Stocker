@@ -53,6 +53,16 @@ _SYSTEM = (
     "   의견을 정했으면 답을 쓰기 전에 record_view 를 같은 내용으로 꼭 부른다 (view: strong/neutral/weak). 근거가 엇갈리면 neutral 이 맞다. "
     "답의 이유와 '틀렸다고 볼 조건'은 record_view 에 적은 문장과 같은 뜻이어야 한다. "
     "답 끝에 '판단 기록에 남겼어요 (20거래일 뒤 채점)'와 '이 의견은 아직 채점 전이라 맞는지 몰라요'를 한 줄로 붙인다.\n"
+    "   ● 질문에 특정 가격이 있으면('51불에 팔까', '45에 사도 돼?') price_check 도 같이 부르고, 답의 맨 앞에 **그 가격 ($51)** 섹션을 둔다: "
+    "현재가에서 몇 %, 그 가격 근처에서 방향이 바뀐 날짜와 횟수(turns_near_price)와 그 뒤 얼마나 밀렸는지/올랐는지, "
+    "최근 60봉 동안 그 가격 위에서 마감한 날 수와 마지막 날, 근처 자동 선, 보유 중이면 그 가격에 팔 때 평단 대비 수익률. 사용자가 짚은 근거(예: '두 번 저항')가 "
+    "자료와 맞는지 짚는다. 그다음에 나머지 종합 검토를 짧게.\n"
+    "   ● 보유 중인 종목이면(check_my_rules 의 holding) 평단·수량·지금 수익률을 꼭 말한다.\n"
+    "   ● 손익비(rr)는 '지금 살 때'의 숫자다. 매도·보유를 묻는 질문에서는 손익비를 아예 꺼내지 않는다 (근거에도, 내 규칙 줄에도).\n"
+    "   ● 종합 의견은 근거와 같은 방향이어야 한다: 올라갈 근거가 더 무거우면 강함, 내려갈 근거가 더 무거우면 약함, 비슷하면 중립. "
+    "이유 문장이 반대 방향 근거만 말하면 안 된다. 근거의 출처 괄호는 그 사실이 실제로 나온 곳만 쓴다.\n"
+    "   ● 인버스(-1배·-3배) ETF 는 기초 지수가 내려갈 때 오른다. 근거를 쓸 때 '기초 지수(예: 반도체)가 내리면 이 ETF 는 오른다'를 한 번 밝히고, "
+    "레버리지 ETF 는 오래 들고 있으면 매일 다시 맞추는 구조 때문에 손실이 쌓일 수 있다는 점을 짧게 덧붙인다.\n"
     "   '언제 팔까', '목표가', '손절'만 묻는 거면 종합 검토 없이 check_my_rules 로 매도 목표와 손절 기준, 보유 중이면 평단 대비 "
     "목표 도달 시·손절 시 수익률(target_from_avg_pct, stop_from_avg_pct)을 숫자로 전한다.\n"
     "3) '사세요/파세요' 같은 지시는 하지 않는다. 종합 의견은 '시장보다 강할 것 같다/약할 것 같다'는 상대적인 판단이지 매매 지시가 아니다. "
@@ -119,6 +129,9 @@ TOOLS = [
       "required": ["kind"]}),
     ("fundamentals", "펀더멘탈: 시가총액, PER·선행 PER·PEG·EV/EBITDA, 매출·이익 성장률(전년 대비), 마진, 부채·현금·잉여현금흐름, "
                      "애널리스트 수·의견·목표가(평균·최저·최고), 공매도 비율, 베타, 배당, 다음 실적 발표일. ETF 는 운용사·분류·보수·순자산.", _sym),
+    ("price_check", "사용자가 말한 특정 가격을 차트에서 본다: 현재가에서 몇 %·ATR 몇 배, 그 가격 근처에서 방향이 바뀐 날(고점·저점)과 "
+                    "그 뒤 10봉 동안 움직임, 최근 1년 그 가격 위에서 마감한 날 수, 근처 자동 지지/저항선, 보유 중이면 그 가격에 팔 때 평단 대비 수익.",
+     {"type": "object", "properties": {"symbol": {"type": "string"}, "price": {"type": "number"}}, "required": ["symbol", "price"]}),
     ("record_view", "종합 의견을 판단 기록에 남긴다 (20거래일 뒤 S&P 500 대비로 자동 채점). 종합 검토를 했으면 답하기 전에 꼭 부른다.",
      {"type": "object", "properties": {
          "symbol": {"type": "string"},
@@ -130,7 +143,8 @@ TOOLS = [
 ]
 LABELS = {"check_my_rules": "내 규칙 대조", "read_chart": "차트 읽기", "get_news": "뉴스", "why_moved": "움직인 이유",
           "market_brief": "시장 요약", "my_portfolio": "내 계좌", "find_symbol": "종목 찾기", "scan_my_rules": "전체 규칙 대조",
-          "backtest_my_rules": "과거 대조", "propose_action": "할 일 제안", "fundamentals": "펀더멘탈", "record_view": "판단 기록"}
+          "backtest_my_rules": "과거 대조", "propose_action": "할 일 제안", "fundamentals": "펀더멘탈", "record_view": "판단 기록",
+          "price_check": "그 가격 보기"}
 
 
 def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | None, rules_note: str = "", about: str = "") -> dict:
