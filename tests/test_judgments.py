@@ -76,8 +76,11 @@ def test_expensive_models_only_judge_the_fixed_subset():
 def test_repeats_only_for_the_subset_with_the_first_model_from_w43():
     models, sym = ("mini", "big"), j.PREMIUM[0]
     assert j.combos_for(sym, models, "2026-W42") == [("mini", "news"), ("mini", "nonews"), ("big", "news"), ("big", "nonews")]
-    assert j.combos_for(sym, models, "2026-W43")[4:] == [("mini", "news_r"), ("mini", "nonews_r")]
-    assert j.combos_for("AAPL", models, "2026-W43") == [("mini", "news"), ("mini", "nonews")]      # 나스닥만: 반복도 비싼 모델도 없음
+    # W43 부터: 조건 3개 (가격만 / + 펀더멘탈 / + 펀더멘탈 + 기사), 반복은 양 끝만
+    assert j.combos_for(sym, models, "2026-W43") == [("mini", "nonews"), ("mini", "fund"), ("mini", "fund_news"),
+                                                     ("big", "nonews"), ("big", "fund"), ("big", "fund_news"),
+                                                     ("mini", "nonews_r"), ("mini", "fund_news_r")]
+    assert j.combos_for("AAPL", models, "2026-W43") == [("mini", "nonews"), ("mini", "fund"), ("mini", "fund_news")]   # 나스닥만: 반복도 비싼 모델도 없음
 
 
 def test_repeat_gets_the_same_prompt_as_its_base_arm(monkeypatch):
@@ -198,3 +201,90 @@ def test_summarize_compares_with_always_up():
     assert news20["mean_signed_excess_pct"] == 20.0 and news20["always_up_hit_rate_pct"] == 50.0 and news20["always_up_mean_excess_pct"] == 0.0
     assert news20["calibration"] == [{"bucket": "60~69", "n": 1, "hit_rate_pct": 100.0}, {"bucket": "80~89", "n": 1, "hit_rate_pct": 100.0}]
     assert rows[("nonews", 20)]["hit_rate_pct"] == 0.0 and rows[("news", 5)]["neutral"] == 2
+
+
+def test_entry_is_the_30_minute_average_after_the_first_trade_after_judging():
+    t = 1_000_000                                                   # 판단한 시각 (유닉스 초)
+    mins = [{"time": t - 120, "close": 50.0}, {"time": t - 60, "close": 50.0}]           # 판단 전 체결은 안 쓴다
+    mins += [{"time": t + 3600 + 60 * k, "close": 100.0 + k} for k in range(40)]          # 한 시간 뒤 첫 체결부터
+    assert j.entry_from_minutes(mins, t, now_ts=t + 3600 + 60 * 29) is None                 # 30분이 아직 안 끝났다
+    e = j.entry_from_minutes(mins, t, now_ts=t + 3600 + 60 * 30)
+    assert e["t0"] == t + 3600 and e["bars"] == 30 and e["price"] == 114.5                   # 100 ~ 129 의 평균
+    assert j.entry_from_minutes(mins[:2], t, now_ts=t + 99_999) is None                      # 판단 뒤 체결이 없다
+
+
+def test_new_rule_applies_from_w43_and_to_every_asked_view():
+    assert not j.needs_entry(_rec(week="2026-W42")) and j.needs_entry(_rec(week="2026-W43"))
+    assert j.needs_entry({"week": "2026-W42", "arm": j.ASKED_ARM})
+    assert j.entry_key({"symbol": "A", "made_at": "x"}) == ("A", "x") and j.entry_key({"symbol": "A", "asked_at": "y"}) == ("A", "y")
+
+
+def test_score_waits_for_the_entry_and_then_starts_from_it_not_from_the_close():
+    # 기준일 d0010 종가 100, 주말 소식으로 다음 봉에 110 으로 갭 → 20봉 뒤 120. SPY 는 100 → 105
+    stock = _candles([100] * 10 + [110] + [110 + i * 0.5 for i in range(1, 21)] + [125] * 5)
+    bench = _candles([100] * 10 + [100 + i * 0.25 for i in range(1, 22)] + [106] * 5)
+    data = {"AAA": stock, "SPY": bench}
+    rec = _rec(week="2026-W43", made_at="2026-10-19T07:00:00+09:00")
+    pending = j.score([rec], data.__getitem__, entries={})[0]
+    assert pending["scored"] == {} and pending["entry"] is None and pending["entry_rule"]      # 출발 가격 전에는 채점 안 함
+    entry = {"price": 110.0, "bench_price": 100.25}
+    s = j.score([rec], data.__getitem__, entries={("AAA", rec["made_at"]): entry})[0]
+    ex = s["scored"][20]["exit_day"]
+    exit_close = next(c["close"] for c in stock if c["time"] == ex)
+    assert s["entry"] == entry and s["scored"][20]["ret"] == round((exit_close / 110 - 1) * 100, 2)   # 갭(100→110)은 성적에 안 들어간다
+    old = j.score([_rec(week="2026-W42")], data.__getitem__)[0]
+    assert old["scored"][20]["ret"] == round((exit_close / 100 - 1) * 100, 2) and not old["entry_rule"]   # W42 는 기록된 가격 그대로
+
+
+def test_always_up_baseline_is_also_given_on_the_same_calls():
+    stock, bench = _candles([100] * 10 + [100 + i for i in range(1, 26)]), _candles([100] * 35)
+    data = {"MU": stock, "NET": [dict(c, close=200 - c["close"]) for c in stock], "SPY": bench}
+    recs = [_rec("MU", d20="outperform"), _rec("NET", d20="neutral", c20=50)]      # NET(내림)은 중립으로 피했다
+    row = next(r for r in j.summarize(j.score(recs, data.__getitem__)) if r["arm"] == "news" and r["horizon"] == 20)
+    assert row["hit_rate_pct"] == 100.0 and row["always_up_hit_rate_pct"] == 50.0      # 전체로 센 기준선은 모델에 유리하다
+    assert row["always_up_calls_hit_rate_pct"] == 100.0                                # 같은 묶음으로 세면 차이가 없다
+
+
+def test_news_for_judging_is_last_7_days_without_near_duplicates_up_to_30():
+    it = lambda d, t, src="R": {"date": d, "source": src, "title": t, "summary": ""}
+    items = [it("2026-10-05", "아주 오래된 기사"),                                    # 7일 밖
+             it("2026-10-18", "Nvidia beats estimates, raises guidance"),
+             it("2026-10-18", "NVIDIA beats estimates; raises guidance!", "CNBC"),     # 거의 같은 제목 → 하나만
+             it("2026-10-17", "엔비디아, 새 칩 공개"), it("2026-10-12", "Nvidia shares slip")]
+    got = j.select_news(items, "2026-10-19")
+    assert [g["title"] for g in got] == ["Nvidia beats estimates, raises guidance", "엔비디아, 새 칩 공개", "Nvidia shares slip"]
+    import hashlib                                                         # 서로 전혀 다른 제목 50개
+    many = [it("2026-10-18", hashlib.md5(str(k).encode()).hexdigest()) for k in range(50)]
+    assert len(j.select_news(many, "2026-10-19")) == 30
+
+
+def test_prompt_takes_up_to_30_articles():
+    feats = {"rsi14": 50}
+    items = [{"date": "2026-10-18", "source": "R", "title": f"t{k}", "summary": "s"} for k in range(40)]
+    p = j.build_prompt("A", "에이", "2026-10-16", feats, items)
+    assert "최근 기사 30건" in p and "t29" in p and "t30" not in p
+
+
+def test_three_arms_add_one_kind_of_information_at_a_time(monkeypatch):
+    fund = {"type": "EQUITY", "valuation": {"pe_forward": 25.1}, "analysts": {"target_mean": 200.0, "price_now": 150.0},
+            "next_earnings_date": "2026-10-29", "source": "야후 파이낸스 (몇 시간 늦을 수 있음)"}
+    seen = {}
+    monkeypatch.setattr(j, "judge", lambda settings, model, prompt: {
+        "d5": "neutral", "c5": 50, "d20": "neutral", "c20": 50, "reason": "", "invalid_if": "", "tokens": 1})
+    cs = [{"time": f"2026-0{1 + i // 28}-{1 + i % 28:02d}", "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0 + i / 100, "volume": 1.0}
+          for i in range(260)]
+    news = [{"date": "2026-09-10", "source": "R", "title": "큰 계약 발표", "summary": "s"}]
+    recs = j.make_records(get_settings(), "2026-W43", "AAA", "에이", False, cs, cs, news,
+                          [("m", "nonews"), ("m", "fund"), ("m", "fund_news"), ("m", "fund_news_r")],
+                          now=datetime(2026, 12, 1, tzinfo=j.ET), save_input=lambda e: seen.__setitem__(e["arm"], e["prompt"]), fund=fund)
+    assert set(seen) == {"nonews", "fund", "fund_news"}                         # 반복은 원래 조건과 같은 입력 (따로 안 남김)
+    assert "펀더멘탈" not in seen["nonews"] and "기사" not in seen["nonews"]
+    assert "pe_forward" in seen["fund"] and "기사" not in seen["fund"]
+    assert "pe_forward" in seen["fund_news"] and "큰 계약 발표" in seen["fund_news"]
+    assert all("price_now" not in p and "몇 시간 늦을" not in p for p in seen.values())   # 야후 현재가·출처 표기는 빼고
+    by = {r["arm"]: r for r in recs}
+    assert (by["nonews"]["fundamentals"], by["fund"]["fundamentals"], by["fund_news"]["fundamentals"]) == (False, True, True)
+    assert (by["fund"]["news_count"], by["fund_news"]["news_count"], by["fund_news_r"]["prompt_sha"]) == (0, 1, by["fund_news"]["prompt_sha"])
+    none = j.make_records(get_settings(), "2026-W43", "AAA", "에이", False, cs, cs, [], [("m", "fund")],
+                          now=datetime(2026, 12, 1, tzinfo=j.ET), fund=None)
+    assert none[0]["fundamentals"] is False                                     # 야후에서 못 받으면 없이 판단하고 남긴다

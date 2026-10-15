@@ -12,6 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import date, datetime, time as dtime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -228,6 +229,7 @@ async def lifespan(_: FastAPI):
         tasks = [asyncio.create_task(monitor.run_forever()), asyncio.create_task(hub.run_forever())]
         asyncio.create_task(asyncio.to_thread(universe))   # 검색 목록 미리 받아두기 (~7초)
         asyncio.create_task(asyncio.to_thread(lambda: judge_scored(judge_log.read())))   # 판단 기록 채점도 미리
+        tasks.append(asyncio.create_task(entries_loop()))    # 판단 기록의 출발 가격 (분봉이 며칠만 남아 있어서 판단 뒤 바로 받는다)
         if get_settings().judge_auto:
             tasks.append(asyncio.create_task(judge_scheduler()))
     yield
@@ -1107,9 +1109,86 @@ def record_view(symbol: str, view: str, confidence: int, reason: str, invalid_if
         ASKED_PATH.parent.mkdir(parents=True, exist_ok=True)
         with ASKED_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return {"view_record": {"symbol": symbol, "view": view, "as_of": rec["as_of"], "price": rec["price"], "counted": first},
+    return {"view_record": {"symbol": symbol, "view": view, "as_of": rec["as_of"], "counted": first},
             "note": ("판단 기록에 남겼어요. " if first else "오늘 이 종목은 이미 남긴 의견이 있어서, 채점은 처음 것으로 해요. ")
-                    + f"{rec['as_of']} 종가 {rec['price']} 기준으로 20거래일 뒤 S&P 500 대비로 채점돼요."}
+                    + f"출발 가격은 지금 이후 첫 체결부터 {judgments.ENTRY_MINUTES}분 평균이고, "
+                    + f"{rec['as_of']} 뒤 5·20거래일 종가에 S&P 500 대비로 채점돼요."}
+
+
+# ── 판단 기록의 출발 가격: 판단 뒤 첫 체결부터 30분 평균 (judgments 맨 위 '바꾼 것 2026-10-15') ──
+ENTRIES_PATH = judge_log.root / "entries" / "entries.jsonl"   # 두 PC 가 같이 쓰도록 레포에. 하위 폴더: 주 기록(*.jsonl)과 안 섞이게
+_entries_lock = threading.Lock()
+ENTRY_MAX_PAGES = 60                                      # 1분봉 60페이지 = 12,000분 ≈ 장이 열린 날 열흘쯤. 이보다 오래되면 분봉이 없다
+
+
+def read_entries() -> dict[tuple[str, str], dict]:
+    """{(종목, 판단 시각): 출발 가격}. 같은 키가 두 번 적혔으면 먼저 적은 것."""
+    out: dict = {}
+    if ENTRIES_PATH.exists():
+        for line in ENTRIES_PATH.read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            out.setdefault((e["symbol"], e["at"]), e)
+    return out
+
+
+def fill_entries(now_ts: float | None = None) -> int:
+    """출발 가격이 아직 없는 기록을 채운다. 판단 시각을 덮는 1분봉을 받아 첫 체결부터 30분 평균 (SPY 도 같은 30분부터).
+    30분이 아직 안 지났으면 다음에. 분봉이 이미 지워졌으면 기준일 다음 봉 시가로 대신하고 그렇다고 적는다. 반환: 새로 적은 수."""
+    if not get_settings().toss_enabled:
+        return 0
+    now_ts = now_ts or time.time()
+    with _entries_lock:
+        have = read_entries()
+        todo: dict[str, dict[str, dict]] = {}
+        for r in judge_log.read() + read_asked():
+            key = judgments.entry_key(r) if judgments.needs_entry(r) else None
+            if key and key not in have and now_ts - datetime.fromisoformat(key[1]).timestamp() >= judgments.ENTRY_MINUTES * 60:
+                todo.setdefault(r["symbol"], {})[key[1]] = r
+        added = 0
+        for symbol, by_at in todo.items():
+            oldest = min(datetime.fromisoformat(a).timestamp() for a in by_at)
+            pages = min(ENTRY_MAX_PAGES, int((now_ts - oldest) / 60 / 200) + 3)     # 1분봉 한 페이지 200개, 넉넉히
+            try:
+                mins = toss().minute_candles(symbol, pages)
+                spy = cached(f"entry-spy:{pages}", 300, lambda: toss().minute_candles(judgments.BENCH, pages))
+            except Exception as error:
+                print(f"[entries] {symbol}: {type(error).__name__}: {error}")
+                continue
+            for at, r in by_at.items():
+                at_ts = datetime.fromisoformat(at).timestamp()
+                if mins and spy and mins[0]["time"] <= at_ts and spy[0]["time"] <= at_ts:     # 받은 분봉이 판단 시각을 덮는다
+                    e = judgments.entry_from_minutes(mins, at_ts, now_ts)
+                    b = judgments.entry_from_minutes(spy, e["t0"], now_ts) if e else None
+                    if not e or not b:
+                        continue                                   # 30분이 아직 안 끝났다
+                    entry = {"price": e["price"], "bars": e["bars"], "bench_price": b["price"], "bench_bars": b["bars"],
+                             "t0": datetime.fromtimestamp(e["t0"], judgments.KST).isoformat(timespec="minutes")}
+                elif pages >= ENTRY_MAX_PAGES:                     # 분봉을 놓쳤다 → 기준일 다음 봉 시가
+                    entry = judgments.entry_fallback(load_stock(symbol)[1], load_stock(judgments.BENCH)[1], r["as_of"])
+                    if not entry:
+                        continue
+                else:
+                    continue
+                ENTRIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with ENTRIES_PATH.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"symbol": symbol, "at": at, "minutes": judgments.ENTRY_MINUTES, **entry}, ensure_ascii=False) + "\n")
+                added += 1
+        return added
+
+
+async def entries_loop():
+    """10분마다 출발 가격을 채운다 (판단 직후 30분이 지나면, 그리고 분봉이 지워지기 전에)."""
+    while True:
+        try:
+            n = await asyncio.to_thread(fill_entries)
+            if n:
+                print(f"[entries] 출발 가격 {n}건")
+        except Exception as error:
+            print(f"[entries] {type(error).__name__}: {error}")
+        await asyncio.sleep(600)
 
 
 def judge_symbols() -> list[tuple[str, bool]]:
@@ -1157,9 +1236,21 @@ def judge_run(only: list[str] | None = None) -> dict:
                 if len(candles) < 260:
                     raise ValueError("일봉이 260개보다 적어요")
                 name = info.get("name", symbol)
-                items = stock_news(symbol, ai=False)["items"] if any(judgments.REPEATS.get(a, a) == "news" for _, a in todo) else []
+                # 기사: 판단 전 7일, 거의 같은 제목은 하나만, 최대 30건 (W43 부터. judgments 맨 위 '바꾼 것')
+                kinds = {judgments.REPEATS.get(a, a) for _, a in todo}
+                items = []
+                if kinds & set(judgments.USES_NEWS):
+                    raw = (news._safe(news.fetch_us_news, settings, symbol, limit=200, days=judgments.NEWS_DAYS + 1)
+                           + news._safe(news.fetch_kr_news_about, settings, name, limit=60, days=judgments.NEWS_DAYS + 1))
+                    items = judgments.select_news([asdict(it) for it in raw], datetime.now(judgments.KST).date().isoformat())
+                fund = None
+                if kinds & set(judgments.USES_FUND):                       # 펀더멘탈 (W43 부터). 못 받으면 없이 판단하고 기록에 남긴다
+                    try:
+                        fund = company.fundamentals(symbol)
+                    except Exception as error:
+                        print(f"[judgments] {symbol} 펀더멘탈 못 받음: {type(error).__name__}")
                 for rec in judgments.make_records(settings, week, symbol, name, mine, candles, bench, items, todo,
-                                                  save_input=judge_log.append_input, bench2=bench2):
+                                                  save_input=judge_log.append_input, bench2=bench2, fund=fund):
                     judge_log.append(rec)
                     judge_state["done"] += 1
                     judge_state["tokens"] += rec["tokens"]
@@ -1208,7 +1299,8 @@ def judge_scored(records: list[dict]) -> list[dict]:
     1시간이 지났으면 지난 값을 바로 돌려주고 뒤에서 새로 계산한다 (탭을 열 때 기다리지 않게).
     기록 수가 바뀌었으면(새 주 기록) 기다려서 새로 계산한다. 동시에 여러 번 불려도 계산은 한 번만."""
     hit = dict(_judge_score)                              # 복사: 뒤에서 새로 계산한 값이 이 호출의 답을 바꾸지 않게
-    if hit.get("n") == len(records):
+    n = (len(records), len(read_entries()))               # 출발 가격이 새로 들어와도 다시 계산한다
+    if hit.get("n") == n:
         if time.time() - hit["at"] < JUDGE_SCORE_TTL:
             return hit["value"]
         if _judge_score_lock.acquire(blocking=False):
@@ -1220,14 +1312,15 @@ def judge_scored(records: list[dict]) -> list[dict]:
             threading.Thread(target=refresh, daemon=True).start()
         return hit["value"]
     with _judge_score_lock:
-        if _judge_score.get("n") != len(records):         # 기다리는 사이 다른 요청이 이미 계산했으면 그걸 쓴다
+        if _judge_score.get("n") != n:                    # 기다리는 사이 다른 요청이 이미 계산했으면 그걸 쓴다
             _store_judge_score(records)
         return _judge_score["value"]
 
 
 def _store_judge_score(records: list[dict]) -> None:
-    value = judgments.score(records, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: load_stock(s)[1]))
-    _judge_score.update(at=time.time(), n=len(records), value=value)
+    entries = read_entries()
+    value = judgments.score(records, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: load_stock(s)[1]), entries=entries)
+    _judge_score.update(at=time.time(), n=(len(records), len(entries)), value=value)
 
 
 @app.get("/api/judgments")
@@ -1242,7 +1335,7 @@ def judgments_summary(symbol: str | None = None):
         "protocol": {"universe": len(judgments.UNIVERSE), "ndx": len(judgments.NDX), "ndx_from": judgments.NDX_FROM, "symbols": len(plan),
                      "premium": len(judgments.PREMIUM), "horizons": judgments.HORIZONS,
                      "primary": judgments.PRIMARY, "bench": judgments.BENCH, "models": settings.openai_judge_models,
-                     "arms": judgments.ARMS, "auto": settings.judge_auto},
+                     "arms": judgments.arms_for(week), "auto": settings.judge_auto},
         "week": week, "due": judgments.is_due(), "planned": sum(len(c) for _, _, c in plan), "left": judge_left(week),
         "by_model": {m: sum(sum(x[0] == m for x in c) for _, _, c in plan) for m in settings.openai_judge_models},
         "recorded_this_week": len(judge_log.done_keys(week)),
@@ -1255,8 +1348,10 @@ def judgments_summary(symbol: str | None = None):
     }
     # 내가 물어본 판단 (질문 에이전트의 종합 의견). 종목·기준일마다 처음 것만 채점
     asked = judgments.first_per_day(read_asked())
-    asked_scored = cached(f"asked-scored:{len(asked)}", JUDGE_SCORE_TTL,
-                          lambda: judgments.score(asked, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: load_stock(s)[1])))
+    entries = read_entries()
+    asked_scored = cached(f"asked-scored:{len(asked)}:{len(entries)}", JUDGE_SCORE_TTL,
+                          lambda: judgments.score(asked, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: load_stock(s)[1]),
+                                                  entries=entries))
     out["asked"] = judgments.summarize(asked_scored, fixed_only=False, arms=(judgments.ASKED_ARM,))
     out["asked_records"] = asked_scored[-20:]
     if symbol:

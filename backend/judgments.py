@@ -34,6 +34,32 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
   판단이 얼마나 흔들리는지 보는 용도이고 성적표에는 넣지 않는다 (consistency).
 - 여기까지가 첫 채점(W42 의 5거래일 뒤) 전에 바꾼 것이다. 채점이 나온 뒤에는 기준을 바꾸지 않는다.
 
+바꾼 것 (2026-10-15, 첫 채점 전. W42 의 5거래일 채점은 10/20 에 처음 나온다)
+- 출발 가격: W43 부터, 그리고 질문 탭 의견 전부. '판단을 적은 뒤 첫 체결부터 30분 동안의 1분봉 종가 평균' (SPY 도 같은 30분).
+  이유: 월요일 아침에 판단하면 모델은 주말 기사까지 읽는데, 출발 가격이 금요일 종가면 주말 소식으로 월요일에 갭이 난 몫이
+  판단의 성적으로 들어간다. 금요일 종가로는 아무도 주말 소식을 보고 살 수 없었다. 기사를 안 받는 조건(nonews)은 그 몫을 못 맞혀서
+  '기사가 판단을 낫게 하나'의 비교가 기사 쪽으로 기운다. 질문 탭은 장중에 물으면 그날 움직임을 보고 의견을 내는데 출발이 전날 종가였다.
+  첫 체결 하나는 거래가 얇아 튈 수 있어서 30분 평균을 쓴다.
+- 끝 가격은 그대로: 기준일(as_of, 판단 때 마지막으로 끝난 정규장)에서 h 거래일 뒤 종가. 모델에 주는 숫자도 그대로 as_of 까지.
+- W42 는 한국 낮 주간거래 중에 적어서 그 시각 가격이 이미 '판단 뒤 살 수 있는 가격'이라 기록된 가격 그대로 쓴다.
+- 분봉은 며칠만 남아 있어서 출발 가격은 서버가 판단 뒤 며칠 안에 받아 적어 둔다
+  (judgments/entries/entries.jsonl) 그때를 놓쳐 분봉이 없으면 기준일 다음 봉의 시가로 대신하고 표시해 둔다 (fallback).
+- 채점 끝 가격은 끝난 정규장 봉만 쓴다 (장중 봉으로 임시 채점하지 않게).
+- 조건 (W43 부터): 2개 → 3개. 정보를 하나씩 더해서 차이가 그 정보 하나만 나게 한다.
+    nonews    = 가격 숫자만 (W42 의 nonews 와 같다)
+    fund      = 가격 숫자 + 펀더멘탈 (야후: PER·PEG·EV/EBITDA·PBR, 성장, 마진, 재무, 애널리스트 의견·목표가, 공매도, 베타, 다음 실적일)
+    fund_news = 가격 숫자 + 펀더멘탈 + 기사
+  fund − nonews = 펀더멘탈의 효과, fund_news − fund = 기사의 효과. W42 의 news(가격 + 기사 12건)는 이름이 달라 섞이지 않는다.
+  펀더멘탈을 야후에서 못 받은 종목은 없이 판단하고 기록에 fundamentals=false 로 남긴다 (분석 때 뺄 수 있게).
+  야후 값은 판단 시각의 값이라 출발 가격(판단 뒤 30분 평균)보다 앞선 정보다. 야후의 현재가 칸은 넣지 않는다.
+  반복 판단(PREMIUM)은 양 끝 조건만: nonews_r, fund_news_r. 호출은 한 주 약 500건 → 약 750건.
+- 기사 (W43 부터, fund_news 조건): 최신 12건 → '판단 전 7일 안의 기사, 제목이 거의 같은 것은 하나만, 최대 30건'.
+  이유: 최신 12건은 기사가 많은 종목(대형주)에선 하루이틀치, 조용한 종목에선 몇 주치라 종목마다 본 기간이 달랐다.
+  같은 소식을 여러 언론사가 쓰면 그 소식만 여러 번 들어가 무게가 커져서 거의 같은 제목은 하나만 남긴다.
+  W42(12건)와 W43 부터의 기사 조건은 따로 본다.
+- '전부 강함으로 찍기' 기준선을 모델이 방향을 고른 기록(중립 제외)에서도 같이 낸다. 모델은 어려운 종목을 중립으로 피할 수 있는데
+  기존 기준선은 중립까지 포함한 전체에서 세서 모델에 유리했다. 기존 값도 그대로 둔다.
+
 이 기록은 추천이 아니다. 채점이 쌓이기 전의 판단은 근거 없는 의견과 같다.
 """
 from __future__ import annotations
@@ -67,10 +93,21 @@ BENCH2 = "QQQ"       # 나스닥 100 ETF. 판단의 질문은 SPY 대비로 통�
 PREMIUM = """ACLS AI ALAB APP BB BBAI BTBT CCJ CHPT COHR COIN CRSP DDOG DELL GTLB LSCC MRNA MRVL MU NET PLUG QBTS RBLX RDW RIOT RIVN SOFI
 TTD VRT VST""".split()
 HORIZONS, PRIMARY, BENCH = (5, 20), 20, "SPY"
-ARMS = ("news", "nonews")
+ENTRY_FROM, ENTRY_MINUTES = "2026-W43", 30      # 이 주부터 출발 가격 = 판단 뒤 첫 체결부터 30분 평균 (질문 탭 의견은 전부)
+NEWS_DAYS, NEWS_MAX, NEWS_SAME = 7, 30, 0.85    # W43 부터 기사: 판단 전 7일, 최대 30건, 제목이 85% 넘게 같으면 하나만
+ARMS_FROM = "2026-W43"
+ARMS_OLD = ("news", "nonews")                  # W42: 가격 + 기사 12건 / 가격만
+ARMS = ("nonews", "fund", "fund_news")         # W43 부터: 가격만 / + 펀더멘탈 / + 펀더멘탈 + 기사
+ALL_ARMS = ARMS_OLD[:1] + ARMS                 # 성적표에 나오는 조건 전부
+USES_NEWS, USES_FUND = ("news", "fund_news"), ("fund", "fund_news")
 # 같은 입력을 한 번 더 물어 판단이 얼마나 흔들리는지 본다 (PREMIUM 종목, 첫 번째 모델만). 성적표에는 넣지 않는다 (같은 판단을 두 번 세지 않게)
-REPEATS = {"news_r": "news", "nonews_r": "nonews"}
+REPEATS = {"news_r": "news", "nonews_r": "nonews", "fund_news_r": "fund_news"}     # 반복 조건 → 원래 조건 (같은 입력)
+REPEAT_ARMS = ("nonews_r", "fund_news_r")      # W43 부터 반복하는 조건: 양 끝만
 REPEAT_FROM = "2026-W43"
+
+
+def arms_for(week: str) -> tuple[str, ...]:
+    return ARMS if week >= ARMS_FROM else ARMS_OLD
 DIRECTIONS = ("outperform", "neutral", "underperform")
 KST, ET = ZoneInfo("Asia/Seoul"), ZoneInfo("America/New_York")
 BUCKETS = ((50, 59), (60, 69), (70, 79), (80, 89), (90, 100))
@@ -98,9 +135,9 @@ def models_for(symbol: str, models: tuple[str, ...]) -> tuple[str, ...]:
 
 def combos_for(symbol: str, models: tuple[str, ...], week: str) -> list[tuple[str, str]]:
     """이 종목에 대해 그 주에 적을 (모델, 조건) 전부. 반복 판단은 PREMIUM 종목을 첫 번째 모델로만."""
-    out = [(m, a) for m in models_for(symbol, models) for a in ARMS]
+    out = [(m, a) for m in models_for(symbol, models) for a in arms_for(week)]
     if models and symbol in PREMIUM and week >= REPEAT_FROM:
-        out += [(models[0], r) for r in REPEATS]
+        out += [(models[0], r) for r in REPEAT_ARMS]
     return out
 
 
@@ -153,11 +190,43 @@ def features(candles: list[dict], bench: list[dict]) -> dict:
     }
 
 
-def build_prompt(symbol: str, name: str, as_of: str, feats: dict, items: list[dict] | None) -> str:
+def select_news(items: list[dict], today: str, days: int = NEWS_DAYS, cap: int = NEWS_MAX, same: float = NEWS_SAME) -> list[dict]:
+    """판단에 줄 기사: today 전 days 일 안, 최신순, 제목이 거의 같은 기사는 먼저 나온 하나만, 최대 cap 건.
+    (같은 소식을 여러 언론사가 쓰면 그 소식만 여러 번 들어가 무게가 커진다)"""
+    from difflib import SequenceMatcher
+    since = (datetime.fromisoformat(today) - timedelta(days=days)).date().isoformat()
+    norm = lambda t: "".join(ch for ch in str(t).lower() if ch.isalnum())
+    kept: list[dict] = []
+    for it in sorted((it for it in items if it.get("date", "") >= since), key=lambda it: it.get("date", ""), reverse=True):
+        t = norm(it.get("title", ""))
+        if t and not any(SequenceMatcher(None, t, norm(k["title"])).ratio() > same for k in kept):
+            kept.append(it)
+        if len(kept) >= cap:
+            break
+    return kept
+
+
+FUND_DROP = ("source", "price_now")          # 출처 표기, 판단 시각의 야후 현재가 (가격은 '숫자'에 이미 있다)
+
+
+def fund_for_prompt(fund: dict | None) -> dict | None:
+    """모델에 줄 펀더멘탈: 야후가 준 값에서 출처 표기·현재가만 뺀다."""
+    if not fund:
+        return None
+    out = {k: v for k, v in fund.items() if k not in FUND_DROP}
+    if isinstance(out.get("analysts"), dict):
+        out["analysts"] = {k: v for k, v in out["analysts"].items() if k not in FUND_DROP}
+    return out
+
+
+def build_prompt(symbol: str, name: str, as_of: str, feats: dict, items: list[dict] | None, cap: int = NEWS_MAX,
+                 fund: dict | None = None) -> str:
     text = f"종목: {name} ({symbol})\n기준일: {as_of}\n숫자:\n{json.dumps(feats, ensure_ascii=False)}"
+    if fund:
+        text += f"\n\n펀더멘탈 (야후 파이낸스):\n{json.dumps(fund, ensure_ascii=False)}"
     if items is not None:
-        block = "\n".join(f"- ({it['date']}, {it['source']}) {it['title']} — {str(it.get('summary', ''))[:160]}" for it in items[:12])
-        text += f"\n\n최근 기사 {len(items[:12])}건:\n{block or '(없음)'}"
+        block = "\n".join(f"- ({it['date']}, {it['source']}) {it['title']} — {str(it.get('summary', ''))[:160]}" for it in items[:cap])
+        text += f"\n\n최근 기사 {len(items[:cap])}건:\n{block or '(없음)'}"
     return text
 
 
@@ -226,7 +295,7 @@ class Log:
 
 def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bool, candles: list[dict], bench: list[dict],
                  items: list[dict], todo: list[tuple[str, str]], now: datetime | None = None,
-                 save_input=None, bench2: list[dict] | None = None) -> list[dict]:
+                 save_input=None, bench2: list[dict] | None = None, fund: dict | None = None) -> list[dict]:
     """한 종목에 대해 아직 안 적은 (모델, 조건)들을 판단한다. 조건이 달라도 숫자·기준일·가격은 같다.
     candles·bench 는 끝난 봉까지만(completed) 쓴다. save_input(entry) 로 모델에 준 입력 원문을 남긴다. bench2 = QQQ (가격만 적어 둔다)."""
     candles, bench = completed(candles, now), completed(bench, now)
@@ -236,17 +305,51 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
     if bench2 and (q := completed(bench2, now)):
         base.update(qqq_as_of=q[-1]["time"], qqq_price=q[-1]["close"])
     kind = lambda arm: REPEATS.get(arm, arm)                  # 반복 판단은 원래 조건과 같은 입력을 받는다
-    prompts = {k: build_prompt(symbol, name, as_of, feats, items if k == "news" else None) for k in {kind(a) for _, a in todo}}
+    fund = fund_for_prompt(fund)
+    prompts = {k: build_prompt(symbol, name, as_of, feats, items if k in USES_NEWS else None, fund=fund if k in USES_FUND else None)
+               for k in {kind(a) for _, a in todo}}
     for k, text in prompts.items():
         if save_input:
             save_input({"week": week, "symbol": symbol, "arm": k, "prompt_sha": sha(text), "prompt": text})
     out = []
     for model, arm in todo:
         result = judge(settings, model, prompts[kind(arm)])
-        out.append({**base, "model": model, "arm": arm, "news_count": len(items[:12]) if kind(arm) == "news" else 0,
+        out.append({**base, "model": model, "arm": arm, "news_count": len(items[:NEWS_MAX]) if kind(arm) in USES_NEWS else 0,
+                    "fundamentals": bool(fund) and kind(arm) in USES_FUND,
                     "prompt_sha": sha(prompts[kind(arm)]), "system_sha": sha(_SYSTEM),
                     "made_at": (now or datetime.now(KST)).isoformat(timespec="seconds"), **result})
     return out
+
+
+# ── 출발 가격: 판단 뒤 첫 체결부터 30분 평균 ──
+def needs_entry(r: dict) -> bool:
+    """출발 가격을 따로 받아야 하는 기록인가 (W43 부터의 주간 판단, 질문 탭 의견)."""
+    return r.get("arm") == ASKED_ARM or r["week"] >= ENTRY_FROM
+
+
+def entry_key(r: dict) -> tuple[str, str]:
+    """(종목, 판단한 시각). 같은 종목을 같은 때에 여러 모델·조건으로 적었으면 출발 가격도 같다."""
+    return r["symbol"], r.get("made_at") or r["asked_at"]
+
+
+def entry_from_minutes(minutes: list[dict], after_ts: float, now_ts: float, span: int = ENTRY_MINUTES) -> dict | None:
+    """minutes = 1분봉 (time = 봉 시작 유닉스 초). after_ts 뒤에 시작한 첫 봉부터 span 분 동안의 종가 평균.
+    그 30분이 아직 안 끝났거나 after_ts 뒤 체결이 없으면 None."""
+    first = next((m for m in minutes if m["time"] >= after_ts), None)
+    if first is None or now_ts < first["time"] + span * 60:
+        return None
+    t0, end = first["time"], first["time"] + span * 60
+    window = [m["close"] for m in minutes if t0 <= m["time"] < end]
+    return {"t0": t0, "price": round(sum(window) / len(window), 4), "bars": len(window)}
+
+
+def entry_fallback(candles: list[dict], bench: list[dict], as_of: str) -> dict | None:
+    """분봉을 놓쳤을 때: 기준일 다음 봉의 시가 (종목·SPY 둘 다). 아직 다음 봉이 없으면 None."""
+    nxt = lambda cs: next((c for c in cs if c["time"] > as_of), None)
+    s, b = nxt(candles), nxt(bench)
+    if not s or not b:
+        return None
+    return {"price": s["open"], "bench_price": b["open"], "bars": 0, "bench_bars": 0, "fallback": f"{s['time']} 시가 (분봉 없음)"}
 
 
 # ── 채점 (저장하지 않는다: 읽을 때마다 지금 시세로 계산) ──
@@ -259,9 +362,11 @@ def _may_be_due(as_of: str, today: str) -> bool:
         return True
 
 
-def score(records: list[dict], candles_of, today: str | None = None, workers: int = 6) -> list[dict]:
+def score(records: list[dict], candles_of, today: str | None = None, workers: int = 6, entries: dict | None = None,
+          now: datetime | None = None) -> list[dict]:
     """candles_of(symbol) -> 일봉. 기록마다 {h: {ret, bench, excess, hit}} 를 붙인다. 아직 기간이 안 지났으면 그 h 는 없다.
-    시세는 채점할 게 있을 수 있는 기록의 종목만, 여러 개를 한꺼번에 받는다 (종목이 200개라 하나씩 받으면 10초 넘게 걸렸다)."""
+    시세는 채점할 게 있을 수 있는 기록의 종목만, 여러 개를 한꺼번에 받는다 (종목이 200개라 하나씩 받으면 10초 넘게 걸렸다).
+    entries = {(종목, 판단 시각): 출발 가격}. needs_entry 인 기록은 출발 가격이 들어오기 전까지 채점하지 않는다."""
     today = today or datetime.now(ET).date().isoformat()
     due = [_may_be_due(r["as_of"], today) for r in records]
     symbols = sorted({r["symbol"] for r, d in zip(records, due) if d} | ({BENCH} if any(due) else set()))
@@ -269,6 +374,8 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
     def load(symbol: str):
         try:
             cs = candles_of(symbol)
+            if cs and str(cs[-1]["time"])[:2] in ("19", "20"):     # 날짜 꼴이면: 끝 가격은 끝난 정규장 봉만 (장중 봉으로 임시 채점하지 않게)
+                cs = completed(cs, now)
             return [c["time"] for c in cs], [c["close"] for c in cs]
         except Exception:
             return None
@@ -279,8 +386,16 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
     out = []
     for r, d in zip(records, due):
         if not d:
-            out.append({**r, "scored": {}})
+            out.append({**r, "scored": {}, "entry": (entries or {}).get(entry_key(r)) if needs_entry(r) else None,
+                        "entry_rule": needs_entry(r)})
             continue
+        start, start_bench, entry = r["price"], r["bench_price"], None
+        if needs_entry(r):
+            entry = (entries or {}).get(entry_key(r))
+            if not entry:                                         # 출발 가격(판단 뒤 30분 평균)이 아직 없다
+                out.append({**r, "scored": {}, "entry": None, "entry_rule": True})
+                continue
+            start, start_bench = entry["price"], entry["bench_price"]
         scored, s, b = {}, cache.get(r["symbol"]), cache.get(BENCH)
         if s and b and r["as_of"] in s[0] and r["bench_as_of"] in b[0]:
             i, j = s[0].index(r["as_of"]), b[0].index(r["bench_as_of"])
@@ -291,11 +406,11 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
                 jx = b[0].index(exit_day) if exit_day in b[0] else (j + h if j + h < len(b[0]) else None)
                 if jx is None:
                     continue
-                ret, bench = (s[1][i + h] / r["price"] - 1) * 100, (b[1][jx] / r["bench_price"] - 1) * 100
+                ret, bench = (s[1][i + h] / start - 1) * 100, (b[1][jx] / start_bench - 1) * 100
                 d = r[f"d{h}"]
                 scored[h] = {"ret": round(ret, 2), "bench": round(bench, 2), "excess": round(ret - bench, 2), "exit_day": exit_day,
                              "hit": None if d == "neutral" else (ret > bench) == (d == "outperform")}
-        out.append({**r, "scored": scored})
+        out.append({**r, "scored": scored, "entry": entry, "entry_rule": needs_entry(r)})
     return out
 
 
@@ -333,7 +448,7 @@ def in_set(records: list[dict], symbols: list[str]) -> list[dict]:
     return [r for r in records if r["symbol"] in keep]
 
 
-def summarize(scored: list[dict], fixed_only: bool = True, arms: tuple = ARMS) -> list[dict]:
+def summarize(scored: list[dict], fixed_only: bool = True, arms: tuple = ALL_ARMS) -> list[dict]:
     """(모델, 조건, 기간)별 성적. always_up = 같은 기록에 전부 outperform 이라고 찍었을 때."""
     rows = []
     recs = in_set(scored, UNIVERSE) if fixed_only else scored
@@ -355,6 +470,9 @@ def summarize(scored: list[dict], fixed_only: bool = True, arms: tuple = ARMS) -
                     "mean_signed_excess_pct": mean(signed),
                     "always_up_hit_rate_pct": round(sum(r["scored"][h]["excess"] > 0 for r in done) / len(done) * 100, 1) if done else None,
                     "always_up_mean_excess_pct": mean([r["scored"][h]["excess"] for r in done]),
+                    # 같은 기준선을 모델이 방향을 고른 기록(중립 제외)에서만: 모델의 맞힌 비율과 같은 묶음으로 비교한다
+                    "always_up_calls_hit_rate_pct": round(sum(r["scored"][h]["excess"] > 0 for r in calls) / len(calls) * 100, 1) if calls else None,
+                    "always_up_calls_mean_excess_pct": mean([r["scored"][h]["excess"] for r in calls]),
                     "calibration": [{"bucket": f"{lo}~{hi}", "n": len(b), "hit_rate_pct": round(sum(r["scored"][h]["hit"] for r in b) / len(b) * 100, 1)}
                                     for lo, hi in BUCKETS if (b := [r for r in calls if lo <= r[f"c{h}"] <= hi])],
                 })
@@ -373,7 +491,7 @@ def paired(scored: list[dict]) -> list[dict]:
 
 def consistency(records: list[dict]) -> list[dict]:
     """같은 입력을 두 번 물었을 때 판단이 같았나. (모델, 조건)별로 방향이 같았던 비율과 확신 차이의 평균."""
-    first = {(r["week"], r["symbol"], r["model"], r["arm"]): r for r in records if r["arm"] in ARMS}
+    first = {(r["week"], r["symbol"], r["model"], r["arm"]): r for r in records if r["arm"] in ALL_ARMS}
     rows = []
     for rep, base in REPEATS.items():
         pairs = [(first[k], r) for r in records if r["arm"] == rep and (k := (r["week"], r["symbol"], r["model"], base)) in first]

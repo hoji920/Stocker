@@ -1819,7 +1819,8 @@ async function loadReading(make = false) {
 // ── 판단 기록 ──
 // AI 의 판단을 미리 적어 두고 기간이 지나면 시세로 채점한다 (서버 judgments.py). 채점이 쌓이기 전의 판단은 근거 없는 의견이라
 // 종목별 판단은 접어 두고, 성적표를 먼저 보여준다.
-const ARM_NAMES = { news: "숫자 + 기사", nonews: "숫자만", news_r: "숫자 + 기사 (다시 물음)", nonews_r: "숫자만 (다시 물음)", asked: "질문 종합 검토" };
+const ARM_NAMES = { news: "숫자 + 기사 (W42)", nonews: "숫자만", fund: "숫자 + 펀더멘탈", fund_news: "숫자 + 펀더멘탈 + 기사",
+  news_r: "숫자 + 기사 (다시 물음)", nonews_r: "숫자만 (다시 물음)", fund_news_r: "숫자 + 펀더멘탈 + 기사 (다시 물음)", asked: "질문 종합 검토" };
 const VIEW_NAMES = { strong: "강함", neutral: "중립", weak: "약함" };
 const DIR_NAMES = { outperform: "시장보다 강함", neutral: "판단 안 함", underperform: "시장보다 약함" };
 let judgePoll = null;
@@ -1866,14 +1867,20 @@ function renderJudgments() {
   // 성적표: 주된 판정은 20거래일·고정 100종목
   const pc = (v) => (v == null ? "–" : `${v.toFixed(1)}%`);
   const sg = (v) => (v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%p`);
+  // 출발 가격: W43 부터와 질문 탭 의견은 '판단 뒤 첫 체결부터 30분 평균', W42 는 기록된 그 시각 가격
+  const start = (r) => !r.entry_rule ? `기준 ${r.as_of} ${fmt(r.price)}`
+    : r.entry ? `출발 ${fmt(r.entry.price)} (${r.entry.t0 ? `${r.entry.t0.slice(5, 16).replace("T", " ")}부터 30분 평균` : r.entry.fallback})`
+    : "출발 가격 대기 (판단 뒤 첫 체결부터 30분 평균)";
   const table = (rows, caption) => {
     if (!rows.length) return [];
     const body = rows.map((r) => el("tr", { class: r.primary ? "primary" : "" },
       el("td", {}, `${r.model} · ${ARM_NAMES[r.arm]}`), el("td", {}, `${r.horizon}일`),
       el("td", {}, `${r.scored} / ${r.recorded}`), el("td", {}, r.calls ? `${pc(r.hit_rate_pct)} (${r.calls}건)` : "–"),
-      el("td", {}, sg(r.mean_signed_excess_pct)), el("td", {}, r.scored ? `${pc(r.always_up_hit_rate_pct)} · ${sg(r.always_up_mean_excess_pct)}` : "–")));
+      el("td", {}, sg(r.mean_signed_excess_pct)), el("td", {}, r.scored ? `${pc(r.always_up_hit_rate_pct)} · ${sg(r.always_up_mean_excess_pct)}` : "–"),
+      // 같은 기준선을 모델이 방향을 고른 기록에서만: '맞힌 비율'과 같은 묶음이라 이쪽과 비교하는 게 공정하다
+      el("td", {}, r.calls ? `${pc(r.always_up_calls_hit_rate_pct)} · ${sg(r.always_up_calls_mean_excess_pct)}` : "–")));
     return [el("div", { class: "brief-sub" }, caption), el("div", { class: "judge-scroll" }, el("table", { class: "judge-table" },
-      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면"].map((h) => el("th", {}, h))), ...body))];
+      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면"].map((h) => el("th", {}, h))), ...body))];
   };
   const anyScored = j.fixed.some((r) => r.scored);
   $("#judge-board").replaceChildren(
@@ -1886,7 +1893,7 @@ function renderJudgments() {
       ...j.asked_records.slice().reverse().map((r) => {
         const s = r.scored[20];
         return el("div", { class: "judge-rec" },
-          el("div", { class: "judge-rec-head" }, `${r.asked_at.slice(0, 16).replace("T", " ")} · ${r.name} (${r.symbol}) · 기준 ${r.as_of} ${fmt(r.price)}`),
+          el("div", { class: "judge-rec-head" }, `${r.asked_at.slice(0, 16).replace("T", " ")} · ${r.name} (${r.symbol}) · ${start(r)}`),
           el("div", {}, `20일: ${VIEW_NAMES[r.view]} (확신 ${r.c20})${s ? ` → 초과 ${sg(s.excess)} ${s.hit == null ? "" : s.hit ? "✓" : "✗"}` : " → 채점 대기"}`),
           el("div", { class: "muted" }, r.reason), el("div", { class: "muted" }, `틀렸다고 볼 조건: ${r.invalid_if}`));
       }))] : []),
@@ -1906,7 +1913,7 @@ function renderJudgments() {
     ...recs.slice().reverse().map((r) => {
       const res = (h) => { const s = r.scored[h]; return s ? ` → 초과 ${sg(s.excess)} ${s.hit == null ? "" : s.hit ? "✓" : "✗"}` : " → 채점 대기"; };
       return el("div", { class: "judge-rec" },
-        el("div", { class: "judge-rec-head" }, `${r.week} · ${r.model} · ${ARM_NAMES[r.arm]} · 기준 ${r.as_of} ${fmt(r.price)}`),
+        el("div", { class: "judge-rec-head" }, `${r.week} · ${r.model} · ${ARM_NAMES[r.arm]} · ${start(r)}`),
         el("div", {}, `5일: ${DIR_NAMES[r.d5]} (확신 ${r.c5})${res(5)}`), el("div", {}, `20일: ${DIR_NAMES[r.d20]} (확신 ${r.c20})${res(20)}`),
         el("div", { class: "muted" }, r.reason), el("div", { class: "muted" }, `틀렸다고 볼 조건: ${r.invalid_if}`));
     }));
