@@ -88,10 +88,12 @@ def fetch_full(symbols: list[str]) -> dict[str, list[dict]]:
 
 # ── 봉마다 규칙 판정 (무겁다 → 종목별로 저장) ──
 def signals(args) -> dict | None:
-    symbol, candles, my = args
+    symbol, candles, my, *rest = args                  # rest[0] = 저장 폴더 (post2018 이 따로 쓴다)
+    cache = rest[0] if rest else CACHE
     analysis.LOG_TRENDS = False
+    analysis.DESPIKE = False                            # 이전 검증과 같은 선 (튀는 꼬리 무시는 2026-10-15 에 앱에 넣었다)
     key = hashlib.md5(json.dumps([CACHE_VERSION, len(candles), candles[-1], my, MIN_RISK_ATR], sort_keys=True).encode()).hexdigest()
-    path = CACHE / f"{symbol.replace('/', '_')}.pkl"
+    path = cache / f"{symbol.replace('/', '_')}.pkl"
     if path.exists():
         try:
             saved = pickle.loads(path.read_bytes())
@@ -120,7 +122,7 @@ def signals(args) -> dict | None:
                         "sup_name": (r["support"] or {}).get("name"), "target_name": r["target"]["name"],
                         "ch_label": (r["channel"] or {}).get("label"), "ch_pos": (r["channel"] or {}).get("position_pct")}
     out = {"symbol": symbol, "start": start, "sig": sig, "sig_e": sig_e, "sig_d": sig_d}
-    CACHE.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pickle.dumps({"key": key, "out": out}))
     return out
 
