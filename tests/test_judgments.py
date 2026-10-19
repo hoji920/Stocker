@@ -203,14 +203,31 @@ def test_summarize_compares_with_always_up():
     assert rows[("nonews", 20)]["hit_rate_pct"] == 0.0 and rows[("news", 5)]["neutral"] == 2
 
 
-def test_entry_is_the_30_minute_average_after_the_first_trade_after_judging():
-    t = 1_000_000                                                   # 판단한 시각 (유닉스 초)
-    mins = [{"time": t - 120, "close": 50.0}, {"time": t - 60, "close": 50.0}]           # 판단 전 체결은 안 쓴다
-    mins += [{"time": t + 3600 + 60 * k, "close": 100.0 + k} for k in range(40)]          # 한 시간 뒤 첫 체결부터
-    assert j.entry_from_minutes(mins, t, now_ts=t + 3600 + 60 * 29) is None                 # 30분이 아직 안 끝났다
-    e = j.entry_from_minutes(mins, t, now_ts=t + 3600 + 60 * 30)
-    assert e["t0"] == t + 3600 and e["bars"] == 30 and e["price"] == 114.5                   # 100 ~ 129 의 평균
-    assert j.entry_from_minutes(mins[:2], t, now_ts=t + 99_999) is None                      # 판단 뒤 체결이 없다
+def _et(day: str, hm: str) -> float:
+    return datetime.fromisoformat(f"{day}T{hm}:00").replace(tzinfo=j.ET).timestamp()
+
+
+def test_entry_is_the_first_30_minutes_of_the_next_regular_session():
+    # 월요일 한국 아침 판단 = 미국 일요일 저녁 → 출발은 월요일 정규장 09:30~10:00 (동부). 주간거래·프리마켓 봉은 안 쓴다
+    at = _et("2026-10-18", "20:00")
+    mins = [{"time": _et("2026-10-18", "20:30") + 60 * k, "close": 50.0} for k in range(5)]       # 주간거래 (얇다)
+    mins += [{"time": _et("2026-10-19", "04:00") + 60 * k, "close": 60.0} for k in range(30)]     # 프리마켓
+    mins += [{"time": _et("2026-10-19", "09:30") + 60 * k, "close": 100.0 + k} for k in range(60)]
+    assert j.entry_from_minutes(mins, at, now_ts=_et("2026-10-19", "09:59")) is None             # 30분이 아직 안 끝났다
+    e = j.entry_from_minutes(mins, at, now_ts=_et("2026-10-19", "10:00"))
+    assert e["t0"] == _et("2026-10-19", "09:30") and e["bars"] == 30 and e["price"] == 114.5     # 100 ~ 129 의 평균
+    assert j.entry_ready_at(at) == _et("2026-10-19", "10:00")
+    assert j.entry_from_minutes(mins[:35], at, now_ts=_et("2026-10-20", "12:00")) is None         # 정규장 체결이 없다
+
+
+def test_entry_inside_the_session_starts_right_after_judging_and_stops_at_the_close():
+    mins = [{"time": _et("2026-10-19", "09:30") + 60 * k, "close": 100.0 + k} for k in range(390)]   # 09:30 ~ 15:59
+    at = _et("2026-10-19", "11:00") + 5                                                            # 장중에 물었다
+    e = j.entry_from_minutes(mins, at, now_ts=_et("2026-10-19", "12:00"))
+    assert e["t0"] == _et("2026-10-19", "11:01") and e["bars"] == 30
+    late = j.entry_from_minutes(mins, _et("2026-10-19", "15:50") + 5, now_ts=_et("2026-10-19", "17:00"))
+    assert late["bars"] == 9                                                                       # 15:51 ~ 15:59 까지만 (16:00 마감)
+    assert j.entry_ready_at(_et("2026-10-16", "17:00")) == _et("2026-10-19", "10:00")             # 금요일 장 뒤 → 월요일
 
 
 def test_new_rule_applies_from_w43_and_to_every_asked_view():

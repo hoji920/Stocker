@@ -1111,18 +1111,19 @@ def record_view(symbol: str, view: str, confidence: int, reason: str, invalid_if
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return {"view_record": {"symbol": symbol, "view": view, "as_of": rec["as_of"], "counted": first},
             "note": ("판단 기록에 남겼어요. " if first else "오늘 이 종목은 이미 남긴 의견이 있어서, 채점은 처음 것으로 해요. ")
-                    + f"출발 가격은 지금 이후 첫 체결부터 {judgments.ENTRY_MINUTES}분 평균이고, "
+                    + f"출발 가격은 지금 이후 미국 정규장의 첫 {judgments.ENTRY_MINUTES}분 평균이고, "
                     + f"{rec['as_of']} 뒤 5·20거래일 종가에 S&P 500 대비로 채점돼요."}
 
 
-# ── 판단 기록의 출발 가격: 판단 뒤 첫 체결부터 30분 평균 (judgments 맨 위 '바꾼 것 2026-10-15') ──
+# ── 판단 기록의 출발 가격: 판단 뒤 미국 정규장 첫 30분 평균 (judgments 맨 위 '바꾼 것 2026-10-15', '2026-10-19') ──
 ENTRIES_PATH = judge_log.root / "entries" / "entries.jsonl"   # 두 PC 가 같이 쓰도록 레포에. 하위 폴더: 주 기록(*.jsonl)과 안 섞이게
 _entries_lock = threading.Lock()
 ENTRY_MAX_PAGES = 60                                      # 1분봉 60페이지 = 12,000분 ≈ 장이 열린 날 열흘쯤. 이보다 오래되면 분봉이 없다
 
 
 def read_entries() -> dict[tuple[str, str], dict]:
-    """{(종목, 판단 시각): 출발 가격}. 같은 키가 두 번 적혔으면 먼저 적은 것."""
+    """{(종목, 판단 시각): 출발 가격}. 같은 키가 두 번 적혔으면 먼저 적은 것.
+    지금 규칙(judgments.ENTRY_RULE)으로 적은 줄만 읽는다 — 옛 규칙('첫 체결부터 30분')으로 적은 줄은 파일에 남겨 두되 쓰지 않는다."""
     out: dict = {}
     if ENTRIES_PATH.exists():
         for line in ENTRIES_PATH.read_text(encoding="utf-8").splitlines():
@@ -1130,13 +1131,16 @@ def read_entries() -> dict[tuple[str, str], dict]:
                 e = json.loads(line)
             except ValueError:
                 continue
+            if e.get("rule") != judgments.ENTRY_RULE:
+                continue
             out.setdefault((e["symbol"], e["at"]), e)
     return out
 
 
 def fill_entries(now_ts: float | None = None) -> int:
-    """출발 가격이 아직 없는 기록을 채운다. 판단 시각을 덮는 1분봉을 받아 첫 체결부터 30분 평균 (SPY 도 같은 30분부터).
-    30분이 아직 안 지났으면 다음에. 분봉이 이미 지워졌으면 기준일 다음 봉 시가로 대신하고 그렇다고 적는다. 반환: 새로 적은 수."""
+    """출발 가격이 아직 없는 기록을 채운다. 판단 시각을 덮는 1분봉을 받아 판단 뒤 정규장 첫 30분 평균 (SPY 도 같은 30분).
+    그 구간이 아직 안 끝났으면 다음에 (끝날 시각 전에는 분봉을 받지도 않는다). 분봉이 이미 지워졌으면 기준일 다음 봉 시가로 대신하고
+    그렇다고 적는다. 반환: 새로 적은 수."""
     if not get_settings().toss_enabled:
         return 0
     now_ts = now_ts or time.time()
@@ -1145,7 +1149,7 @@ def fill_entries(now_ts: float | None = None) -> int:
         todo: dict[str, dict[str, dict]] = {}
         for r in judge_log.read() + read_asked():
             key = judgments.entry_key(r) if judgments.needs_entry(r) else None
-            if key and key not in have and now_ts - datetime.fromisoformat(key[1]).timestamp() >= judgments.ENTRY_MINUTES * 60:
+            if key and key not in have and now_ts >= judgments.entry_ready_at(datetime.fromisoformat(key[1]).timestamp()):
                 todo.setdefault(r["symbol"], {})[key[1]] = r
         added = 0
         for symbol, by_at in todo.items():
@@ -1174,13 +1178,14 @@ def fill_entries(now_ts: float | None = None) -> int:
                     continue
                 ENTRIES_PATH.parent.mkdir(parents=True, exist_ok=True)
                 with ENTRIES_PATH.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({"symbol": symbol, "at": at, "minutes": judgments.ENTRY_MINUTES, **entry}, ensure_ascii=False) + "\n")
+                    f.write(json.dumps({"symbol": symbol, "at": at, "rule": judgments.ENTRY_RULE, "minutes": judgments.ENTRY_MINUTES, **entry},
+                                       ensure_ascii=False) + "\n")
                 added += 1
         return added
 
 
 async def entries_loop():
-    """10분마다 출발 가격을 채운다 (판단 직후 30분이 지나면, 그리고 분봉이 지워지기 전에)."""
+    """10분마다 출발 가격을 채운다 (판단 뒤 정규장 첫 30분이 끝나면, 그리고 분봉이 지워지기 전에)."""
     while True:
         try:
             n = await asyncio.to_thread(fill_entries)

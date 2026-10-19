@@ -60,6 +60,16 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
 - '전부 강함으로 찍기' 기준선을 모델이 방향을 고른 기록(중립 제외)에서도 같이 낸다. 모델은 어려운 종목을 중립으로 피할 수 있는데
   기존 기준선은 중립까지 포함한 전체에서 세서 모델에 유리했다. 기존 값도 그대로 둔다.
 
+바꾼 것 (2026-10-19, W43 을 적은 날. 아직 채점은 하나도 안 나왔다 — W42 의 5거래일 첫 채점은 한국 10/21 아침)
+- 출발 가격: '판단 뒤 첫 체결부터 30분 평균' → '판단 뒤 미국 정규장(09:30~16:00 동부 시간)의 첫 30분 평균, 정규장 1분봉만'.
+  판단이 정규장 밖이면(월요일 아침 판단은 늘 그렇다) 다음 정규장 09:30~10:00, 정규장 안이면 판단 바로 뒤부터 30분(16:00 넘으면 거기까지).
+  이유: W43 을 적어 보니 판단 직후는 한국 낮 주간거래라 거래가 너무 얇았다 — 30분 동안 체결이 있던 1분이 종목 중앙값 17개, 적은 종목은 1개.
+  체결 한두 건이 출발 가격이 되면 그 튐이 채점에 들어간다. 정규장 첫 30분은 거래가 가장 많은 때다.
+  주말·밤사이 소식은 정규장 시가에 반영되므로 '이미 난 갭을 점수로 주지 않는다'는 10-15 의 취지는 그대로다.
+- entries.jsonl 의 옛 규칙(첫 체결부터 30분)으로 적은 출발 가격은 지우지 않고 남겨 두되 읽지 않는다 (rule 칸이 없는 줄).
+  W43 과 질문 탭 의견의 출발 가격은 새 규칙으로 다시 받는다.
+- 분봉을 놓쳤을 때의 대신 쓰기(기준일 다음 일봉 시가)는 그대로다. 토스 일봉 시가는 장통합이라 정규장 시가와 다를 수 있어 표시해 둔다.
+
 이 기록은 추천이 아니다. 채점이 쌓이기 전의 판단은 근거 없는 의견과 같다.
 """
 from __future__ import annotations
@@ -93,7 +103,7 @@ BENCH2 = "QQQ"       # 나스닥 100 ETF. 판단의 질문은 SPY 대비로 통�
 PREMIUM = """ACLS AI ALAB APP BB BBAI BTBT CCJ CHPT COHR COIN CRSP DDOG DELL GTLB LSCC MRNA MRVL MU NET PLUG QBTS RBLX RDW RIOT RIVN SOFI
 TTD VRT VST""".split()
 HORIZONS, PRIMARY, BENCH = (5, 20), 20, "SPY"
-ENTRY_FROM, ENTRY_MINUTES = "2026-W43", 30      # 이 주부터 출발 가격 = 판단 뒤 첫 체결부터 30분 평균 (질문 탭 의견은 전부)
+ENTRY_FROM, ENTRY_MINUTES = "2026-W43", 30      # 이 주부터 출발 가격 = 판단 뒤 미국 정규장 첫 30분 평균 (질문 탭 의견은 전부)
 NEWS_DAYS, NEWS_MAX, NEWS_SAME = 7, 30, 0.85    # W43 부터 기사: 판단 전 7일, 최대 30건, 제목이 85% 넘게 같으면 하나만
 ARMS_FROM = "2026-W43"
 ARMS_OLD = ("news", "nonews")                  # W42: 가격 + 기사 12건 / 가격만
@@ -321,7 +331,7 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
     return out
 
 
-# ── 출발 가격: 판단 뒤 첫 체결부터 30분 평균 ──
+# ── 출발 가격: 판단 뒤 미국 정규장의 첫 30분 평균 (2026-10-19 에 '첫 체결부터 30분'에서 바꿈) ──
 def needs_entry(r: dict) -> bool:
     """출발 가격을 따로 받아야 하는 기록인가 (W43 부터의 주간 판단, 질문 탭 의견)."""
     return r.get("arm") == ASKED_ARM or r["week"] >= ENTRY_FROM
@@ -332,14 +342,43 @@ def entry_key(r: dict) -> tuple[str, str]:
     return r["symbol"], r.get("made_at") or r["asked_at"]
 
 
+ENTRY_RULE = "regular30"     # 2026-10-19 부터의 출발 가격 규칙 (entries 의 rule 칸). 이 값이 아닌 옛 출발 가격은 읽지 않는다
+
+
+def _regular(ts: float) -> bool:
+    """미국 정규장(평일 09:30~16:00 동부 시간) 안의 1분봉인가. 휴장일은 봉이 없어서 저절로 빠진다."""
+    t = datetime.fromtimestamp(ts, ET)
+    return t.weekday() < 5 and (9, 30) <= (t.hour, t.minute) < (16, 0)
+
+
+def entry_ready_at(after_ts: float, span: int = ENTRY_MINUTES) -> float:
+    """출발 가격 구간이 가장 빨리 끝나는 시각 (휴장일은 모른다). 그 전에는 분봉을 받아 볼 필요가 없다."""
+    t = datetime.fromtimestamp(after_ts, ET)
+    if _regular(after_ts):
+        return min(after_ts + span * 60, t.replace(hour=16, minute=0, second=0, microsecond=0).timestamp())
+    day = t if (t.weekday() < 5 and (t.hour, t.minute) < (9, 30)) else t + timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return day.replace(hour=9, minute=30, second=0, microsecond=0).timestamp() + span * 60
+
+
 def entry_from_minutes(minutes: list[dict], after_ts: float, now_ts: float, span: int = ENTRY_MINUTES) -> dict | None:
-    """minutes = 1분봉 (time = 봉 시작 유닉스 초). after_ts 뒤에 시작한 첫 봉부터 span 분 동안의 종가 평균.
-    그 30분이 아직 안 끝났거나 after_ts 뒤 체결이 없으면 None."""
-    first = next((m for m in minutes if m["time"] >= after_ts), None)
-    if first is None or now_ts < first["time"] + span * 60:
+    """출발 가격: 판단 뒤 미국 정규장의 첫 span 분 동안 1분봉 종가 평균 (정규장 1분봉만).
+    판단이 정규장 밖이면 다음 정규장 09:30 부터, 정규장 안이면 판단 바로 뒤 봉부터. 끝은 시작 + span 분과 그날 16:00 중 이른 쪽.
+    minutes 의 time = 봉 시작 유닉스 초. 그 구간이 아직 안 끝났거나 판단 뒤 정규장 체결이 없으면 None."""
+    first = next((m for m in minutes if m["time"] >= after_ts and _regular(m["time"])), None)
+    if first is None:
         return None
-    t0, end = first["time"], first["time"] + span * 60
-    window = [m["close"] for m in minutes if t0 <= m["time"] < end]
+    day = datetime.fromtimestamp(first["time"], ET)
+    open_ts = day.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
+    close_ts = day.replace(hour=16, minute=0, second=0, microsecond=0).timestamp()
+    t0 = open_ts if after_ts < open_ts else first["time"]
+    end = min(t0 + span * 60, close_ts)
+    if now_ts < end:
+        return None
+    window = [m["close"] for m in minutes if t0 <= m["time"] < end and _regular(m["time"])]
+    if not window:
+        return None
     return {"t0": t0, "price": round(sum(window) / len(window), 4), "bars": len(window)}
 
 
@@ -349,7 +388,8 @@ def entry_fallback(candles: list[dict], bench: list[dict], as_of: str) -> dict |
     s, b = nxt(candles), nxt(bench)
     if not s or not b:
         return None
-    return {"price": s["open"], "bench_price": b["open"], "bars": 0, "bench_bars": 0, "fallback": f"{s['time']} 시가 (분봉 없음)"}
+    return {"price": s["open"], "bench_price": b["open"], "bars": 0, "bench_bars": 0,
+            "fallback": f"{s['time']} 일봉 시가 (분봉 없음 · 장통합 시가라 정규장 시가와 다를 수 있음)"}
 
 
 # ── 채점 (저장하지 않는다: 읽을 때마다 지금 시세로 계산) ──

@@ -1822,7 +1822,7 @@ async function loadReading(make = false) {
 const ARM_NAMES = { news: "숫자 + 기사 (W42)", nonews: "숫자만", fund: "숫자 + 펀더멘탈", fund_news: "숫자 + 펀더멘탈 + 기사",
   news_r: "숫자 + 기사 (다시 물음)", nonews_r: "숫자만 (다시 물음)", fund_news_r: "숫자 + 펀더멘탈 + 기사 (다시 물음)", asked: "질문 종합 검토" };
 const VIEW_NAMES = { strong: "강함", neutral: "중립", weak: "약함" };
-const DIR_NAMES = { outperform: "시장보다 강함", neutral: "판단 안 함", underperform: "시장보다 약함" };
+const DIR_NAMES = { outperform: "시장보다 강함", neutral: "중립 (시장과 비슷)", underperform: "시장보다 약함" };   // 중립은 맞음·틀림을 세지 않는다
 let judgePoll = null;
 
 async function loadJudgments() {
@@ -1867,10 +1867,10 @@ function renderJudgments() {
   // 성적표: 주된 판정은 20거래일·고정 100종목
   const pc = (v) => (v == null ? "–" : `${v.toFixed(1)}%`);
   const sg = (v) => (v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%p`);
-  // 출발 가격: W43 부터와 질문 탭 의견은 '판단 뒤 첫 체결부터 30분 평균', W42 는 기록된 그 시각 가격
+  // 출발 가격: W43 부터와 질문 탭 의견은 '판단 뒤 미국 정규장 첫 30분 평균'(한국 시간으로 표시), W42 는 기록된 그 시각 가격
   const start = (r) => !r.entry_rule ? `기준 ${r.as_of} ${fmt(r.price)}`
-    : r.entry ? `출발 ${fmt(r.entry.price)} (${r.entry.t0 ? `${r.entry.t0.slice(5, 16).replace("T", " ")}부터 30분 평균` : r.entry.fallback})`
-    : "출발 가격 대기 (판단 뒤 첫 체결부터 30분 평균)";
+    : r.entry ? `출발 ${fmt(r.entry.price)} (${r.entry.t0 ? `한국 ${r.entry.t0.slice(5, 16).replace("T", " ")}부터 정규장 30분 평균` : r.entry.fallback})`
+    : "출발 가격 대기 (판단 뒤 미국 정규장 첫 30분 평균)";
   const table = (rows, caption) => {
     if (!rows.length) return [];
     const body = rows.map((r) => el("tr", { class: r.primary ? "primary" : "" },
