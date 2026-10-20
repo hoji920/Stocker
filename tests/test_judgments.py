@@ -370,3 +370,54 @@ def test_bridge_uses_the_app_key_and_a_failure_skips_only_that_call(monkeypatch)
     assert [(r["model"], r.get("bridge")) for r in recs] == [("mini", None)]          # 보조 실험이 실패해도 본 실험은 적힌다
     with pytest.raises(RuntimeError):                                                    # 본 실험(PREMIUM 의 big)이 실패하면 그대로 에러
         j.make_records(s, "2026-W44", j.PREMIUM[0], "x", False, candles, candles, [], [("big", "nonews")], now=now)
+
+
+def test_kospi_joins_from_w44_with_the_same_model_setup_as_the_us():
+    import random
+    assert sorted(j.KR_PREMIUM) == sorted(random.Random(20261020).sample(sorted(j.KR_UNIVERSE), 30))
+    assert len(j.KR_UNIVERSE) == len(set(j.KR_UNIVERSE)) == 100 and j.kr_symbols_for("2026-W43") == []
+    models, prem, other = ("mini", "big"), j.KR_PREMIUM[0], next(x for x in j.KR_UNIVERSE if x not in j.KR_PREMIUM)
+    assert j.combos_for(prem, models, "2026-W44") == [("mini", "nonews"), ("mini", "fund"), ("mini", "fund_news"),
+                                                      ("big", "nonews"), ("big", "fund"), ("big", "fund_news"),
+                                                      ("mini", "nonews_r"), ("mini", "fund_news_r")]
+    assert j.models_for(other, models, "2026-W44") == ("mini", "big") and j.is_bridge(other, "big", models, "2026-W44")
+    assert j.models_for(other, models, "2027-W01") == ("mini",)
+    assert (j.market_of("005930"), j.bench_of("005930"), j.bench_of("AAPL")) == ("KR", "069500", "SPY")
+    assert "KODEX 200" in j._SYSTEM_KR and "SPY" not in j._SYSTEM_KR and j.system_for("AAPL") == j._SYSTEM
+
+
+def test_kospi_bars_finish_at_the_krx_close():
+    bars = [{"time": d, "close": 1.0} for d in ("2026-10-23", "2026-10-26")]
+    monday_morning = datetime(2026, 10, 26, 8, 30, tzinfo=j.KST)
+    assert [b["time"] for b in j.completed(bars, monday_morning, "KR")] == ["2026-10-23"]
+    assert [b["time"] for b in j.completed(bars, datetime(2026, 10, 26, 15, 45, tzinfo=j.KST), "KR")] == ["2026-10-23", "2026-10-26"]
+
+
+def test_kospi_entry_is_the_first_30_minutes_of_the_krx_session_without_nextrade_bars():
+    at = datetime(2026, 10, 26, 7, 0, tzinfo=j.KST).timestamp()                  # 월요일 아침 판단
+    open_ts = datetime(2026, 10, 26, 9, 0, tzinfo=j.KST).timestamp()
+    assert j.entry_ready_at(at, market="KR") == open_ts + 30 * 60
+    nxt = [{"time": open_ts - 3600 + 60 * k, "close": 999.0} for k in range(60)]  # 넥스트레이드 08:00~09:00
+    krx = [{"time": open_ts + 60 * k, "close": 100.0 + k} for k in range(40)]
+    e = j.entry_from_minutes(nxt + krx, at, open_ts + 31 * 60, market="KR")
+    assert e == {"t0": open_ts, "price": round(sum(100.0 + k for k in range(30)) / 30, 4), "bars": 30}
+    assert j.entry_from_minutes(nxt + krx, at, open_ts + 20 * 60, market="KR") is None      # 30분이 아직 안 끝났다
+
+
+def test_kospi_records_use_kodex_200(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(j, "judge", lambda s, model, prompt, system=j._SYSTEM: seen.update(system=system, prompt=prompt) or
+                        {"d5": "neutral", "c5": 50, "d20": "outperform", "c20": 60, "reason": "", "invalid_if": "", "tokens": 1})
+    days = pd.bdate_range(end="2026-10-23", periods=300).strftime("%Y-%m-%d")
+    candles = [{"time": d, "open": 100, "high": 101, "low": 99, "close": 100.0 + i, "volume": 10.0} for i, d in enumerate(days)]
+    s = replace(get_settings(), openai_judge_models=("mini", "big"))
+    rec = j.make_records(s, "2026-W44", "005930", "삼성전자", False, candles, candles, [], [("mini", "nonews")],
+                         now=datetime(2026, 10, 26, 8, 30, tzinfo=j.KST))[0]
+    assert seen["system"] == j._SYSTEM_KR and "kodex200_return_pct" in seen["prompt"] and "spy_return_pct" not in seen["prompt"]
+    assert (rec["market"], rec["bench_symbol"], rec["kr"], rec["fixed"], rec["system_sha"]) == ("KR", "069500", True, False, j.sha(j._SYSTEM_KR))
+    # 채점은 KODEX 200 과 비교한다
+    stock = _candles([100] * 10 + [100 + i for i in range(1, 21)] + [130] * 5)
+    kodex = _candles([100] * 10 + [100 + i * 0.5 for i in range(1, 21)] + [110] * 5)
+    r = _rec("005930", d20="outperform", bench_symbol="069500", market="KR")
+    x = j.score([r], {"005930": stock, "069500": kodex, "SPY": _candles([100] * 35)}.__getitem__)[0]["scored"][20]
+    assert (x["ret"], x["bench"], x["excess"]) == (20.0, 10.0, 10.0)

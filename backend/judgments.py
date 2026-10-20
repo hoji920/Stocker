@@ -89,6 +89,20 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
     gpt-5.5 − mini 차이의 95% 신뢰구간이 0 보다 위면 → 2027-W01 부터 gpt-5.5 전 종목을 새 본 실험(B)으로 시작하고 따로 분석한다.
     그렇지 않으면(차이가 없거나 판정 불가) → 본 실험을 그대로 이어간다.
     어느 쪽이든 지금까지의 본 실험 기록·기준은 바꾸지 않는다. 새로 시작하는 실험은 그 주부터의 기록만 쓴다.
+- 코스피 (W44 부터, 미국과 따로 집계): 같은 날 다른 시장에서도 같은 결과가 나오는지 본다 (1년 = 한 국면이라는 한계를 줄이려고).
+  - 종목: KR_UNIVERSE 100개 = 2026-10-19 종가 기준 코스피 보통주 시가총액 상위 100 (research/kr_universe.py, 결과 research/results/kr_universe.md).
+    코스피 100 공식 구성은 자동으로 받기 어려워 같은 취지의 객관적 규칙으로 대신했다. 고정, 순위가 바뀌어도 따라가지 않는다. 내 종목은 넣지 않는다.
+  - 질문: 미국과 같은 구조로 '5·20거래일 동안 KODEX 200(069500, 코스피 200 ETF)보다 더 오를지'. 지시문은 SPY 를 KODEX 200 으로 바꾼 것뿐.
+  - 모델·조건·반복·보조 실험은 미국과 똑같이: 첫 번째 모델 전 종목, 두 번째 모델은 KR_PREMIUM 30종목
+    (random.Random(20261020).sample(sorted(KR_UNIVERSE), 30)), W44~W52 는 두 번째 모델도 전 종목(bridge). 조건 3개, KR_PREMIUM 반복 판단.
+  - 시세: 토스 국내 일봉 종가는 넥스트레이드 저녁 거래(~20:00)까지 포함한 마감가라 KRX 종가와 다르다 (삼성전자·하이닉스에서 확인).
+    그래서 판단용 숫자·끝 가격·베타는 야후 일봉(.KS = KRX 정규장 종가)으로, 출발 가격은 토스 1분봉의 KRX 정규장(09:00~15:30) 첫 30분 평균.
+    KODEX 200 은 넥스트레이드에서 거래되지 않아 토스·야후 값이 같다.
+  - 기사: 네이버 국내 기사만 (판단 전 7일, 최대 30건, 미국과 같은 규칙). 펀더멘탈: 야후 (.KS), 못 받으면 없이 판단하고 표시.
+  - 채점·주된 판정·베타 반영은 미국과 같다 (비교 대상만 KODEX 200). 성적표는 미국과 섞지 않는다.
+- 펀더멘탈 금액 단위 고침 (W44 부터 입력에 반영): company.fundamentals 가 큰 금액에 통화와 상관없이 '달러'를 붙였다.
+  야후가 준 통화대로 고쳤다 (원 → '원', 그 밖의 통화는 통화 코드). 미국 종목 중 다른 통화로 재무제표를 내는 회사
+  (예: 유로·위안으로 보고하는 회사)는 W43 까지 현금·부채 금액에 '달러'가 잘못 붙어 모델에 들어갔다. 숫자 자체는 그대로다.
 
 이 기록은 추천이 아니다. 채점이 쌓이기 전의 판단은 근거 없는 의견과 같다.
 """
@@ -128,6 +142,19 @@ ENTRY_FROM, ENTRY_MINUTES = "2026-W43", 30      # 이 주부터 출발 가격 = 
 NEWS_DAYS, NEWS_MAX, NEWS_SAME = 7, 30, 0.85    # W43 부터 기사: 판단 전 7일, 최대 30건, 제목이 85% 넘게 같으면 하나만
 ARMS_FROM = "2026-W43"
 BRIDGE_FROM, BRIDGE_UNTIL = "2026-W44", "2026-W52"   # 보조 실험 '모델 비교': 이 주들엔 두 번째 모델도 고정 종목 전부
+# 코스피 (W44 부터). 2026-10-19 종가 기준 코스피 보통주 시가총액 상위 100 (research/kr_universe.py). 고정
+KR_FROM, KR_BENCH = "2026-W44", "069500"       # KODEX 200
+KR_UNIVERSE = """005930 000660 402340 373220 009150 005380 207940 105560 032830 006400 012450 028260 068270 000270 055550 034020 329180
+086790 034730 012330 035420 066570 096770 000810 005490 010120 316140 011200 138040 010130 042700 033780 042660 051910 009540 267260 015760
+298040 010950 003670 017670 024110 010140 003550 018260 272210 000150 006800 086280 035720 079550 030200 267250 278470 005830 047810 064350
+000720 047050 011070 003490 307950 323410 443060 003230 259960 005940 028050 071050 078930 180640 352820 090430 161390 021240 009830 000500
+006260 007660 016360 064400 032640 353200 000100 047040 039490 326030 062040 000880 175330 377300 128940 011790 029780 241560 036570 001440
+000990 138930 267270""".split()
+# random.Random(20261020).sample(sorted(KR_UNIVERSE), 30)
+KR_PREMIUM = """000660 000810 000880 000990 003230 003490 005380 005940 006260 006400 010120 010130 010140 011200 012450 024110 028050 042660
+047810 062040 064400 068270 078930 090430 267250 278470 352820 353200 373220 443060""".split()
+# 시장별 정규장: (시간대, 개장, 마감, 종가가 확정됐다고 볼 시각)
+SESSIONS = {"US": ("America/New_York", (9, 30), (16, 0), (16, 10)), "KR": ("Asia/Seoul", (9, 0), (15, 30), (15, 40))}
 ARMS_OLD = ("news", "nonews")                  # W42: 가격 + 기사 12건 / 가격만
 ARMS = ("nonews", "fund", "fund_news")         # W43 부터: 가격만 / + 펀더멘탈 / + 펀더멘탈 + 기사
 ALL_ARMS = ARMS_OLD[:1] + ARMS                 # 성적표에 나오는 조건 전부
@@ -136,6 +163,22 @@ USES_NEWS, USES_FUND = ("news", "fund_news"), ("fund", "fund_news")
 REPEATS = {"news_r": "news", "nonews_r": "nonews", "fund_news_r": "fund_news"}     # 반복 조건 → 원래 조건 (같은 입력)
 REPEAT_ARMS = ("nonews_r", "fund_news_r")      # W43 부터 반복하는 조건: 양 끝만
 REPEAT_FROM = "2026-W43"
+
+
+def market_of(symbol: str) -> str:
+    return "KR" if len(symbol) == 6 and symbol.isdigit() else "US"
+
+
+def bench_of(symbol: str) -> str:
+    return KR_BENCH if market_of(symbol) == "KR" else BENCH
+
+
+def kr_symbols_for(week: str) -> list[str]:
+    return list(KR_UNIVERSE) if week >= KR_FROM else []
+
+
+def _premium(symbol: str) -> bool:
+    return symbol in PREMIUM or symbol in KR_PREMIUM
 
 
 def arms_for(week: str) -> tuple[str, ...]:
@@ -155,6 +198,13 @@ _SYSTEM = (
 )
 
 
+_SYSTEM_KR = _SYSTEM.replace("S&P 500(SPY)", "코스피 200(KODEX 200 ETF)").replace("SPY", "KODEX 200")
+
+
+def system_for(symbol: str) -> str:
+    return _SYSTEM_KR if market_of(symbol) == "KR" else _SYSTEM
+
+
 def symbols_for(week: str) -> list[str]:
     """그 주에 판단할 고정 종목 (내 종목은 따로 더한다). 겹치는 종목은 한 번만."""
     return list(dict.fromkeys(UNIVERSE + (NDX if week >= NDX_FROM else [])))
@@ -166,19 +216,20 @@ def in_bridge(week: str | None) -> bool:
 
 def is_bridge(symbol: str, model: str, models: tuple[str, ...], week: str) -> bool:
     """보조 실험(모델 비교)으로만 적는 판단인가: 두 번째 이후 모델이 PREMIUM 밖 고정 종목을 판단할 때."""
-    return in_bridge(week) and bool(models) and model != models[0] and symbol not in PREMIUM and symbol in symbols_for(week)
+    fixed = symbol in symbols_for(week) or symbol in kr_symbols_for(week)
+    return in_bridge(week) and bool(models) and model != models[0] and not _premium(symbol) and fixed
 
 
 def models_for(symbol: str, models: tuple[str, ...], week: str | None = None) -> tuple[str, ...]:
     """이 종목을 판단할 모델들: 첫 번째 모델은 전 종목, 나머지는 PREMIUM 종목만 (보조 실험 주에는 고정 종목 전부)."""
-    wide = in_bridge(week) and symbol in symbols_for(week)
-    return tuple(m for i, m in enumerate(models) if i == 0 or symbol in PREMIUM or wide)
+    wide = in_bridge(week) and (symbol in symbols_for(week) or symbol in kr_symbols_for(week))
+    return tuple(m for i, m in enumerate(models) if i == 0 or _premium(symbol) or wide)
 
 
 def combos_for(symbol: str, models: tuple[str, ...], week: str) -> list[tuple[str, str]]:
     """이 종목에 대해 그 주에 적을 (모델, 조건) 전부. 반복 판단은 PREMIUM 종목을 첫 번째 모델로만."""
     out = [(m, a) for m in models_for(symbol, models, week) for a in arms_for(week)]
-    if models and symbol in PREMIUM and week >= REPEAT_FROM:
+    if models and _premium(symbol) and week >= REPEAT_FROM:
         out += [(models[0], r) for r in REPEAT_ARMS]
     return out
 
@@ -196,11 +247,12 @@ def is_due(now: datetime | None = None) -> bool:
     return now >= monday + timedelta(hours=6)
 
 
-def completed(candles: list[dict], now: datetime | None = None) -> list[dict]:
-    """끝난 미국 정규장 봉까지만. 언제 판단을 남기든 기준 가격이 '마지막으로 끝난 장의 종가'가 되게 한다.
-    뺄 것: 미국 날짜로 내일 이후의 봉(한국 낮의 주간거래가 만든 봉), 오늘 봉인데 정규장이 아직 안 끝난 것(16:10 전)."""
-    now = (now or datetime.now(ET)).astimezone(ET)
-    today, closed = now.date().isoformat(), (now.hour, now.minute) >= (16, 10)
+def completed(candles: list[dict], now: datetime | None = None, market: str = "US") -> list[dict]:
+    """끝난 정규장 봉까지만. 언제 판단을 남기든 기준 가격이 '마지막으로 끝난 장의 종가'가 되게 한다.
+    뺄 것: 그 시장 날짜로 내일 이후의 봉(한국 낮의 주간거래가 만든 봉), 오늘 봉인데 정규장이 아직 안 끝난 것(미국 16:10, 한국 15:40 전)."""
+    tz, _, _, done = SESSIONS[market]
+    now = (now or datetime.now(ET)).astimezone(ZoneInfo(tz))
+    today, closed = now.date().isoformat(), (now.hour, now.minute) >= done
     out = list(candles)
     while out and (out[-1]["time"] > today or (out[-1]["time"] == today and not closed)):
         out.pop()
@@ -211,7 +263,7 @@ def sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
-def features(candles: list[dict], bench: list[dict]) -> dict:
+def features(candles: list[dict], bench: list[dict], bench_key: str = "spy_return_pct") -> dict:
     """모델에 줄 숫자 (전부 마지막 봉까지의 데이터로). 차트의 선·패턴은 넣지 않는다 (검증에서 정보가 없었다)."""
     df = analysis.to_frame(candles)
     c, n = df["close"], len(df)
@@ -222,7 +274,7 @@ def features(candles: list[dict], bench: list[dict]) -> dict:
     b = analysis.to_frame(bench)["close"]
     return {
         "return_pct": {f"{h}d": ret(c, h) for h in (5, 20, 60, 120)},
-        "spy_return_pct": {f"{h}d": ret(b, h) for h in (5, 20, 60)},
+        bench_key: {f"{h}d": ret(b, h) for h in (5, 20, 60)},
         "vs_sma_pct": {f"sma{k}": vs(k) for k in (20, 60, 200)},
         "rsi14": round(float(analysis.rsi(c).iloc[-1]), 0),
         "atr_pct": round(float(analysis.atr(df).iloc[-1]) / last * 100, 1),
@@ -272,13 +324,13 @@ def build_prompt(symbol: str, name: str, as_of: str, feats: dict, items: list[di
     return text
 
 
-def judge(settings: Settings, model: str, prompt: str) -> dict:
+def judge(settings: Settings, model: str, prompt: str, system: str = _SYSTEM) -> dict:
     """LLM 한 번 호출 → {d5, c5, d20, c20, reason, invalid_if, tokens}. 형식이 어긋나면 ValueError (기록하지 않는다)."""
     from openai import OpenAI
     params = llm_args(model, 0.2)
     resp = OpenAI(api_key=settings.openai_api_key).chat.completions.create(
         model=model, response_format={"type": "json_object"}, **params,
-        messages=[{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}])
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}])
     data = json.loads(resp.choices[0].message.content or "{}")
     out = {}
     for h in HORIZONS:
@@ -340,10 +392,14 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
                  save_input=None, bench2: list[dict] | None = None, fund: dict | None = None) -> list[dict]:
     """한 종목에 대해 아직 안 적은 (모델, 조건)들을 판단한다. 조건이 달라도 숫자·기준일·가격은 같다.
     candles·bench 는 끝난 봉까지만(completed) 쓴다. save_input(entry) 로 모델에 준 입력 원문을 남긴다. bench2 = QQQ (가격만 적어 둔다)."""
-    candles, bench = completed(candles, now), completed(bench, now)
-    feats, as_of = features(candles, bench), candles[-1]["time"]
+    market = market_of(symbol)
+    candles, bench = completed(candles, now, market), completed(bench, now, market)
+    feats = features(candles, bench, "kodex200_return_pct" if market == "KR" else "spy_return_pct")
+    as_of, system = candles[-1]["time"], system_for(symbol)
     base = {"week": week, "symbol": symbol, "name": name, "mine": mine, "fixed": symbol in UNIVERSE, "ndx": symbol in NDX, "as_of": as_of,
             "price": candles[-1]["close"], "bench_as_of": bench[-1]["time"], "bench_price": bench[-1]["close"]}
+    if market == "KR":
+        base.update(market="KR", kr=symbol in KR_UNIVERSE, bench_symbol=KR_BENCH)
     if bench2 and (q := completed(bench2, now)):
         base.update(qqq_as_of=q[-1]["time"], qqq_price=q[-1]["close"])
     kind = lambda arm: REPEATS.get(arm, arm)                  # 반복 판단은 원래 조건과 같은 입력을 받는다
@@ -359,7 +415,7 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
     for model, arm in todo:
         bridge = is_bridge(symbol, model, models, week)
         try:
-            result = judge(settings if bridge else main_settings, model, prompts[kind(arm)])
+            result = judge(settings if bridge else main_settings, model, prompts[kind(arm)], **({"system": system} if market == "KR" else {}))
         except Exception as error:
             if not bridge:
                 raise
@@ -369,7 +425,7 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
             result = {**result, "bridge": True}
         out.append({**base, "model": model, "arm": arm, "news_count": len(items[:NEWS_MAX]) if kind(arm) in USES_NEWS else 0,
                     "fundamentals": bool(fund) and kind(arm) in USES_FUND,
-                    "prompt_sha": sha(prompts[kind(arm)]), "system_sha": sha(_SYSTEM),
+                    "prompt_sha": sha(prompts[kind(arm)]), "system_sha": sha(system),
                     "made_at": (now or datetime.now(KST)).isoformat(timespec="seconds"), **result})
     return out
 
@@ -388,38 +444,42 @@ def entry_key(r: dict) -> tuple[str, str]:
 ENTRY_RULE = "regular30"     # 2026-10-19 부터의 출발 가격 규칙 (entries 의 rule 칸). 이 값이 아닌 옛 출발 가격은 읽지 않는다
 
 
-def _regular(ts: float) -> bool:
-    """미국 정규장(평일 09:30~16:00 동부 시간) 안의 1분봉인가. 휴장일은 봉이 없어서 저절로 빠진다."""
-    t = datetime.fromtimestamp(ts, ET)
-    return t.weekday() < 5 and (9, 30) <= (t.hour, t.minute) < (16, 0)
+def _regular(ts: float, market: str = "US") -> bool:
+    """정규장(미국 평일 09:30~16:00 동부 시간, 한국 평일 09:00~15:30) 안의 1분봉인가. 휴장일은 봉이 없어서 저절로 빠진다.
+    한국은 넥스트레이드(08:00~ / ~20:00) 시간의 봉을 뺀다."""
+    tz, op, cl, _ = SESSIONS[market]
+    t = datetime.fromtimestamp(ts, ZoneInfo(tz))
+    return t.weekday() < 5 and op <= (t.hour, t.minute) < cl
 
 
-def entry_ready_at(after_ts: float, span: int = ENTRY_MINUTES) -> float:
+def entry_ready_at(after_ts: float, span: int = ENTRY_MINUTES, market: str = "US") -> float:
     """출발 가격 구간이 가장 빨리 끝나는 시각 (휴장일은 모른다). 그 전에는 분봉을 받아 볼 필요가 없다."""
-    t = datetime.fromtimestamp(after_ts, ET)
-    if _regular(after_ts):
-        return min(after_ts + span * 60, t.replace(hour=16, minute=0, second=0, microsecond=0).timestamp())
-    day = t if (t.weekday() < 5 and (t.hour, t.minute) < (9, 30)) else t + timedelta(days=1)
+    tz, (oh, om), (ch, cm), _ = SESSIONS[market]
+    t = datetime.fromtimestamp(after_ts, ZoneInfo(tz))
+    if _regular(after_ts, market):
+        return min(after_ts + span * 60, t.replace(hour=ch, minute=cm, second=0, microsecond=0).timestamp())
+    day = t if (t.weekday() < 5 and (t.hour, t.minute) < (oh, om)) else t + timedelta(days=1)
     while day.weekday() >= 5:
         day += timedelta(days=1)
-    return day.replace(hour=9, minute=30, second=0, microsecond=0).timestamp() + span * 60
+    return day.replace(hour=oh, minute=om, second=0, microsecond=0).timestamp() + span * 60
 
 
-def entry_from_minutes(minutes: list[dict], after_ts: float, now_ts: float, span: int = ENTRY_MINUTES) -> dict | None:
+def entry_from_minutes(minutes: list[dict], after_ts: float, now_ts: float, span: int = ENTRY_MINUTES, market: str = "US") -> dict | None:
     """출발 가격: 판단 뒤 미국 정규장의 첫 span 분 동안 1분봉 종가 평균 (정규장 1분봉만).
     판단이 정규장 밖이면 다음 정규장 09:30 부터, 정규장 안이면 판단 바로 뒤 봉부터. 끝은 시작 + span 분과 그날 16:00 중 이른 쪽.
     minutes 의 time = 봉 시작 유닉스 초. 그 구간이 아직 안 끝났거나 판단 뒤 정규장 체결이 없으면 None."""
-    first = next((m for m in minutes if m["time"] >= after_ts and _regular(m["time"])), None)
+    tz, (oh, om), (ch, cm), _ = SESSIONS[market]
+    first = next((m for m in minutes if m["time"] >= after_ts and _regular(m["time"], market)), None)
     if first is None:
         return None
-    day = datetime.fromtimestamp(first["time"], ET)
-    open_ts = day.replace(hour=9, minute=30, second=0, microsecond=0).timestamp()
-    close_ts = day.replace(hour=16, minute=0, second=0, microsecond=0).timestamp()
+    day = datetime.fromtimestamp(first["time"], ZoneInfo(tz))
+    open_ts = day.replace(hour=oh, minute=om, second=0, microsecond=0).timestamp()
+    close_ts = day.replace(hour=ch, minute=cm, second=0, microsecond=0).timestamp()
     t0 = open_ts if after_ts < open_ts else first["time"]
     end = min(t0 + span * 60, close_ts)
     if now_ts < end:
         return None
-    window = [m["close"] for m in minutes if t0 <= m["time"] < end and _regular(m["time"])]
+    window = [m["close"] for m in minutes if t0 <= m["time"] < end and _regular(m["time"], market)]
     if not window:
         return None
     return {"t0": t0, "price": round(sum(window) / len(window), 4), "bars": len(window)}
@@ -467,13 +527,13 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
     entries = {(종목, 판단 시각): 출발 가격}. needs_entry 인 기록은 출발 가격이 들어오기 전까지 채점하지 않는다."""
     today = today or datetime.now(ET).date().isoformat()
     due = [_may_be_due(r["as_of"], today) for r in records]
-    symbols = sorted({r["symbol"] for r, d in zip(records, due) if d} | ({BENCH} if any(due) else set()))
+    symbols = sorted({x for r, d in zip(records, due) if d for x in (r["symbol"], r.get("bench_symbol", BENCH))})
 
     def load(symbol: str):
         try:
             cs = candles_of(symbol)
             if cs and str(cs[-1]["time"])[:2] in ("19", "20"):     # 날짜 꼴이면: 끝 가격은 끝난 정규장 봉만 (장중 봉으로 임시 채점하지 않게)
-                cs = completed(cs, now)
+                cs = completed(cs, now, market_of(symbol))
             return [c["time"] for c in cs], [c["close"] for c in cs]
         except Exception:
             return None
@@ -494,7 +554,7 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
                 out.append({**r, "scored": {}, "entry": None, "entry_rule": True})
                 continue
             start, start_bench = entry["price"], entry["bench_price"]
-        scored, s, b = {}, cache.get(r["symbol"]), cache.get(BENCH)
+        scored, s, b = {}, cache.get(r["symbol"]), cache.get(r.get("bench_symbol", BENCH))
         if s and b and r["as_of"] in s[0] and r["bench_as_of"] in b[0]:
             i, j = s[0].index(r["as_of"]), b[0].index(r["bench_as_of"])
             if (key := (r["symbol"], r["as_of"])) not in betas:
@@ -595,9 +655,9 @@ def _beta_cols(calls: list[dict], h: int) -> dict:
             "always_up_calls_mean_excess_beta_pct": mean([xb(r) for r in bc])}
 
 
-def paired(scored: list[dict]) -> list[dict]:
+def paired(scored: list[dict], universe: list[str] | None = None) -> list[dict]:
     """모델끼리 공정하게 비교할 기록만: 고정 종목 중, 같은 (주, 종목, 조건)을 모든 모델이 판단한 것."""
-    scored = in_set(scored, UNIVERSE)
+    scored = in_set(scored, universe or UNIVERSE)
     models = {r["model"] for r in scored}
     seen: dict[tuple, set] = {}
     for r in scored:

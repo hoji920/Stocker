@@ -1163,29 +1163,31 @@ def fill_entries(now_ts: float | None = None) -> int:
         todo: dict[str, dict[str, dict]] = {}
         for r in judge_log.read() + read_asked():
             key = judgments.entry_key(r) if judgments.needs_entry(r) else None
-            if key and key not in have and now_ts >= judgments.entry_ready_at(datetime.fromisoformat(key[1]).timestamp()):
+            if key and key not in have and now_ts >= judgments.entry_ready_at(datetime.fromisoformat(key[1]).timestamp(),
+                                                                                market=judgments.market_of(r["symbol"])):
                 todo.setdefault(r["symbol"], {})[key[1]] = r
         added = 0
         for symbol, by_at in todo.items():
             oldest = min(datetime.fromisoformat(a).timestamp() for a in by_at)
             pages = min(ENTRY_MAX_PAGES, int((now_ts - oldest) / 60 / 200) + 3)     # 1분봉 한 페이지 200개, 넉넉히
+            market, bsym = judgments.market_of(symbol), judgments.bench_of(symbol)
             try:
                 mins = toss().minute_candles(symbol, pages)
-                spy = cached(f"entry-spy:{pages}", 300, lambda: toss().minute_candles(judgments.BENCH, pages))
+                spy = cached(f"entry-bench:{bsym}:{pages}", 300, lambda: toss().minute_candles(bsym, pages))
             except Exception as error:
                 print(f"[entries] {symbol}: {type(error).__name__}: {error}")
                 continue
             for at, r in by_at.items():
                 at_ts = datetime.fromisoformat(at).timestamp()
                 if mins and spy and mins[0]["time"] <= at_ts and spy[0]["time"] <= at_ts:     # 받은 분봉이 판단 시각을 덮는다
-                    e = judgments.entry_from_minutes(mins, at_ts, now_ts)
-                    b = judgments.entry_from_minutes(spy, e["t0"], now_ts) if e else None
+                    e = judgments.entry_from_minutes(mins, at_ts, now_ts, market=market)
+                    b = judgments.entry_from_minutes(spy, e["t0"], now_ts, market=market) if e else None
                     if not e or not b:
                         continue                                   # 30분이 아직 안 끝났다
                     entry = {"price": e["price"], "bars": e["bars"], "bench_price": b["price"], "bench_bars": b["bars"],
                              "t0": datetime.fromtimestamp(e["t0"], judgments.KST).isoformat(timespec="minutes")}
                 elif pages >= ENTRY_MAX_PAGES:                     # 분봉을 놓쳤다 → 기준일 다음 봉 시가
-                    entry = judgments.entry_fallback(load_stock(symbol)[1], load_stock(judgments.BENCH)[1], r["as_of"])
+                    entry = judgments.entry_fallback(judge_candles(symbol), judge_candles(bsym), r["as_of"])
                     if not entry:
                         continue
                 else:
@@ -1217,7 +1219,21 @@ def judge_symbols() -> list[tuple[str, bool]]:
     except Exception:
         held = []
     mine = {s for s in store.watchlist() + held if market_of(s) == "US" and not macro.is_macro(s)}
-    return [(s, s in mine) for s in dict.fromkeys(judgments.symbols_for(judgments.week_key()) + sorted(mine))]
+    week = judgments.week_key()
+    return [(s, s in mine) for s in dict.fromkeys(judgments.symbols_for(week) + sorted(mine) + judgments.kr_symbols_for(week))]
+
+
+def judge_candles(symbol: str) -> list[dict]:
+    """판단·채점용 일봉. 국내는 야후(.KS = KRX 정규장 종가): 토스 국내 일봉 종가는 넥스트레이드 저녁 거래까지 포함한 값이다."""
+    if judgments.market_of(symbol) == "KR":
+        for attempt in range(3):                    # 야후는 한꺼번에 많이 부르면 잠깐 막는다 (Too Many Requests)
+            try:
+                return macro.daily_candles(f"{symbol}.KS", years=2)
+            except RuntimeError:
+                if attempt == 2:
+                    raise
+                time.sleep(20 * (attempt + 1))
+    return load_stock(symbol)[1]
 
 
 def judge_plan() -> list[tuple[str, bool, list[tuple[str, str]]]]:
@@ -1247,11 +1263,15 @@ def judge_run(only: list[str] | None = None) -> dict:
                            started=datetime.now(judgments.KST).isoformat(timespec="seconds"), finished=None)
         _, bench, _ = load_stock(judgments.BENCH)
         _, bench2, _ = load_stock(judgments.BENCH2)
+        kr_bench = judge_candles(judgments.KR_BENCH) if any(judgments.market_of(j[0]) == "KR" for j in jobs) else None
 
         def one(job):
             symbol, mine, todo = job
+            kr = judgments.market_of(symbol) == "KR"
             try:
                 info, candles, _ = load_stock(symbol)
+                if kr:
+                    candles = judge_candles(symbol)
                 if len(candles) < 260:
                     raise ValueError("일봉이 260개보다 적어요")
                 name = info.get("name", symbol)
@@ -1259,17 +1279,17 @@ def judge_run(only: list[str] | None = None) -> dict:
                 kinds = {judgments.REPEATS.get(a, a) for _, a in todo}
                 items = []
                 if kinds & set(judgments.USES_NEWS):
-                    raw = (news._safe(news.fetch_us_news, settings, symbol, limit=200, days=judgments.NEWS_DAYS + 1)
-                           + news._safe(news.fetch_kr_news_about, settings, name, limit=60, days=judgments.NEWS_DAYS + 1))
+                    raw = ([] if kr else news._safe(news.fetch_us_news, settings, symbol, limit=200, days=judgments.NEWS_DAYS + 1)) \
+                        + news._safe(news.fetch_kr_news_about, settings, name, limit=60, days=judgments.NEWS_DAYS + 1)
                     items = judgments.select_news([asdict(it) for it in raw], datetime.now(judgments.KST).date().isoformat())
                 fund = None
                 if kinds & set(judgments.USES_FUND):                       # 펀더멘탈 (W43 부터). 못 받으면 없이 판단하고 기록에 남긴다
                     try:
-                        fund = company.fundamentals(symbol)
+                        fund = company.fundamentals(f"{symbol}.KS" if kr else symbol)
                     except Exception as error:
                         print(f"[judgments] {symbol} 펀더멘탈 못 받음: {type(error).__name__}")
-                for rec in judgments.make_records(settings, week, symbol, name, mine, candles, bench, items, todo,
-                                                  save_input=judge_log.append_input, bench2=bench2, fund=fund):
+                for rec in judgments.make_records(settings, week, symbol, name, mine, candles, kr_bench if kr else bench, items, todo,
+                                                  save_input=judge_log.append_input, bench2=None if kr else bench2, fund=fund):
                     judge_log.append(rec)
                     judge_state["done"] += 1
                     judge_state["tokens"] += rec["tokens"]
@@ -1338,7 +1358,7 @@ def judge_scored(records: list[dict]) -> list[dict]:
 
 def _store_judge_score(records: list[dict]) -> None:
     entries = read_entries()
-    value = judgments.score(records, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: load_stock(s)[1]), entries=entries)
+    value = judgments.score(records, lambda s: cached(f"judge-candles:{s}", JUDGE_SCORE_TTL, lambda: judge_candles(s)), entries=entries)
     _judge_score.update(at=time.time(), n=(len(records), len(entries)), value=value)
 
 
@@ -1355,7 +1375,8 @@ def judgments_summary(symbol: str | None = None):
                      "premium": len(judgments.PREMIUM), "horizons": judgments.HORIZONS,
                      "primary": judgments.PRIMARY, "bench": judgments.BENCH, "models": settings.openai_judge_models,
                      "arms": judgments.arms_for(week), "auto": settings.judge_auto,
-                     "bridge": [judgments.BRIDGE_FROM, judgments.BRIDGE_UNTIL], "bridge_now": judgments.in_bridge(week)},
+                     "bridge": [judgments.BRIDGE_FROM, judgments.BRIDGE_UNTIL], "bridge_now": judgments.in_bridge(week),
+                     "kr": len(judgments.KR_UNIVERSE), "kr_from": judgments.KR_FROM, "kr_premium": len(judgments.KR_PREMIUM)},
         "week": week, "due": judgments.is_due(), "planned": sum(len(c) for _, _, c in plan), "left": judge_left(week),
         "by_model": {m: sum(sum(x[0] == m for x in c) for _, _, c in plan) for m in settings.openai_judge_models},
         "recorded_this_week": len(judge_log.done_keys(week)),
@@ -1364,6 +1385,8 @@ def judgments_summary(symbol: str | None = None):
         "ndx": judgments.summarize(judgments.in_set(scored, judgments.NDX), fixed_only=False),
         "consistency": judgments.consistency(records),
         "paired": judgments.summarize(judgments.paired(scored), fixed_only=True),      # 모델끼리 비교는 둘 다 판단한 기록만
+        "kr": judgments.summarize(judgments.in_set(scored, judgments.KR_UNIVERSE), fixed_only=False),     # 코스피: 미국과 따로
+        "kr_paired": judgments.summarize(judgments.paired(scored, judgments.KR_UNIVERSE), fixed_only=False),
         "mine": judgments.summarize([r for r in scored if r.get("mine")], fixed_only=False),
     }
     # 내가 물어본 판단 (질문 에이전트의 종합 의견). 종목·기준일마다 처음 것만 채점
