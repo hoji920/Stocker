@@ -70,6 +70,26 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
   W43 과 질문 탭 의견의 출발 가격은 새 규칙으로 다시 받는다.
 - 분봉을 놓쳤을 때의 대신 쓰기(기준일 다음 일봉 시가)는 그대로다. 토스 일봉 시가는 장통합이라 정규장 시가와 다를 수 있어 표시해 둔다.
 
+바꾼 것 (2026-10-20, 아직 채점은 하나도 안 나왔다 — W42 의 5거래일 첫 채점은 한국 10/21 아침)
+- 베타 반영 초과수익을 보조 지표로 더한다. 판단과 기록은 그대로이고 채점 계산만 하나 늘어난다.
+  이유: 'SPY 보다 더 오를까'는 시장 방향은 걸러도, 원래 시장보다 크게 움직이는 종목(베타 큰 종목)은 상승장에서 저절로 SPY 를 이긴다.
+  모델이 '변동 큰 종목은 강함'만 반복해도 상승장에선 실력처럼 보이고 하락장에선 반대가 된다 → 그 몫을 뺀 값도 본다.
+  베타 = 기준일(as_of)까지 252거래일 일간 수익률로 구한 SPY 대비 베타 (기준일 뒤 시세는 쓰지 않는다). 겹치는 날이 120일 미만이면 없음.
+  베타 반영 초과수익 = 종목 수익률 − 베타 × SPY 수익률 (같은 출발·끝 시점). 맞음 판정도 이 값의 부호로 한 번 더 낸다 (hit_beta).
+  주된 판정(20거래일 맞힌 비율·방향대로 초과수익, 전부 강함 기준선과 비교)은 바꾸지 않는다. 베타 반영 값은 보조로 같이 낸다.
+- 보조 실험 '모델 비교' (W44 ~ W52, 9주로 미리 정함): 두 번째 모델(gpt-5.5)도 고정 종목 전부(UNIVERSE + NDX)를 판단한다.
+  이유: 본 실험에서 gpt-5.5 는 PREMIUM 30종목뿐이라, 결과가 '작은 모델이라 못 맞혔다'는 반론에 답하기 어렵다.
+  학교에서 받은 키를 2026년 12월쯤까지만 쓸 수 있어서 기간을 W52 까지로 정한다 (돈이 떨어져서 멈춘 실험이 아니라 처음부터 9주).
+  PREMIUM 밖의 gpt-5.5 판단에는 기록에 bridge=true 를 적는다. 본 실험(첫 번째 모델 전 종목 + gpt-5.5 PREMIUM)은 그대로다.
+  - 본 실험은 OPENAI_JUDGE_API_KEY(개인 키), 보조 실험은 OPENAI_API_KEY(학교 키)로 부른다. 학교 키가 먼저 끊겨도 본 실험은 빠지지 않는다.
+    보조 실험 호출이 실패하면 그 판단만 건너뛴다 (본 실험 판단은 그대로 적는다).
+  - 볼 것 (같은 주·종목·조건을 두 모델이 다 판단한 것만): 20거래일 '방향대로 초과수익'의 모델 간 차이(gpt-5.5 − mini),
+    주 단위로 묶어 낸 95% 신뢰구간. 맞힌 비율 차이, 베타 반영 값, 두 모델 방향이 같았던 비율은 같이 낸다. 5거래일은 참고.
+  - 본 실험을 바꿀지 정하는 규칙 (결과를 보기 전에 정함): 2026-12 셋째 주(W51)에 그때까지 나온 채점으로 한 번만 본다.
+    gpt-5.5 − mini 차이의 95% 신뢰구간이 0 보다 위면 → 2027-W01 부터 gpt-5.5 전 종목을 새 본 실험(B)으로 시작하고 따로 분석한다.
+    그렇지 않으면(차이가 없거나 판정 불가) → 본 실험을 그대로 이어간다.
+    어느 쪽이든 지금까지의 본 실험 기록·기준은 바꾸지 않는다. 새로 시작하는 실험은 그 주부터의 기록만 쓴다.
+
 이 기록은 추천이 아니다. 채점이 쌓이기 전의 판단은 근거 없는 의견과 같다.
 """
 from __future__ import annotations
@@ -77,6 +97,7 @@ import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -106,6 +127,7 @@ HORIZONS, PRIMARY, BENCH = (5, 20), 20, "SPY"
 ENTRY_FROM, ENTRY_MINUTES = "2026-W43", 30      # 이 주부터 출발 가격 = 판단 뒤 미국 정규장 첫 30분 평균 (질문 탭 의견은 전부)
 NEWS_DAYS, NEWS_MAX, NEWS_SAME = 7, 30, 0.85    # W43 부터 기사: 판단 전 7일, 최대 30건, 제목이 85% 넘게 같으면 하나만
 ARMS_FROM = "2026-W43"
+BRIDGE_FROM, BRIDGE_UNTIL = "2026-W44", "2026-W52"   # 보조 실험 '모델 비교': 이 주들엔 두 번째 모델도 고정 종목 전부
 ARMS_OLD = ("news", "nonews")                  # W42: 가격 + 기사 12건 / 가격만
 ARMS = ("nonews", "fund", "fund_news")         # W43 부터: 가격만 / + 펀더멘탈 / + 펀더멘탈 + 기사
 ALL_ARMS = ARMS_OLD[:1] + ARMS                 # 성적표에 나오는 조건 전부
@@ -138,14 +160,24 @@ def symbols_for(week: str) -> list[str]:
     return list(dict.fromkeys(UNIVERSE + (NDX if week >= NDX_FROM else [])))
 
 
-def models_for(symbol: str, models: tuple[str, ...]) -> tuple[str, ...]:
-    """이 종목을 판단할 모델들: 첫 번째 모델은 전 종목, 나머지는 PREMIUM 종목만."""
-    return tuple(m for i, m in enumerate(models) if i == 0 or symbol in PREMIUM)
+def in_bridge(week: str | None) -> bool:
+    return bool(week) and BRIDGE_FROM <= week <= BRIDGE_UNTIL
+
+
+def is_bridge(symbol: str, model: str, models: tuple[str, ...], week: str) -> bool:
+    """보조 실험(모델 비교)으로만 적는 판단인가: 두 번째 이후 모델이 PREMIUM 밖 고정 종목을 판단할 때."""
+    return in_bridge(week) and bool(models) and model != models[0] and symbol not in PREMIUM and symbol in symbols_for(week)
+
+
+def models_for(symbol: str, models: tuple[str, ...], week: str | None = None) -> tuple[str, ...]:
+    """이 종목을 판단할 모델들: 첫 번째 모델은 전 종목, 나머지는 PREMIUM 종목만 (보조 실험 주에는 고정 종목 전부)."""
+    wide = in_bridge(week) and symbol in symbols_for(week)
+    return tuple(m for i, m in enumerate(models) if i == 0 or symbol in PREMIUM or wide)
 
 
 def combos_for(symbol: str, models: tuple[str, ...], week: str) -> list[tuple[str, str]]:
     """이 종목에 대해 그 주에 적을 (모델, 조건) 전부. 반복 판단은 PREMIUM 종목을 첫 번째 모델로만."""
-    out = [(m, a) for m in models_for(symbol, models) for a in arms_for(week)]
+    out = [(m, a) for m in models_for(symbol, models, week) for a in arms_for(week)]
     if models and symbol in PREMIUM and week >= REPEAT_FROM:
         out += [(models[0], r) for r in REPEAT_ARMS]
     return out
@@ -322,8 +354,19 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
         if save_input:
             save_input({"week": week, "symbol": symbol, "arm": k, "prompt_sha": sha(text), "prompt": text})
     out = []
+    models = settings.openai_judge_models
+    main_settings = replace(settings, openai_api_key=settings.openai_judge_api_key)    # 본 실험은 판단 기록 전용 키로
     for model, arm in todo:
-        result = judge(settings, model, prompts[kind(arm)])
+        bridge = is_bridge(symbol, model, models, week)
+        try:
+            result = judge(settings if bridge else main_settings, model, prompts[kind(arm)])
+        except Exception as error:
+            if not bridge:
+                raise
+            print(f"[judgments] 보조 실험 {symbol} {model} {arm} 건너뜀: {type(error).__name__}")
+            continue
+        if bridge:
+            result = {**result, "bridge": True}
         out.append({**base, "model": model, "arm": arm, "news_count": len(items[:NEWS_MAX]) if kind(arm) in USES_NEWS else 0,
                     "fundamentals": bool(fund) and kind(arm) in USES_FUND,
                     "prompt_sha": sha(prompts[kind(arm)]), "system_sha": sha(_SYSTEM),
@@ -393,6 +436,21 @@ def entry_fallback(candles: list[dict], bench: list[dict], as_of: str) -> dict |
 
 
 # ── 채점 (저장하지 않는다: 읽을 때마다 지금 시세로 계산) ──
+BETA_DAYS, BETA_MIN = 252, 120      # 베타: 기준일까지 252거래일, 겹치는 날이 120일은 있어야
+
+
+def beta_before(stock: tuple[list, list], bench: tuple[list, list], as_of: str, days: int = BETA_DAYS, min_n: int = BETA_MIN) -> float | None:
+    """기준일(as_of)까지의 일봉만으로 구한 SPY 대비 베타. 둘 다 있는 날짜만 맞춰 쓴다."""
+    b = dict(zip(*bench))
+    pairs = [(c, b[t]) for t, c in zip(*stock) if t <= as_of and t in b][-(days + 1):]
+    if len(pairs) < min_n + 1:
+        return None
+    x = np.array(pairs, dtype=float)
+    r = x[1:] / x[:-1] - 1
+    var = float(np.var(r[:, 1], ddof=1))
+    return float(np.cov(r[:, 0], r[:, 1], ddof=1)[0, 1] / var) if var > 0 else None
+
+
 def _may_be_due(as_of: str, today: str) -> bool:
     """가장 짧은 기간(5거래일)이 지났을 수도 있나. 평일 수 ≥ 거래일 수라서, 평일로도 안 지났으면 확실히 채점할 게 없다.
     날짜 꼴이 아니면(테스트) 일단 채점해 본다."""
@@ -423,7 +481,7 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
     with ThreadPoolExecutor(max_workers=workers) as pool:
         cache = dict(zip(symbols, pool.map(load, symbols)))
 
-    out = []
+    out, betas = [], {}
     for r, d in zip(records, due):
         if not d:
             out.append({**r, "scored": {}, "entry": (entries or {}).get(entry_key(r)) if needs_entry(r) else None,
@@ -439,6 +497,9 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
         scored, s, b = {}, cache.get(r["symbol"]), cache.get(BENCH)
         if s and b and r["as_of"] in s[0] and r["bench_as_of"] in b[0]:
             i, j = s[0].index(r["as_of"]), b[0].index(r["bench_as_of"])
+            if (key := (r["symbol"], r["as_of"])) not in betas:
+                betas[key] = beta_before(s, b, r["as_of"])
+            beta = betas[key]
             for h in HORIZONS:
                 if i + h >= len(s[0]):
                     continue
@@ -448,8 +509,11 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
                     continue
                 ret, bench = (s[1][i + h] / start - 1) * 100, (b[1][jx] / start_bench - 1) * 100
                 d = r[f"d{h}"]
+                xb = None if beta is None else ret - beta * bench          # 베타 반영 초과수익 (보조)
                 scored[h] = {"ret": round(ret, 2), "bench": round(bench, 2), "excess": round(ret - bench, 2), "exit_day": exit_day,
-                             "hit": None if d == "neutral" else (ret > bench) == (d == "outperform")}
+                             "hit": None if d == "neutral" else (ret > bench) == (d == "outperform"),
+                             "beta": None if beta is None else round(beta, 2), "excess_beta": None if xb is None else round(xb, 2),
+                             "hit_beta": None if d == "neutral" or xb is None else (xb > 0) == (d == "outperform")}
         out.append({**r, "scored": scored, "entry": entry, "entry_rule": needs_entry(r)})
     return out
 
@@ -513,10 +577,22 @@ def summarize(scored: list[dict], fixed_only: bool = True, arms: tuple = ALL_ARM
                     # 같은 기준선을 모델이 방향을 고른 기록(중립 제외)에서만: 모델의 맞힌 비율과 같은 묶음으로 비교한다
                     "always_up_calls_hit_rate_pct": round(sum(r["scored"][h]["excess"] > 0 for r in calls) / len(calls) * 100, 1) if calls else None,
                     "always_up_calls_mean_excess_pct": mean([r["scored"][h]["excess"] for r in calls]),
+                    **_beta_cols(calls, h),                # 보조: 베타 반영 초과수익 (베타를 구할 수 있던 기록만)
                     "calibration": [{"bucket": f"{lo}~{hi}", "n": len(b), "hit_rate_pct": round(sum(r["scored"][h]["hit"] for r in b) / len(b) * 100, 1)}
                                     for lo, hi in BUCKETS if (b := [r for r in calls if lo <= r[f"c{h}"] <= hi])],
                 })
     return rows
+
+
+def _beta_cols(calls: list[dict], h: int) -> dict:
+    bc = [r for r in calls if r["scored"][h].get("excess_beta") is not None]
+    xb = lambda r: r["scored"][h]["excess_beta"]
+    mean = lambda xs: round(sum(xs) / len(xs), 2) if xs else None
+    return {"beta_calls": len(bc),
+            "hit_rate_beta_pct": round(sum(r["scored"][h]["hit_beta"] for r in bc) / len(bc) * 100, 1) if bc else None,
+            "mean_signed_excess_beta_pct": mean([xb(r) * (1 if r[f"d{h}"] == "outperform" else -1) for r in bc]),
+            "always_up_calls_hit_rate_beta_pct": round(sum(xb(r) > 0 for r in bc) / len(bc) * 100, 1) if bc else None,
+            "always_up_calls_mean_excess_beta_pct": mean([xb(r) for r in bc])}
 
 
 def paired(scored: list[dict]) -> list[dict]:
