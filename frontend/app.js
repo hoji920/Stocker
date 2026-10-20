@@ -1145,6 +1145,7 @@ function setStockTab(t) {
   if (t === "news") refineNews();              // 뉴스 탭을 열 때 AI 정리 (함수 선언이라 아래에 있어도 된다)
   if (t === "ask") loadRulesCheck();
   if (t === "judge") loadJudgments();
+  if (t === "thesis") loadThesis();
 }
 document.querySelectorAll(".stab").forEach((b) => b.addEventListener("click", () => setStockTab(b.dataset.st)));
 setStockTab(store.load("stocking.stockTab", "overview"));
@@ -1566,20 +1567,39 @@ function renderPrice(price) {
 const calFilter = { econ: store.load("stocking.cal.econ", "major"), earn: store.load("stocking.cal.earn", "all") };
 let calLoaded = 0;
 
+// 달마다 따로 받는다 (state.calMonths["2026-09"]). 지난 달도 넘겨 보면 그때 받아온다
 async function loadCalendar(force = false) {
   const box = $("#cal-list");
   if (!force && state.calendar && Date.now() - calLoaded < 30 * 60000) return renderCalendar();
+  if (force || Date.now() - calLoaded >= 30 * 60000) state.calMonths = {};
+  const kst = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 7);
+  state.calMonth ??= kst;
   if (!state.calendar) box.replaceChildren(el("p", { class: "muted" }, "달력 불러오는 중… (처음엔 10초쯤)"));
-  const res = await fetch("/api/calendar").catch(() => null);
-  if (!res?.ok) return box.replaceChildren(el("p", { class: "muted" }, "달력을 불러오지 못했어요"));
-  state.calendar = await res.json();
+  if (!(await fetchCalMonth(state.calMonth))) return box.replaceChildren(el("p", { class: "muted" }, "달력을 불러오지 못했어요"));
   calLoaded = Date.now();
   renderCalendar();
 }
 
+async function fetchCalMonth(month) {
+  state.calMonths ??= {};
+  if (state.calMonths[month]) return true;
+  const res = await fetch(`/api/calendar?month=${month}`).catch(() => null);
+  if (!res?.ok) {
+    state.calMonths[month] = { failed: (await res?.json().catch(() => null))?.detail || "못 받았어요", days: [] };
+    return !!state.calendar;
+  }
+  const c = await res.json();
+  state.calMonths[month] = c;
+  state.calendar = { today: c.today, errors: c.errors };
+  return true;
+}
+
+// 월간 달력 (한국 날짜). 칸마다 중요 지표 짧은 이름 + 실적 수, 누른 날의 상세는 아래에
 function renderCalendar() {
   const c = state.calendar;
   if (!c) return;
+  const cur = state.calMonths?.[state.calMonth];
+  const loading = !cur;
   const chip = (group, value, label) => {
     const b = el("button", { class: calFilter[group] === value ? "on" : "" }, label);
     b.addEventListener("click", () => { calFilter[group] = value; store.save(`stocking.cal.${group}`, value); renderCalendar(); });
@@ -1587,37 +1607,71 @@ function renderCalendar() {
   };
   $("#cal-filters").replaceChildren(chip("econ", "major", "중요 지표만"), chip("econ", "all", "지표 전체"),
     chip("earn", "all", "실적: 주요 종목 포함"), chip("earn", "mine", "실적: 내 종목만"));
+  const allDays = Object.values(state.calMonths || {}).flatMap((x) => x.days);
+  const byDate = Object.fromEntries(allDays.map((d) => [d.date, {
+    ...d, econ: d.econ.filter((e) => calFilter.econ === "all" || e.level === 2), earnings: d.earnings.filter((e) => calFilter.earn === "all" || e.mine),
+  }]));
+  state.calSel ??= c.today;
+  const [y, m] = state.calMonth.split("-").map(Number);
+  const iso = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  const first = new Date(y, m - 1, 1), startPad = first.getDay();               // 일요일 시작
+  const daysIn = new Date(y, m, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startPad; i++) cells.push(el("div", { class: "cal-cell blank" }));
+  for (let day = 1; day <= daysIn; day++) {
+    const ds = iso(new Date(y, m - 1, day)), d = byDate[ds];
+    const shorts = d ? [...new Set(d.econ.filter((e) => e.level === 2).map((e) => e.short))] : [];
+    const minor = d ? d.econ.filter((e) => e.level !== 2).length : 0;
+    const mine = d ? d.earnings.filter((e) => e.mine).map((e) => e.symbol) : [];
+    const others = d ? d.earnings.length - mine.length : 0;
+    const cell = el("button", { class: `cal-cell${ds === c.today ? " today" : ""}${ds === state.calSel ? " sel" : ""}${d ? "" : " nodata"}${ds < c.today ? " past" : ""}`,
+      title: d ? "" : "자료 범위 밖" },
+      el("span", { class: "cal-num" }, String(day)),
+      ...shorts.slice(0, 3).map((s) => el("span", { class: "cal-tag econ" }, s)),
+      minor && calFilter.econ === "all" && !shorts.length ? el("span", { class: "cal-tag minor" }, `지표 ${minor}`) : "",
+      ...mine.slice(0, 3).map((s) => el("span", { class: "cal-tag mine" }, s)),
+      others ? el("span", { class: "cal-tag earn" }, `실적 ${others}`) : "");
+    if (d) cell.addEventListener("click", () => { state.calSel = ds; renderCalendar(); });
+    cells.push(cell);
+  }
+  const move = async (k) => {
+    const dt = new Date(y, m - 1 + k, 1);
+    state.calMonth = iso(dt).slice(0, 7);
+    renderCalendar();
+    if (!state.calMonths?.[state.calMonth]) { await fetchCalMonth(state.calMonth); renderCalendar(); }
+  };
+  const prev = el("button", { class: "ghost small" }, "‹"), next = el("button", { class: "ghost small" }, "›");
+  prev.addEventListener("click", () => move(-1));
+  next.addEventListener("click", () => move(1));
+  const head = el("div", { class: "cal-head" }, prev, el("b", {}, `${y}년 ${m}월`), next, el("span", { class: "muted" }, loading ? "불러오는 중…" : cur.failed ? cur.failed : "한국 시간"));
+  const week = el("div", { class: "cal-grid cal-week" }, ..."일월화수목금토".split("").map((w, i) => el("span", { class: i === 0 ? "sun" : i === 6 ? "sat" : "" }, w)));
+  const grid = el("div", { class: "cal-grid" }, ...cells);
+
+  // 고른 날의 상세
+  const d = byDate[state.calSel];
   const value = (v) => [v.actual ? `발표 ${v.actual}` : "", v.consensus ? `예상 ${v.consensus}` : "", v.previous ? `이전 ${v.previous}` : ""]
     .filter(Boolean).join(" · ");
-  const rows = [];
-  for (const d of c.days) {
-    const econ = d.econ.filter((e) => calFilter.econ === "all" || e.level === 2);
-    const earn = d.earnings.filter((e) => calFilter.earn === "all" || e.mine);
-    const today = d.date === c.today, past = d.date < c.today;
-    if (!econ.length && !earn.length && !today) continue;
-    const items = [
-      ...econ.map((e) => el("li", { class: `cal-ev${e.level === 2 ? " major" : ""}` },
-        el("span", { class: "cal-time" }, e.time_kst ? e.time_kst.slice(6) : "–"),
-        el("div", {}, el("b", {}, e.name),
-          e.time_kst && e.time_kst.slice(0, 5) !== d.date.slice(5) ? el("span", { class: "muted" }, ` (한국 ${e.time_kst.slice(0, 5).replace("-", "/")})`) : "",
-          ...e.values.map((v) => el("div", { class: "cal-val" }, value(v))).filter((x) => x.textContent)))),
-      ...earn.map((e) => {
-        const li = el("li", { class: `cal-earn${e.mine ? " mine" : ""}`, title: "누르면 차트로" },
-          el("span", { class: "cal-time" }, e.when || "실적"),
-          el("div", {}, el("b", {}, e.symbol), e.mine ? el("span", { class: "rk" }, "내 종목") : "",
-            el("span", { class: "muted" }, ` ${e.quarter} 실적`),
-            e.eps_estimate != null ? el("div", { class: "cal-val" },
-              `EPS 예상 ${e.eps_estimate.toFixed(2)}${e.eps_actual != null ? ` · 발표 ${e.eps_actual.toFixed(2)}` : ""}`) : ""));
-        li.addEventListener("click", () => load(e.symbol));
-        return li;
-      }),
-    ];
-    rows.push(el("section", { class: `cal-day${today ? " today" : ""}${past ? " past" : ""}` },
-      el("div", { class: "cal-date" }, `${d.date.slice(5).replace("-", "/")} (${d.weekday})${today ? " · 오늘" : ""}`, el("span", { class: "muted" }, " 미국 날짜")),
-      items.length ? el("ul", {}, ...items) : el("p", { class: "muted hint" }, "고른 조건의 일정이 없어요")));
-  }
-  const errs = c.errors?.length ? el("p", { class: "muted hint" }, `일부를 못 받았어요: ${c.errors.join(", ")}`) : "";
-  $("#cal-list").replaceChildren(...rows, errs);
+  const items = d ? [
+    ...d.econ.map((e) => el("li", { class: `cal-ev${e.level === 2 ? " major" : ""}` },
+      el("span", { class: "cal-time" }, e.kst_time || "–"),
+      el("div", {}, el("b", {}, e.name), ...e.values.map((v) => el("div", { class: "cal-val" }, value(v))).filter((x) => x.textContent)))),
+    ...d.earnings.map((e) => {
+      const li = el("li", { class: `cal-earn${e.mine ? " mine" : ""}`, title: "누르면 차트로" },
+        el("span", { class: "cal-time" }, e.when === "장 후" ? "새벽" : e.when === "장 전" ? "밤" : "실적"),
+        el("div", {}, el("b", {}, e.symbol), e.mine ? el("span", { class: "rk" }, "내 종목") : "",
+          el("span", { class: "muted" }, ` ${e.quarter} 실적 · ${e.kst_note}`),
+          e.eps_estimate != null ? el("div", { class: "cal-val" },
+            `EPS 예상 ${e.eps_estimate.toFixed(2)}${e.eps_actual != null ? ` · 발표 ${e.eps_actual.toFixed(2)}` : ""}`) : ""));
+      li.addEventListener("click", () => load(e.symbol));
+      return li;
+    }),
+  ] : [];
+  const [sy, sm, sd] = state.calSel.split("-").map(Number);
+  const detail = el("section", { class: "cal-day" },
+    el("div", { class: "cal-date" }, `${sm}월 ${sd}일 (${"일월화수목금토"[new Date(sy, sm - 1, sd).getDay()]})${state.calSel === c.today ? " · 오늘" : ""}`),
+    items.length ? el("ul", {}, ...items) : el("p", { class: "muted hint" }, d ? "고른 조건의 일정이 없어요" : "달력에서 날짜를 눌러 보세요 (2년 전 ~ 6달 뒤)"));
+  const errs = cur?.errors?.length ? el("p", { class: "muted hint" }, `일부를 못 받았어요: ${cur.errors.join(", ")}`) : "";
+  $("#cal-list").replaceChildren(head, week, grid, detail, errs);
 }
 
 // ── 달러·원 변환 (시장 탭 맨 위 + 미국 종목 가격 옆 원화) ──
@@ -1679,6 +1733,9 @@ async function loadChart(symbol) {
   renderPatterns();
   loadReading();                              // 구조 읽기: 오늘 이미 만든 게 있으면 보여주고, 없으면 버튼만 (늘 일봉 기준)
   loadCompany();
+  loadOptions();
+  renderPeersBox();
+  if (state.stockTab === "thesis") loadThesis();
   $("#daily-only").hidden = isDaily();
   // 지수·선물·금리(야후)는 관심종목/이유찾기 대상이 아니고 토스 실시간도 없음
   $("#watch-toggle").hidden = $("#why-row").hidden = $("#live-dot").hidden = !!d.macro;
@@ -1725,12 +1782,15 @@ $("#log-scale").addEventListener("click", async () => {
   loadRulesCheck();
 });
 
-async function load(symbol) {
+// push: 종목을 바꿀 때 브라우저 기록에 한 칸 쌓는다 → 뒤로가기로 이전 종목. 처음 열 때·뒤로가기로 올 때는 안 쌓는다
+async function load(symbol, { push = true } = {}) {
   symbol = symbol.trim().toUpperCase();
   if (!symbol) return;
   if (state.drawMode) setDrawMode(null);
   $("#symbol").value = symbol;
-  history.replaceState(null, "", `?s=${symbol}`);
+  const here = new URLSearchParams(location.search).get("s");
+  if (push && here && here.toUpperCase() !== symbol) history.pushState({ s: symbol }, "", `?s=${symbol}`);
+  else history.replaceState({ s: symbol }, "", `?s=${symbol}`);
   state.loading = symbol;
   if (symbol !== state.data?.symbol) $("#why-box").replaceChildren();   // 이전 종목의 '왜 움직였지?' 결과 지우기
   const dres = await fetch(`/api/drawings/${encodeURIComponent(symbol)}`);
@@ -1784,6 +1844,203 @@ async function loadCompany() {
     c.summary ? el("p", {}, c.summary) : c.summary_en ? el("p", { class: "muted" }, c.summary_en.slice(0, 300) + "…") : "",
     el("p", { class: "muted hint" }, "야후 파이낸스 프로필 · 설명은 AI 가 한국어로 줄인 것",
       c.website ? el("a", { href: c.website, target: "_blank", rel: "noopener" }, " · 홈페이지") : "")));
+}
+
+// ── 옵션이 예상하는 움직임 (한눈에 보기): 등가격 스트래들 = 그 만기까지 ±몇 %. 야후 옵션, 서버 15분 캐시 ──
+const usStock = (d) => d && !d.macro && d.market !== "KR";
+const md = (iso) => `${+iso.slice(5, 7)}/${+iso.slice(8, 10)}`;
+
+async function loadOptions() {
+  const d = state.data, box = $("#options-box");
+  if (state.options?.symbol !== d?.symbol) box.replaceChildren();
+  if (!usStock(d)) return;
+  const res = await fetch(`/api/options/${encodeURIComponent(d.symbol)}`).catch(() => null);
+  if (state.data?.symbol !== d.symbol) return;
+  if (!res?.ok) return box.replaceChildren();                       // 옵션이 없는 종목은 카드를 안 띄운다
+  const o = await res.json();
+  state.options = { symbol: d.symbol, o };
+  const range = (x) => `${fmt(x.low)} ~ ${fmt(x.high)}`;
+  const rows = o.expiries.map((x) => el("li", {},
+    el("span", { class: "opt-exp" }, `${md(x.expiry)} 만기`, el("span", { class: "muted" }, ` (${x.days}일)`)),
+    el("b", {}, `±${x.move_pct}%`), el("span", { class: "muted" }, ` ${range(x)}`)));
+  const e = o.earnings;
+  const first = o.expiries[0];
+  // 콜·풋 비중 막대: 거래량(오늘) / 미결제약정(쌓여 있는 계약). 많은 쪽이 이긴다는 뜻은 아니다
+  const n = (v) => v.toLocaleString();
+  const bar = (label, callPct, c, p) => callPct == null ? "" : el("div", { class: "opt-flow" },
+    el("span", { class: "opt-flow-label" }, label),
+    el("div", { class: "opt-bar", title: `콜 ${n(c)} · 풋 ${n(p)} 계약` },
+      el("span", { class: "call", style: `width:${callPct}%` }, callPct >= 15 ? `콜 ${callPct}%` : ""),
+      el("span", { class: "put", style: `width:${100 - callPct}%` }, 100 - callPct >= 15 ? `풋 ${100 - callPct}%` : "")));
+  const f = o.flow || {};
+  box.replaceChildren(el("div", { class: "opt-card" },
+    el("div", { class: "reading-head" }, el("b", {}, "옵션이 예상하는 움직임"),
+      el("span", { class: "muted" }, first?.atm_iv_pct != null ? `내재변동성 ${first.atm_iv_pct}%` : "")),
+    e ? el("p", { class: "opt-earn" }, `실적 ${md(e.date)} → ${md(e.expiry)} 만기까지 `, el("b", {}, `±${e.move_pct}%`), ` (${range(e)})`,
+      e.earnings_only_pct ? el("span", { class: "muted" }, ` · 그중 실적 몫 약 ±${e.earnings_only_pct}%`) : "") : "",
+    el("ul", {}, ...rows),
+    bar("거래량 (오늘)", f.call_volume_pct, f.call_volume, f.put_volume),
+    bar("쌓인 계약 (미결제)", f.call_oi_pct, f.call_oi, f.put_oi),
+    el("p", { class: "muted hint" }, `위 만기들을 합친 콜·풋 비중이에요. 많은 쪽이 이긴다는 뜻은 아니에요 (풋은 보험인 경우가 많아요). `
+      + "예상 폭은 등가격 콜+풋 가격으로 본 거라 그 안에 머문다는 보장은 없어요. 야후 옵션, 장이 닫혀 있으면 마지막 호가 기준.")));
+}
+
+// ── 경쟁사 비교 (한눈에 보기): 펼칠 때만 받는다 (처음엔 AI 가 비교 대상을 골라 몇 초 걸린다) ──
+function renderPeersBox() {
+  const d = state.data, box = $("#peers-box");
+  if (!usStock(d)) return box.replaceChildren();
+  const det = el("details", { class: "peers" }, el("summary", {}, "경쟁사 비교"), el("p", { class: "muted" }, "불러오는 중… (처음엔 AI 가 비교할 회사를 골라 10초쯤)"));
+  let loaded = false;
+  const fill = async (refresh = false) => {
+    const res = await fetch(`/api/peers/${encodeURIComponent(d.symbol)}${refresh ? "?refresh=1" : ""}`).catch(() => null);
+    if (state.data?.symbol !== d.symbol) return;
+    if (!res?.ok) return det.replaceChildren(det.firstChild, el("p", { class: "muted" }, "경쟁사 비교를 못 만들었어요"));
+    const p = await res.json();
+    const pct = (v) => (v == null ? "–" : `${v > 0 ? "+" : ""}${v}%`);
+    const num = (v) => (v == null ? "–" : String(v));
+    const cls = (v) => (v == null ? "" : v >= 0 ? "up" : "down");
+    const head = ["종목", "시총", "선행 PER", "매출 성장", "순이익률", "1개월", "3개월", "1년", "목표가 여력"];
+    const rows = p.rows.map((r) => {
+      const tr = el("tr", { class: r.self ? "self" : "", title: r.why || "" },
+        el("td", {}, el("b", {}, r.symbol), el("div", { class: "muted peer-why" }, r.self ? "지금 보는 종목" : r.why || r.name)),
+        el("td", {}, r.market_cap || "–"), el("td", {}, num(r.pe_forward)), el("td", {}, pct(r.revenue_growth)), el("td", {}, pct(r.net_margin)),
+        ...["1m", "3m", "12m"].map((k) => el("td", { class: cls(r[k]) }, pct(r[k]))), el("td", {}, pct(r.target_upside)));
+      if (!r.self) tr.addEventListener("click", () => load(r.symbol));
+      return tr;
+    });
+    const again = el("button", { class: "ghost small" }, "다시 고르기");
+    again.addEventListener("click", () => {
+      det.replaceChildren(det.firstChild, el("p", { class: "muted" }, "AI 가 비교할 회사를 다시 고르는 중… (10초쯤)"));
+      fill(true);
+    });
+    det.replaceChildren(det.firstChild,
+      el("div", { class: "judge-scroll" }, el("table", { class: "peer-table" }, el("tr", {}, ...head.map((h) => el("th", {}, h))), ...rows)),
+      el("div", { class: "th-btns" }, el("span", { class: "muted hint" }, `${p.source}. 줄을 누르면 그 종목 차트로 가요. 목표가 여력 = 애널리스트 평균 목표가 대비.`), again));
+  };
+  det.addEventListener("toggle", () => {
+    if (!det.open || loaded) return;
+    loaded = true;
+    fill();
+  });
+  box.replaceChildren(det);
+}
+
+// ── 투자 논리 (종목 탭): 왜 샀나 → 기둥·틀린 조건·이벤트로 정리 → 저장 → 뉴스·실적이 나올 때마다 점검 ──
+const STATUS_CLS = { 유지: "ok", 약화: "warn", 깨짐: "bad", "판단 못함": "na", 흔들림: "warn" };
+const lines = (v) => (v || []).join("\n");
+
+async function loadThesis() {
+  const d = state.data, box = $("#thesis-box");
+  if (!usStock(d)) return box.replaceChildren(el("p", { class: "muted" }, "미국 종목·ETF 에서 쓸 수 있어요."));
+  box.replaceChildren(el("p", { class: "muted" }, "불러오는 중…"));
+  const res = await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}`).catch(() => null);
+  if (state.data?.symbol !== d.symbol) return;
+  if (!res?.ok) return box.replaceChildren(el("p", { class: "muted" }, "투자 논리를 불러오지 못했어요"));
+  const body = await res.json();
+  body.thesis ? renderThesis(body.thesis, body.stale) : renderThesisForm(null);
+}
+
+function renderThesisForm(t, note = "") {
+  const d = state.data, box = $("#thesis-box");
+  const why = el("textarea", { class: "th-why", rows: 3, placeholder: "왜 샀어요? 자유롭게 (예: AI 데이터센터 수요로 메모리 가격이 오르고, 이번 분기 실적에서 확인될 것 같아서)" });
+  why.value = t?.why || "";
+  const area = (label, key, ph) => {
+    const ta = el("textarea", { rows: 3, placeholder: ph, "data-k": key });
+    ta.value = lines(t?.[key]);
+    return el("label", { class: "th-field" }, el("span", {}, label), ta);
+  };
+  const horizon = el("input", { class: "th-horizon", placeholder: "예: 3~6개월" });
+  horizon.value = t?.horizon || "";
+  const fields = el("div", { class: "th-fields" },
+    area("논리 기둥 (한 줄에 하나, 이게 사실이어야 맞는 투자)", "pillars", "예: 데이터센터 매출이 분기마다 20% 넘게 늘어난다"),
+    area("틀렸다고 볼 조건 (한 줄에 하나)", "invalid_if", "예: 다음 실적에서 가이던스를 낮춘다"),
+    area("기다리는 이벤트 (한 줄에 하나)", "catalysts", "예: 10/29 실적 발표"),
+    el("label", { class: "th-field" }, el("span", {}, "볼 기간"), horizon));
+  const msg = el("p", { class: "muted hint" }, note);
+  const draftBtn = el("button", { class: "ghost small" }, "AI 로 정리");
+  draftBtn.addEventListener("click", async () => {
+    draftBtn.disabled = true; msg.textContent = "AI 가 정리하는 중… (회사 자료·뉴스·실적일을 같이 봐요)";
+    const res = await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}/draft`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ why: why.value }) }).catch(() => null);
+    draftBtn.disabled = false;
+    if (!res?.ok) return (msg.textContent = "정리하지 못했어요");
+    const dr = await res.json();
+    fields.querySelectorAll("textarea").forEach((ta) => (ta.value = lines(dr[ta.dataset.k])));
+    horizon.value = dr.horizon || horizon.value;
+    msg.textContent = `AI 가 나눈 초안이에요. 고쳐서 저장하세요.${dr.why_note ? ` (${dr.why_note})` : ""}`;
+  });
+  const save = el("button", { class: "small" }, "저장");
+  save.addEventListener("click", async () => {
+    const val = (k) => fields.querySelector(`[data-k=${k}]`).value.split("\n");
+    const res = await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}`, { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ why: why.value, pillars: val("pillars"), invalid_if: val("invalid_if"), catalysts: val("catalysts"), horizon: horizon.value }) });
+    const b = await res.json();
+    if (!res.ok) return (msg.textContent = b.detail || "저장하지 못했어요");
+    renderThesis(b.thesis, b.stale);
+  });
+  const btns = [draftBtn, save];
+  if (t) {
+    const cancel = el("button", { class: "ghost small" }, "취소");
+    cancel.addEventListener("click", loadThesis);
+    btns.push(cancel);
+  }
+  box.replaceChildren(el("div", { class: "thesis" }, el("label", { class: "th-field" }, el("span", {}, "왜 샀나"), why), fields, msg,
+    el("div", { class: "th-btns" }, ...btns)));
+}
+
+function renderThesis(t, stale) {
+  const d = state.data, box = $("#thesis-box");
+  const last = (t.checks || []).at(-1);
+  const now = state.lastShown ?? d.candles.at(-1).close;
+  const since = t.entry_price ? (now / t.entry_price - 1) * 100 : null;
+  const badge = (s) => el("span", { class: `th-badge ${STATUS_CLS[s] || "na"}` }, s);
+  const statusOf = (text) => last?.pillars?.find((p) => p.text === text);
+  const check = el("button", { class: "small" }, "지금 점검 (AI)");
+  const msg = el("span", { class: "muted" }, "");
+  check.addEventListener("click", async () => {
+    check.disabled = true; msg.textContent = " 뉴스·실적·가격·옵션을 보고 점검하는 중… (20초쯤)";
+    const res = await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}/check`, { method: "POST" }).catch(() => null);
+    if (state.data?.symbol !== d.symbol) return;
+    check.disabled = false;
+    if (!res?.ok) return (msg.textContent = " 점검하지 못했어요");
+    const b = await res.json();
+    renderThesis(b.thesis, b.stale);
+  });
+  const edit = el("button", { class: "ghost small" }, "고치기");
+  edit.addEventListener("click", () => renderThesisForm(t));
+  const del = el("button", { class: "ghost small" }, "지우기");
+  del.addEventListener("click", async () => {
+    if (del.dataset.armed !== "1") { del.dataset.armed = "1"; del.textContent = "정말 지울까요? 한 번 더 누르세요"; return; }
+    await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}`, { method: "DELETE" });
+    renderThesisForm(null, "지웠어요.");
+  });
+  const list = (title, items, render) => items?.length ? [el("div", { class: "brief-sub" }, title), el("ul", { class: "th-list" }, ...items.map(render))] : [];
+  const history = (t.checks || []).slice(0, -1).reverse();
+  box.replaceChildren(el("div", { class: "thesis" },
+    el("div", { class: "th-head" },
+      el("span", {}, `${t.created_at.slice(0, 10)} 저장 · 그때 ${fmt(t.entry_price)} → 지금 ${fmt(now)} `,
+        since != null ? el("b", { class: since >= 0 ? "up" : "down" }, `${since >= 0 ? "+" : ""}${since.toFixed(1)}%`) : ""),
+      stale ? el("span", { class: "th-badge warn" }, `점검 필요 · ${stale}`) : ""),
+    t.why ? el("p", { class: "th-why-text" }, t.why) : "",
+    ...list("논리 기둥", t.pillars, (p) => {
+      const s = statusOf(p);
+      return el("li", {}, s ? badge(s.status) : badge("판단 못함"), el("span", {}, ` ${p}`), s?.evidence ? el("div", { class: "muted th-ev" }, s.evidence) : "");
+    }),
+    ...list("틀렸다고 볼 조건", t.invalid_if, (x) => {
+      const h = last?.invalid_if?.find((i) => i.text === x);
+      return el("li", {}, h?.hit ? badge("깨짐") : el("span", { class: "th-badge na" }, "아직"), el("span", {}, ` ${x}`),
+        h?.evidence ? el("div", { class: "muted th-ev" }, h.evidence) : "");
+    }),
+    ...list("기다리는 이벤트", t.catalysts, (x) => el("li", {}, x)),
+    last ? el("div", { class: `th-check ${STATUS_CLS[last.overall] || ""}` },
+      el("div", {}, el("b", {}, "마지막 점검 "), badge(last.overall), el("span", { class: "muted" }, ` ${last.at.slice(0, 16).replace("T", " ")} · 그때 ${fmt(last.price)}`)),
+      el("p", {}, last.summary),
+      last.watch_next?.length ? el("p", { class: "muted" }, `다음에 볼 것: ${last.watch_next.join(" · ")}`) : "") : el("p", { class: "muted" }, "아직 점검한 적이 없어요."),
+    el("div", { class: "th-btns" }, check, edit, del, msg),
+    history.length ? el("details", {}, el("summary", {}, `지난 점검 ${history.length}건`),
+      ...history.map((c) => el("div", { class: "judge-rec" }, el("div", {}, badge(c.overall), el("span", { class: "muted" }, ` ${c.at.slice(0, 16).replace("T", " ")} · ${fmt(c.price)}`)),
+        el("div", {}, c.summary)))) : "",
+    el("p", { class: "muted hint" }, "점검은 코드가 모은 사실(가격, 뉴스, 펀더멘탈, 실적일, 옵션)만 보고 AI 가 써요. 이 PC 에만 저장돼요.")));
 }
 
 // ── 구조 읽기 (한눈에 보기 맨 위) ──
@@ -2422,5 +2679,10 @@ volume.applyOptions({ visible: on("volume") });
   setCollapsed(isPhone() ? true : store.load("stocking.sideCollapsed", false));   // 폰은 차트부터
   loadWatchSummary();
   setInterval(loadWatchSummary, 60000);    // 실시간이 못 주는 등락률 기준값·지지/저항 거리 보정
-  load(new URLSearchParams(location.search).get("s") || state.holdings[0]?.symbol || state.watchlist[0] || "AAPL");
+  load(new URLSearchParams(location.search).get("s") || state.holdings[0]?.symbol || state.watchlist[0] || "AAPL", { push: false });
+  // 뒤로가기·앞으로가기: 주소의 종목을 다시 연다 (기록은 더 쌓지 않는다)
+  window.addEventListener("popstate", () => {
+    const s = new URLSearchParams(location.search).get("s");
+    if (s && s.toUpperCase() !== state.data?.symbol) load(s, { push: false });
+  });
 })();

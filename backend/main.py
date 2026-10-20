@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import (agent, analysis, bars, company, demo, judgments, market_calendar, macro, market_brief, movers, news, patterns, reading, rules, search,
+from backend import (agent, ai_cache, analysis, bars, company, demo, judgments, market_calendar, options, peers, thesis, macro, market_brief, movers, news, patterns, reading, rules, search,
                      signals, underlying)
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
@@ -456,6 +456,7 @@ def put_signal_settings(body: SignalSettings):
 
 
 NEWS_AI_TTL = 3600       # AI 로 거르고 요약한 뉴스는 종목당 1시간 그대로 쓴다 (토큰 아끼기)
+ai_disk = ai_cache.DiskCache(get_settings().data_dir / "ai_cache")    # AI 결과 디스크 저장 (backend/ai_cache.py)
 
 
 @app.get("/api/news/{symbol}")
@@ -473,9 +474,19 @@ def stock_news(symbol: str, ai: bool = False):
     if done is not None:
         return done
     fetch = lambda use_ai: news.get_news(settings, market_of(symbol), symbol, name, ai=use_ai)
+    plain = cached(f"news:{symbol}", 600, lambda: fetch(False))
+    # 기사 목록이 같으면 예전에 AI 로 거르고 요약한 결과를 디스크에서 그대로 쓴다 (서버를 다시 켜도). 새 기사가 나오면 그때만 다시
+    disk_key = f"news-ai:{symbol}:{ai_cache.digest([(it.get('url') or it.get('title')) for it in plain['items']])}"
+    saved = ai_disk.get(disk_key, 7 * 86400)
+    if saved is not None:
+        _cache[f"news-ai:{symbol}"] = (time.time(), saved)
+        return saved
     if ai:
-        return cached(f"news-ai:{symbol}", NEWS_AI_TTL, lambda: fetch(True))
-    return cached(f"news:{symbol}", 600, lambda: fetch(False))
+        out = cached(f"news-ai:{symbol}", NEWS_AI_TTL, lambda: fetch(True))
+        if out.get("summary"):
+            ai_disk.put(disk_key, out)
+        return out
+    return plain
 
 
 @app.get("/api/macro")
@@ -784,13 +795,14 @@ def chart_reading(symbol: str, make: bool = False, price: float | None = None):
     if data["macro"]:
         return {"enabled": False, "reading": None}
     key = f"reading2:{symbol}:{data['candles'][-1]['time']}:{analysis.LOG_TRENDS}"
-    done = cache_peek(key, 6 * 3600)
+    done = ai_disk.get(key)                               # 같은 날 봉이면 서버를 다시 켜도 그대로 (디스크)
     if done is None and make:
         now = live_price(symbol, data["candles"][-1]["close"], price)
         try:
-            done = cached(key, 6 * 3600, lambda: reading.read(settings, data, now, price_formatter(data["currency"])))
+            done = reading.read(settings, data, now, price_formatter(data["currency"]))
         except Exception as error:
             raise HTTPException(status_code=502, detail=f"구조 읽기를 만들지 못했어요 ({type(error).__name__})")
+        ai_disk.put(key, done)
     return {"enabled": True, "reading": done}
 
 
@@ -1036,6 +1048,8 @@ AGENT_TOOLS = {
     "propose_action": propose_action,
     "fundamentals": lambda symbol: company.fundamentals(symbol.strip().upper()),
     "price_check": price_check,
+    "options_move": lambda symbol: options.expected_moves(symbol.strip().upper(), _next_earnings(symbol.strip().upper())),
+    "my_thesis": lambda symbol: _thesis_for_agent(symbol),
     "record_view": lambda **kw: record_view(**kw),
 }
 
@@ -1378,18 +1392,207 @@ def company_info(symbol: str):
         raise HTTPException(status_code=502, detail=f"회사 정보를 못 받았어요 ({type(error).__name__})")
 
 
+def _us_stock(symbol: str) -> str:
+    symbol = symbol.strip().upper()
+    if macro.is_macro(symbol) or market_of(symbol) == "KR":
+        raise HTTPException(status_code=400, detail="미국 종목·ETF 만 볼 수 있어요")
+    return symbol
+
+
+def _next_earnings(symbol: str) -> str | None:
+    try:
+        return company.fundamentals(symbol).get("next_earnings_date")
+    except Exception:
+        return None
+
+
+@app.get("/api/options/{symbol}")
+def options_move(symbol: str):
+    """옵션이 예상하는 움직임 (등가격 스트래들, 가까운 만기들 + 다음 실적 직후 만기). 15분 캐시."""
+    symbol = _us_stock(symbol)
+    try:
+        return options.expected_moves(symbol, _next_earnings(symbol))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"옵션 정보를 못 받았어요 ({type(error).__name__}: {str(error)[:80]})")
+
+
+@app.get("/api/peers/{symbol}")
+def peers_compare(symbol: str, refresh: bool = False):
+    """경쟁사 비교 표. 고르기는 디스크에 저장(반년, refresh=1 이면 다시 고름), 숫자는 야후·토스 캐시."""
+    symbol = _us_stock(symbol)
+    s = get_settings()
+    try:
+        prof = company.profile(s, symbol, load_stock(symbol)[0])
+        if refresh:
+            _cache.pop(f"peers:{symbol}", None)
+        return cached(f"peers:{symbol}", 3600, lambda: peers.compare(s, symbol, prof, lambda x: load_stock(x)[:2], refresh))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"경쟁사 비교를 못 만들었어요 ({type(error).__name__})")
+
+
+# ── 투자 논리 추적 (backend/thesis.py) ──
+thesis_store = thesis.Store(get_settings().data_dir / "theses.json")
+
+
+def thesis_facts(symbol: str, since: str | None = None) -> dict:
+    """논리 정리·점검에 줄 사실. 전부 코드가 모은 숫자와 기사 (AI 는 이것만 본다)."""
+    info, daily, _ = load_stock(symbol)
+    spy = load_stock(judgments.BENCH)[1]
+    last = daily[-1]["close"]
+    ago = lambda cs, n: round((cs[-1]["close"] / cs[-1 - n]["close"] - 1) * 100, 1) if len(cs) > n else None
+    out = {"name": info.get("name"), "price_now": last, "price_date": daily[-1]["time"],
+           "change_pct": {"5d": ago(daily, 5), "20d": ago(daily, 20), "60d": ago(daily, 60), "spy_20d": ago(spy, 20)}}
+    if since:
+        d0 = since[:10]
+        base = next((c for c in daily if c["time"] >= d0), None)
+        sb = next((c for c in spy if c["time"] >= d0), None)
+        if base and sb:
+            out["since_thesis"] = {"from": base["time"], "stock_pct": round((last / base["close"] - 1) * 100, 1),
+                                   "spy_pct": round((spy[-1]["close"] / sb["close"] - 1) * 100, 1)}
+    try:
+        prof = company.profile(get_settings(), symbol, info)
+        out["company"] = {"type": prof.get("type"), "industry": prof.get("industry_ko") or prof.get("industry"), "summary": prof.get("summary")}
+    except Exception:
+        pass
+    # 시장·기초자산 흐름: 논리가 비트코인·반도체 같은 바깥 가격에 기대는 일이 많다 (없으면 '판단 못함'이 나왔다)
+    market = {}
+    for label, get in (("나스닥 100 (QQQ)", lambda: load_stock("QQQ")[1]), ("비트코인", lambda: macro.daily_candles("BTC-USD"))):
+        try:
+            cs = get()
+            market[label] = {"5d": ago(cs, 5), "20d": ago(cs, 20), "60d": ago(cs, 60), "last": round(cs[-1]["close"], 2)}
+        except Exception:
+            pass
+    try:
+        u = underlying.resolve(symbol, info)
+        if u:
+            cs = load_stock(u["quote"])[1] if u.get("quote_is_stock") else macro.daily_candles(u["quote"])
+            market[f"기초자산 {u.get('label', u['quote'])}"] = {"5d": ago(cs, 5), "20d": ago(cs, 20), "60d": ago(cs, 60)}
+    except Exception:
+        pass
+    out["market"] = market
+    try:
+        out["fundamentals"] = {k: v for k, v in company.fundamentals(symbol).items() if k != "source"}
+    except Exception:
+        pass
+    try:
+        out["news"] = _news_for_agent(symbol)
+    except Exception:
+        pass
+    try:
+        m = options.expected_moves(symbol, (out.get("fundamentals") or {}).get("next_earnings_date"))
+        out["options"] = {"expiries": [{k: e[k] for k in ("expiry", "move_pct", "atm_iv_pct", "put_call_oi")} for e in m["expiries"][:2]],
+                          "earnings": m.get("earnings")}
+    except Exception:
+        pass
+    held = holding_of(symbol)
+    if held:
+        out["holding"] = {"quantity": held["quantity"], "avg_price": held["avg_price"], "pl_pct": round((last / held["avg_price"] - 1) * 100, 1)}
+    return out
+
+
+@app.get("/api/thesis/{symbol}")
+def thesis_get(symbol: str):
+    symbol = _us_stock(symbol)
+    t = thesis_store.get(symbol)
+    return {"thesis": t, "stale": thesis.stale(t) if t else None}
+
+
+class ThesisDraftBody(BaseModel):
+    why: str = ""
+
+
+@app.post("/api/thesis/{symbol}/draft")
+def thesis_draft(symbol: str, body: ThesisDraftBody):
+    """'왜 샀나'를 기둥·틀린 조건·이벤트로 나눈 초안 (저장하지 않는다)."""
+    symbol = _us_stock(symbol)
+    try:
+        return thesis.draft(get_settings(), symbol, body.why.strip()[:2000], thesis_facts(symbol))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"정리하지 못했어요 ({type(error).__name__})")
+
+
+class ThesisBody(BaseModel):
+    why: str = ""
+    pillars: list[str] = []
+    invalid_if: list[str] = []
+    catalysts: list[str] = []
+    horizon: str = ""
+
+
+@app.put("/api/thesis/{symbol}")
+def thesis_save(symbol: str, body: ThesisBody):
+    symbol = _us_stock(symbol)
+    old = thesis_store.get(symbol) or {}
+    pillars = thesis.clean_lines(body.pillars, 6)
+    if not pillars:
+        raise HTTPException(status_code=400, detail="논리 기둥을 하나 이상 적어 주세요")
+    t = {**old, "why": body.why.strip()[:2000], "pillars": pillars, "invalid_if": thesis.clean_lines(body.invalid_if, 5),
+         "catalysts": thesis.clean_lines(body.catalysts, 6), "horizon": body.horizon.strip()[:40], "updated_at": thesis.now_iso()}
+    if not old:
+        t.update(created_at=thesis.now_iso(), entry_price=load_stock(symbol)[1][-1]["close"], checks=[])
+    t["earnings_watch"] = _next_earnings(symbol) or old.get("earnings_watch")
+    thesis_store.put(symbol, t)
+    return {"thesis": t, "stale": thesis.stale(t)}
+
+
+@app.delete("/api/thesis/{symbol}")
+def thesis_delete(symbol: str):
+    thesis_store.put(_us_stock(symbol), None)
+    return {"ok": True}
+
+
+@app.post("/api/thesis/{symbol}/check")
+def thesis_check(symbol: str):
+    """논리가 아직 유효한지 점검하고 기록에 덧붙인다."""
+    symbol = _us_stock(symbol)
+    t = thesis_store.get(symbol)
+    if not t:
+        raise HTTPException(status_code=404, detail="먼저 투자 논리를 저장해 주세요")
+    try:
+        c = thesis.check(get_settings(), symbol, t, thesis_facts(symbol, t.get("created_at")))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"점검하지 못했어요 ({type(error).__name__})")
+    t = {**t, "checks": (t.get("checks") or [])[-(thesis.MAX_CHECKS - 1):] + [c], "earnings_watch": _next_earnings(symbol) or t.get("earnings_watch")}
+    thesis_store.put(symbol, t)
+    return {"thesis": t, "stale": thesis.stale(t), "check": c}
+
+
+def _thesis_for_agent(symbol: str) -> dict:
+    symbol = symbol.strip().upper()
+    t = thesis_store.get(symbol)
+    if not t:
+        return {"thesis": None, "note": "이 종목엔 저장된 투자 논리가 없어요"}
+    last = (t.get("checks") or [None])[-1]
+    return {"why": t.get("why"), "pillars": t.get("pillars"), "invalid_if": t.get("invalid_if"), "catalysts": t.get("catalysts"),
+            "created_at": t.get("created_at"), "entry_price": t.get("entry_price"), "stale": thesis.stale(t),
+            "last_check": {k: last.get(k) for k in ("at", "overall", "summary", "pillars")} if last else None}
+
+
 @app.get("/api/calendar")
-def market_calendar_api(days: int = 28, back: int = 3):
-    """증권 달력: 오늘 기준 back 일 전부터 days 일 동안의 미국 경제지표 발표와 실적 발표 (내 관심·보유 + 주요 대형주)."""
+def market_calendar_api(days: int = 28, back: int = 3, month: str = ""):
+    """증권 달력: 오늘 기준 back 일 전부터 days 일 동안의 미국 경제지표 발표와 실적 발표 (내 관심·보유 + 주요 대형주).
+    month=YYYY-MM 이면 그 달 한 달치 (한국 날짜 1일은 미국 전날 밤 발표까지 들어가게 하루 앞에서 시작). 2년 전 ~ 6달 뒤까지."""
     days, back = max(7, min(int(days), 42)), max(0, min(int(back), 14))
     try:
         held = [h["symbol"] for h in holdings().get("items", [])]
     except Exception:
         held = []
     mine = list(dict.fromkeys(store.watchlist() + held))
-    start = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=back)
-    key = f"calendar:{start}:{days}:{','.join(sorted(mine))}"
-    return cached(key, 1800, lambda: market_calendar.build(start, days + back, get_settings().finnhub_api_key, mine))
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    if month:
+        try:
+            first = date.fromisoformat(f"{month}-01")
+        except ValueError:
+            raise HTTPException(400, "month 는 YYYY-MM")
+        if not (today - timedelta(days=740) <= first <= today + timedelta(days=190)):
+            raise HTTPException(400, "2년 전부터 6달 뒤까지만 볼 수 있어요")
+        nxt = (first + timedelta(days=32)).replace(day=1)
+        start, total = first - timedelta(days=1), (nxt - first).days
+        ttl = 1800 if nxt >= today - timedelta(days=7) else 86400                 # 지난 달은 바뀔 일이 거의 없다
+    else:
+        start, total, ttl = today - timedelta(days=back), days + back, 1800
+    key = f"calendar:{start}:{total}:{','.join(sorted(mine))}"
+    return cached(key, ttl, lambda: market_calendar.build(start, total, get_settings().finnhub_api_key, mine))
 
 
 @app.get("/api/fx")

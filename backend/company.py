@@ -103,6 +103,7 @@ def fundamentals(symbol: str) -> dict:
         return ("-" if v < 0 else "") + text
     for k in ("market_cap", "total_assets"):
         if k in out:
+            out[f"{k}_usd"] = out[k] if isinstance(out[k], (int, float)) else None    # 비교·거르기용 원래 숫자
             out[k] = money(out[k])
     for k in ("total_cash", "total_debt", "free_cashflow"):
         if k in out.get("balance", {}):

@@ -36,6 +36,10 @@ EVENTS = [
     ("Philadelphia Fed Manufacturing", "필라델피아 연은 제조업", 1), ("NY Empire State Manufacturing", "뉴욕 연은 제조업", 1),
     ("Crude Oil Inventories", "원유 재고", 1),
 ]
+# 달력 칸에 쓰는 짧은 이름 (중요 지표만)
+SHORT = {"FOMC 금리 결정": "FOMC", "FOMC 회의록": "FOMC 회의록", "FOMC 기자회견": "FOMC", "근원 소비자물가(CPI)": "CPI", "소비자물가(CPI)": "CPI",
+         "근원 생산자물가(PPI)": "PPI", "생산자물가(PPI)": "PPI", "근원 PCE 물가": "PCE", "PCE 물가": "PCE", "비농업 고용": "고용",
+         "실업률": "고용", "시간당 임금": "고용", "GDP 성장률": "GDP", "근원 소매판매": "소매판매", "소매판매": "소매판매"}
 SKIP = ("Core Durable", "Durables Excluding", "Goods Orders Non Defense", "4-Week Avg", "Continuing Jobless", "Retail Inventories",
         "Goods Trade Balance", "Retail Control", "GDPNow", "Cleveland", "Nowcast", "Wholesale")
 
@@ -81,13 +85,14 @@ def econ_day(day: str, today: str) -> list[dict]:
             continue
         ko, level = m
         t = _clean(x.get("gmt"))
-        kst = ""
+        kst, kst_date, kst_time = "", day, ""
         if re.fullmatch(r"\d{1,2}:\d{2}", t):                    # 이 API 의 시각은 미국 동부 시간이다 (CPI 08:30, FOMC 14:00)
             hh, mm = map(int, t.split(":"))
             dt = datetime.fromisoformat(day).replace(hour=hh, minute=mm, tzinfo=ET).astimezone(KST)
-            kst = dt.strftime("%m-%d %H:%M")
+            kst, kst_date, kst_time = dt.strftime("%m-%d %H:%M"), dt.date().isoformat(), dt.strftime("%H:%M")
         key = (ko, t)
-        e = out.setdefault(key, {"name": ko, "name_en": x.get("eventName"), "level": level, "time_et": t, "time_kst": kst, "values": []})
+        e = out.setdefault(key, {"name": ko, "short": SHORT.get(ko, ko), "name_en": x.get("eventName"), "level": level, "time_et": t,
+                                 "time_kst": kst, "kst_date": kst_date, "kst_time": kst_time, "values": []})
         val = {"actual": _clean(x.get("actual")), "consensus": _clean(x.get("consensus")), "previous": _clean(x.get("previous"))}
         if any(val.values()) and val not in e["values"]:
             e["values"].append(val)
@@ -133,7 +138,8 @@ def earnings(start: str, end: str, token: str, mine: list[str]) -> dict[str, lis
 
 
 def build(start: date, days: int, token: str, mine: list[str]) -> dict:
-    """start 부터 days 일. 주말은 뺀다 (발표가 없다)."""
+    """start 부터 days 일, **한국 날짜** 기준으로 묶는다 (주말 포함: 미국 금요일 장 후 실적은 한국 토요일 새벽).
+    경제지표는 한국 시각으로 바꾼 날짜에, 실적은 장 후면 다음 날(한국 새벽)에, 장 전이면 같은 날(한국 밤)에 둔다."""
     today = datetime.now(ET).date().isoformat()
     span = [start + timedelta(d) for d in range(days)]
     weekdays = [d.isoformat() for d in span if d.weekday() < 5]
@@ -152,6 +158,22 @@ def build(start: date, days: int, token: str, mine: list[str]) -> dict:
         earn = earnings(span[0].isoformat(), span[-1].isoformat(), token, mine) if token else {}
     except Exception as error:
         earn, errors = {}, errors + [f"실적: {type(error).__name__}"]
-    return {"today": today, "errors": errors[:5], "mine": mine,
-            "days": [{"date": d, "weekday": "월화수목금"[date.fromisoformat(d).weekday()], "econ": econ.get(d, []), "earnings": earn.get(d, [])}
-                     for d in weekdays]}
+    by: dict[str, dict] = {}
+    slot = lambda d: by.setdefault(d, {"econ": [], "earnings": []})
+    for us, evs in econ.items():
+        for e in evs:
+            slot(e.get("kst_date") or us)["econ"].append({**e, "us_date": us})
+    nxt = lambda d: (date.fromisoformat(d) + timedelta(days=1)).isoformat()
+    for us, es in earn.items():
+        for x in es:
+            after = x["when"] == "장 후"
+            note = {"장 후": "미국 장 마감 후 → 한국 새벽", "장 전": "미국 장 시작 전 → 한국 밤"}.get(x["when"], "시각 미정 (미국 날짜)")
+            slot(nxt(us) if after else us)["earnings"].append({**x, "us_date": us, "kst_note": note})
+    for v in by.values():
+        v["econ"].sort(key=lambda e: (e["kst_time"] or "99", -e["level"]))
+        v["earnings"].sort(key=lambda e: (not e["mine"], e["symbol"]))
+    kst_today = datetime.now(KST).date().isoformat()
+    span_kst = [start + timedelta(d) for d in range(days + 1)]
+    return {"today": kst_today, "errors": errors[:5], "mine": mine, "timezone": "KST",
+            "days": [{"date": d.isoformat(), "weekday": "월화수목금토일"[d.weekday()], **by.get(d.isoformat(), {"econ": [], "earnings": []})}
+                     for d in span_kst]}

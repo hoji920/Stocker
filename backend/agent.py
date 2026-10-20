@@ -58,6 +58,8 @@ _SYSTEM = (
     "최근 60봉 동안 그 가격 위에서 마감한 날 수와 마지막 날, 근처 자동 선, 보유 중이면 그 가격에 팔 때 평단 대비 수익률. 사용자가 짚은 근거(예: '두 번 저항')가 "
     "자료와 맞는지 짚는다. 그다음에 나머지 종합 검토를 짧게.\n"
     "   ● 보유 중인 종목이면(check_my_rules 의 holding) 평단·수량·지금 수익률을 꼭 말한다.\n"
+    "   ● 종합 검토 때 my_thesis 도 부른다. 저장된 투자 논리가 있으면 '내 논리' 섹션을 두고 기둥이 지금 자료로 유지되는지 한 줄씩 짚는다.\n"
+    "   ● 실적 발표나 큰 이벤트가 20거래일 안에 있으면 options_move 도 불러 '곧 있을 일'에 옵션이 예상하는 움직임(±%)을 붙인다.\n"
     "   ● 손익비(rr)는 '지금 살 때'의 숫자다. 매도·보유를 묻는 질문에서는 손익비를 아예 꺼내지 않는다 (근거에도, 내 규칙 줄에도).\n"
     "   ● 종합 의견은 근거와 같은 방향이어야 한다: 올라갈 근거가 더 무거우면 강함, 내려갈 근거가 더 무거우면 약함, 비슷하면 중립. "
     "이유 문장이 반대 방향 근거만 말하면 안 된다. 근거의 출처 괄호는 그 사실이 실제로 나온 곳만 쓴다.\n"
@@ -132,6 +134,9 @@ TOOLS = [
     ("price_check", "사용자가 말한 특정 가격을 차트에서 본다: 현재가에서 몇 %·ATR 몇 배, 그 가격 근처에서 방향이 바뀐 날(고점·저점)과 "
                     "그 뒤 10봉 동안 움직임, 최근 1년 그 가격 위에서 마감한 날 수, 근처 자동 지지/저항선, 보유 중이면 그 가격에 팔 때 평단 대비 수익.",
      {"type": "object", "properties": {"symbol": {"type": "string"}, "price": {"type": "number"}}, "required": ["symbol", "price"]}),
+    ("options_move", "옵션이 예상하는 움직임: 가까운 만기들의 등가격 스트래들로 본 '만기까지 ±몇 %'와 범위, 내재변동성, 풋/콜 비율, "
+                     "다음 실적 직후 만기의 예상 움직임.", _sym),
+    ("my_thesis", "사용자가 이 종목에 적어 둔 투자 논리(왜 샀나, 기둥, 틀렸다고 볼 조건, 기다리는 이벤트)와 마지막 점검 결과.", _sym),
     ("record_view", "종합 의견을 판단 기록에 남긴다 (20거래일 뒤 S&P 500 대비로 자동 채점). 종합 검토를 했으면 답하기 전에 꼭 부른다.",
      {"type": "object", "properties": {
          "symbol": {"type": "string"},
@@ -144,7 +149,7 @@ TOOLS = [
 LABELS = {"check_my_rules": "내 규칙 대조", "read_chart": "차트 읽기", "get_news": "뉴스", "why_moved": "움직인 이유",
           "market_brief": "시장 요약", "my_portfolio": "내 계좌", "find_symbol": "종목 찾기", "scan_my_rules": "전체 규칙 대조",
           "backtest_my_rules": "과거 대조", "propose_action": "할 일 제안", "fundamentals": "펀더멘탈", "record_view": "판단 기록",
-          "price_check": "그 가격 보기"}
+          "price_check": "그 가격 보기", "options_move": "옵션 예상 움직임", "my_thesis": "내 투자 논리"}
 
 
 def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | None, rules_note: str = "", about: str = "") -> dict:
