@@ -2108,10 +2108,11 @@ function renderJudgments() {
   // 비용은 거의 전부 두 번째(비싼) 모델에서 나온다 → 모델별 건수를 같이 보여준다
   const perModel = p.models.map((m) => `${m} ${j.by_model[m].toLocaleString()}건`).join(", ");
   run.title = `AI 를 ${left.toLocaleString()}번 불러요 (한 주 전체: ${perModel}). 한 건에 약 1,200 토큰이에요.`;
-  const models = p.models.map((m, i) => (i === 0 ? `${m}(전 종목)` : `${m}(고정 ${p.premium}종목만)`)).join(", ");
+  const models = p.models.map((m, i) => (i === 0 ? `${m}(전 종목)` : p.bridge_now ? `${m}(전 종목 · 모델 비교 ${p.bridge.join("~")})` : `${m}(고정 ${p.premium}종목만)`)).join(", ");
   const lines = [
     `이번 주(${j.week}) ${j.recorded_this_week.toLocaleString()}건 기록` + (left <= 0 ? " · 이번 주는 끝났어요" : ` · ${left.toLocaleString()}건 남음` + (j.due ? "" : " · 월요일 아침 6시 이후에 남겨요")),
-    `이번 주 종목 ${p.symbols}개 (중형·고변동성 ${p.universe} + 내 종목` + (j.week >= p.ndx_from ? ` + 나스닥 100 중 ${p.ndx}, 겹치는 종목은 한 번만` : `. 나스닥 100 중 ${p.ndx}개는 ${p.ndx_from}부터`) + `) · 모델 ${models}`,
+    `이번 주 종목 ${p.symbols}개 (중형·고변동성 ${p.universe} + 내 종목` + (j.week >= p.ndx_from ? ` + 나스닥 100 중 ${p.ndx}, 겹치는 종목은 한 번만` : `. 나스닥 100 중 ${p.ndx}개는 ${p.ndx_from}부터`)
+      + (j.week >= p.kr_from ? ` + 코스피 ${p.kr}` : `. 코스피 ${p.kr}개는 ${p.kr_from}부터 (KODEX 200 대비)`) + `) · 모델 ${models}`,
     `조건 2가지(숫자 + 기사 / 숫자만) · 채점 ${p.horizons.join("·")}거래일 뒤 (${p.bench} 대비)`,
     p.auto ? "주 1회 자동으로 남겨요." : "자동 기록은 꺼져 있어요. 버튼을 눌러야 남겨요.",
   ];
@@ -2135,15 +2136,19 @@ function renderJudgments() {
       el("td", {}, `${r.scored} / ${r.recorded}`), el("td", {}, r.calls ? `${pc(r.hit_rate_pct)} (${r.calls}건)` : "–"),
       el("td", {}, sg(r.mean_signed_excess_pct)), el("td", {}, r.scored ? `${pc(r.always_up_hit_rate_pct)} · ${sg(r.always_up_mean_excess_pct)}` : "–"),
       // 같은 기준선을 모델이 방향을 고른 기록에서만: '맞힌 비율'과 같은 묶음이라 이쪽과 비교하는 게 공정하다
-      el("td", {}, r.calls ? `${pc(r.always_up_calls_hit_rate_pct)} · ${sg(r.always_up_calls_mean_excess_pct)}` : "–")));
+      el("td", {}, r.calls ? `${pc(r.always_up_calls_hit_rate_pct)} · ${sg(r.always_up_calls_mean_excess_pct)}` : "–"),
+      // 보조: 종목이 원래 시장보다 크게(베타) 움직인 몫을 뺀 초과수익. 모델 / 같은 종목 전부 '강함'
+      el("td", {}, r.beta_calls ? `${pc(r.hit_rate_beta_pct)} · ${sg(r.mean_signed_excess_beta_pct)} / ${pc(r.always_up_calls_hit_rate_beta_pct)} · ${sg(r.always_up_calls_mean_excess_beta_pct)}` : "–")));
     return [el("div", { class: "brief-sub" }, caption), el("div", { class: "judge-scroll" }, el("table", { class: "judge-table" },
-      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면"].map((h) => el("th", {}, h))), ...body))];
+      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면", "베타 반영 (모델 / 같은 종목 '강함')"].map((h) => el("th", {}, h))), ...body))];
   };
   const anyScored = j.fixed.some((r) => r.scored);
   $("#judge-board").replaceChildren(
     ...table(j.fixed, "중형·고변동성 100종목 성적 (주된 판정은 20일)"),
     ...table(j.ndx || [], "나스닥 100 성적"),
     ...table(j.paired || [], "모델 비교: 두 모델이 모두 판단한 종목·주만"),
+    ...table(j.kr || [], "코스피 100 성적 (KODEX 200 대비, 미국과 따로)"),
+    ...table(j.kr_paired || [], "코스피 모델 비교: 두 모델이 모두 판단한 종목·주만"),
     ...table(j.mine, "내 종목 성적 (참고)"),
     ...table(j.asked || [], "내가 물어본 판단 (질문 탭의 종합 의견, 종목·날짜마다 처음 것만)"),
     ...((j.asked_records || []).length ? [el("details", {}, el("summary", {}, `질문 탭에서 남긴 의견 최근 ${j.asked_records.length}건`),

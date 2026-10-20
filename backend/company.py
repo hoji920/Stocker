@@ -94,20 +94,25 @@ def fundamentals(symbol: str) -> dict:
             "dividend_yield_pct": pct(raw(sd, "dividendYield")),
             "next_earnings_date": dates[0] if dates else None,
         }
-    # 큰 금액은 읽는 말로 (−22,587,523,072 같은 숫자를 LLM 이 그대로 옮겨 적었다)
-    def money(v):
+    # 큰 금액은 읽는 말로 (−22,587,523,072 같은 숫자를 LLM 이 그대로 옮겨 적었다). 단위는 야후가 준 통화대로
+    # (국내 종목 .KS 는 원. 예전엔 전부 '달러'로 붙여서 현대차 시가총액이 '81조 달러'로 나갔다)
+    unit = lambda cur: {"USD": "달러", "KRW": "원"}.get(cur or "USD", cur)
+
+    def money(v, cur):
         if not isinstance(v, (int, float)):
             return v
-        a = abs(v)
-        text = f"{a / 1e12:.2f}조 달러" if a >= 1e12 else f"{a / 1e8:,.0f}억 달러" if a >= 1e8 else f"{a / 1e4:,.0f}만 달러"
+        a, u = abs(v), unit(cur)
+        text = f"{a / 1e12:.2f}조 {u}" if a >= 1e12 else f"{a / 1e8:,.0f}억 {u}" if a >= 1e8 else f"{a / 1e4:,.0f}만 {u}"
         return ("-" if v < 0 else "") + text
+    price_cur, report_cur = sd.get("currency") or fp.get("currency"), fd.get("financialCurrency") or sd.get("currency")
     for k in ("market_cap", "total_assets"):
         if k in out:
-            out[f"{k}_usd"] = out[k] if isinstance(out[k], (int, float)) else None    # 비교·거르기용 원래 숫자
-            out[k] = money(out[k])
+            usd = (price_cur or "USD") == "USD" and isinstance(out[k], (int, float))
+            out[f"{k}_usd"] = out[k] if usd else None                 # 비교·거르기용 원래 숫자 (달러일 때만)
+            out[k] = money(out[k], price_cur)
     for k in ("total_cash", "total_debt", "free_cashflow"):
         if k in out.get("balance", {}):
-            out["balance"][k] = money(out["balance"][k])
+            out["balance"][k] = money(out["balance"][k], report_cur)
     prune = lambda d: {k: (prune(v) if isinstance(v, dict) else v) for k, v in d.items() if v not in (None, {}, "")}
     out = prune(prune(out))
     out["source"] = "야후 파이낸스 (몇 시간 늦을 수 있음)"

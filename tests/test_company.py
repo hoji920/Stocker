@@ -17,3 +17,20 @@ def test_profile_is_saved_and_reused_for_a_month(monkeypatch, tmp_path):
     path.write_text(path.read_text(encoding="utf-8").replace('"saved_at": ', '"saved_at": -'), encoding="utf-8")   # 오래된 것
     company.profile(s, "NVDA")
     assert calls == ["NVDA", "NVDA"]
+
+
+def test_money_uses_the_currency_yahoo_reports(monkeypatch):
+    from backend import company
+    payload = {"quoteSummary": {"result": [{"quoteType": {"quoteType": "EQUITY"}, "summaryDetail": {"marketCap": {"raw": 8.169e13}, "currency": "KRW"},
+                                            "financialData": {"totalCash": {"raw": 8.79e13}, "financialCurrency": "KRW"}}]}}
+
+    class R:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    class C:
+        def get(self, *a, **k): return R()
+    monkeypatch.setattr(company, "_client", lambda: (C(), "crumb"))
+    company._fund.pop("TEST.KS", None)
+    f = company.fundamentals("TEST.KS")
+    assert f["market_cap"] == "81.69조 원" and f["balance"]["total_cash"] == "87.90조 원" and "market_cap_usd" not in f

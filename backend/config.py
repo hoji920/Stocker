@@ -19,6 +19,7 @@ class Settings:
     naver_client_secret: str
     finnhub_api_key: str
     openai_api_key: str
+    openai_judge_api_key: str   # 판단 기록 본 실험 전용 키 (없으면 openai_api_key). 앱의 다른 기능과 키를 나눠 쓴다
     openai_model: str
     openai_brief_model: str     # 시장 요약 전용 (하루 한 번만 부르니 더 좋은 모델을 쓴다)
     openai_agent_model: str     # 채팅 에이전트 (도구를 골라 쓰는 일이라 mini 보다 한 단계 위)
@@ -63,6 +64,7 @@ def get_settings() -> Settings:
         naver_client_secret=os.getenv("NAVER_CLIENT_SECRET", ""),
         finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+        openai_judge_api_key=os.getenv("OPENAI_JUDGE_API_KEY", "") or os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         openai_brief_model=os.getenv("OPENAI_BRIEF_MODEL", "gpt-5.5"),
         openai_agent_model=os.getenv("OPENAI_AGENT_MODEL", "gpt-5.4-mini"),

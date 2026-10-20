@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace as NS
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -178,7 +179,8 @@ def test_score_uses_price_at_judgment_and_same_exit_day():
     data = {"AAA": stock, "SPY": bench}
     up, down = _rec(d20="outperform"), _rec(arm="nonews", d20="underperform", d5="outperform")
     s = j.score([up, down], data.__getitem__)
-    assert s[0]["scored"][20] == {"ret": 20.0, "bench": 5.0, "excess": 15.0, "exit_day": "d0030", "hit": True}
+    assert s[0]["scored"][20] == {"ret": 20.0, "bench": 5.0, "excess": 15.0, "exit_day": "d0030", "hit": True,
+                                  "beta": None, "excess_beta": None, "hit_beta": None}     # 기준일 전 시세가 120일이 안 돼 베타 없음
     assert s[0]["scored"][5]["hit"] is None                                          # neutral 은 판단 안 함
     assert s[1]["scored"][20]["hit"] is False and s[1]["scored"][5]["hit"] is True
     asked = []
@@ -305,3 +307,117 @@ def test_three_arms_add_one_kind_of_information_at_a_time(monkeypatch):
     none = j.make_records(get_settings(), "2026-W43", "AAA", "에이", False, cs, cs, [], [("m", "fund")],
                           now=datetime(2026, 12, 1, tzinfo=j.ET), fund=None)
     assert none[0]["fundamentals"] is False                                     # 야후에서 못 받으면 없이 판단하고 남긴다
+
+
+def test_beta_uses_only_bars_up_to_the_judgment_day():
+    m = np.random.default_rng(0).normal(0, 0.01, 300)
+    bench = _candles(list(100 * np.cumprod(1 + m)))
+    stock = _candles(list(100 * np.cumprod(1 + 2 * m)))                     # 시장의 정확히 2배로 움직이는 종목
+    ser = lambda cs: ([c["time"] for c in cs], [c["close"] for c in cs])
+    as_of = stock[200]["time"]
+    assert abs(j.beta_before(ser(stock), ser(bench), as_of) - 2.0) < 1e-6
+    wild = stock[:201] + [dict(c, close=c["close"] * (1 + 5 * (k % 2))) for k, c in enumerate(stock[201:])]
+    assert j.beta_before(ser(wild), ser(bench), as_of) == j.beta_before(ser(stock), ser(bench), as_of)   # 기준일 뒤 시세는 안 쓴다
+    assert j.beta_before(ser(stock[:100]), ser(bench), stock[99]["time"]) is None                      # 120일 미만이면 없음
+
+
+def test_beta_adjusted_excess_takes_out_the_part_that_just_followed_the_market():
+    # 시장의 2배로 움직이는 종목: 시장 +5% 에 +12% → 그냥 초과수익 +7, 베타 반영 12 − 2×5 = +2
+    days = 160
+    bench = [100 * 1.001 ** k * (1 + 0.01 * (k % 3 - 1)) for k in range(days)]
+    stock = [100.0]
+    for k in range(1, days):
+        stock.append(stock[-1] * (1 + 2 * (bench[k] / bench[k - 1] - 1)))
+    bench += [bench[-1] * 1.05] * 25
+    stock += [stock[days - 1] * 1.12] * 25
+    data = {"MU": _candles(stock), "SPY": _candles(bench)}
+    as_of = data["MU"][days - 1]["time"]
+    rec = _rec("MU", d20="outperform", as_of=as_of, price=stock[days - 1])
+    rec["bench_price"] = bench[days - 1]
+    x = j.score([rec], data.__getitem__)[0]["scored"][20]
+    assert (x["beta"], x["excess"], x["excess_beta"], x["hit_beta"]) == (2.0, 7.0, 2.0, True)
+    row = [r for r in j.summarize(j.score([rec], data.__getitem__)) if r["horizon"] == 20][0]
+    assert (row["beta_calls"], row["hit_rate_beta_pct"], row["mean_signed_excess_beta_pct"]) == (1, 100.0, 2.0)
+    assert (row["always_up_calls_hit_rate_beta_pct"], row["always_up_calls_mean_excess_beta_pct"]) == (100.0, 2.0)
+
+
+def test_bridge_weeks_let_the_second_model_judge_every_fixed_symbol():
+    models, other = ("mini", "big"), next(x for x in j.UNIVERSE if x not in j.PREMIUM)
+    assert j.models_for(other, models, "2026-W43") == ("mini",)
+    assert j.models_for(other, models, "2026-W44") == ("mini", "big") == j.models_for("AAPL", models, "2026-W52")
+    assert j.models_for(other, models, "2027-W01") == ("mini",)                          # 9주로 끝
+    assert j.models_for("KORU", models, "2026-W44") == ("mini",)                        # 고정 종목이 아닌 내 종목은 그대로
+    assert j.is_bridge(other, "big", models, "2026-W44") and not j.is_bridge(j.PREMIUM[0], "big", models, "2026-W44")
+    assert not j.is_bridge(other, "mini", models, "2026-W44")
+
+
+def test_bridge_uses_the_app_key_and_a_failure_skips_only_that_call(monkeypatch):
+    s = replace(get_settings(), openai_api_key="school", openai_judge_api_key="mine", openai_judge_models=("mini", "big"))
+    used = []
+
+    def fake(settings, model, prompt):
+        used.append((model, settings.openai_api_key))
+        if model == "big":
+            raise RuntimeError("billing")
+        return {"d5": "neutral", "c5": 50, "d20": "neutral", "c20": 50, "reason": "", "invalid_if": "", "tokens": 1}
+    monkeypatch.setattr(j, "judge", fake)
+    other = next(x for x in j.UNIVERSE if x not in j.PREMIUM)
+    days = pd.bdate_range(end="2026-10-23", periods=300).strftime("%Y-%m-%d")
+    candles = [{"time": d, "open": 100, "high": 101, "low": 99, "close": 100.0 + i, "volume": 10.0} for i, d in enumerate(days)]
+    now = datetime(2026, 10, 26, 8, 30, tzinfo=j.KST)
+    recs = j.make_records(s, "2026-W44", other, other, False, candles, candles, [], [("mini", "nonews"), ("big", "nonews")], now=now)
+    assert used == [("mini", "mine"), ("big", "school")]
+    assert [(r["model"], r.get("bridge")) for r in recs] == [("mini", None)]          # 보조 실험이 실패해도 본 실험은 적힌다
+    with pytest.raises(RuntimeError):                                                    # 본 실험(PREMIUM 의 big)이 실패하면 그대로 에러
+        j.make_records(s, "2026-W44", j.PREMIUM[0], "x", False, candles, candles, [], [("big", "nonews")], now=now)
+
+
+def test_kospi_joins_from_w44_with_the_same_model_setup_as_the_us():
+    import random
+    assert sorted(j.KR_PREMIUM) == sorted(random.Random(20261020).sample(sorted(j.KR_UNIVERSE), 30))
+    assert len(j.KR_UNIVERSE) == len(set(j.KR_UNIVERSE)) == 100 and j.kr_symbols_for("2026-W43") == []
+    models, prem, other = ("mini", "big"), j.KR_PREMIUM[0], next(x for x in j.KR_UNIVERSE if x not in j.KR_PREMIUM)
+    assert j.combos_for(prem, models, "2026-W44") == [("mini", "nonews"), ("mini", "fund"), ("mini", "fund_news"),
+                                                      ("big", "nonews"), ("big", "fund"), ("big", "fund_news"),
+                                                      ("mini", "nonews_r"), ("mini", "fund_news_r")]
+    assert j.models_for(other, models, "2026-W44") == ("mini", "big") and j.is_bridge(other, "big", models, "2026-W44")
+    assert j.models_for(other, models, "2027-W01") == ("mini",)
+    assert (j.market_of("005930"), j.bench_of("005930"), j.bench_of("AAPL")) == ("KR", "069500", "SPY")
+    assert "KODEX 200" in j._SYSTEM_KR and "SPY" not in j._SYSTEM_KR and j.system_for("AAPL") == j._SYSTEM
+
+
+def test_kospi_bars_finish_at_the_krx_close():
+    bars = [{"time": d, "close": 1.0} for d in ("2026-10-23", "2026-10-26")]
+    monday_morning = datetime(2026, 10, 26, 8, 30, tzinfo=j.KST)
+    assert [b["time"] for b in j.completed(bars, monday_morning, "KR")] == ["2026-10-23"]
+    assert [b["time"] for b in j.completed(bars, datetime(2026, 10, 26, 15, 45, tzinfo=j.KST), "KR")] == ["2026-10-23", "2026-10-26"]
+
+
+def test_kospi_entry_is_the_first_30_minutes_of_the_krx_session_without_nextrade_bars():
+    at = datetime(2026, 10, 26, 7, 0, tzinfo=j.KST).timestamp()                  # 월요일 아침 판단
+    open_ts = datetime(2026, 10, 26, 9, 0, tzinfo=j.KST).timestamp()
+    assert j.entry_ready_at(at, market="KR") == open_ts + 30 * 60
+    nxt = [{"time": open_ts - 3600 + 60 * k, "close": 999.0} for k in range(60)]  # 넥스트레이드 08:00~09:00
+    krx = [{"time": open_ts + 60 * k, "close": 100.0 + k} for k in range(40)]
+    e = j.entry_from_minutes(nxt + krx, at, open_ts + 31 * 60, market="KR")
+    assert e == {"t0": open_ts, "price": round(sum(100.0 + k for k in range(30)) / 30, 4), "bars": 30}
+    assert j.entry_from_minutes(nxt + krx, at, open_ts + 20 * 60, market="KR") is None      # 30분이 아직 안 끝났다
+
+
+def test_kospi_records_use_kodex_200(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(j, "judge", lambda s, model, prompt, system=j._SYSTEM: seen.update(system=system, prompt=prompt) or
+                        {"d5": "neutral", "c5": 50, "d20": "outperform", "c20": 60, "reason": "", "invalid_if": "", "tokens": 1})
+    days = pd.bdate_range(end="2026-10-23", periods=300).strftime("%Y-%m-%d")
+    candles = [{"time": d, "open": 100, "high": 101, "low": 99, "close": 100.0 + i, "volume": 10.0} for i, d in enumerate(days)]
+    s = replace(get_settings(), openai_judge_models=("mini", "big"))
+    rec = j.make_records(s, "2026-W44", "005930", "삼성전자", False, candles, candles, [], [("mini", "nonews")],
+                         now=datetime(2026, 10, 26, 8, 30, tzinfo=j.KST))[0]
+    assert seen["system"] == j._SYSTEM_KR and "kodex200_return_pct" in seen["prompt"] and "spy_return_pct" not in seen["prompt"]
+    assert (rec["market"], rec["bench_symbol"], rec["kr"], rec["fixed"], rec["system_sha"]) == ("KR", "069500", True, False, j.sha(j._SYSTEM_KR))
+    # 채점은 KODEX 200 과 비교한다
+    stock = _candles([100] * 10 + [100 + i for i in range(1, 21)] + [130] * 5)
+    kodex = _candles([100] * 10 + [100 + i * 0.5 for i in range(1, 21)] + [110] * 5)
+    r = _rec("005930", d20="outperform", bench_symbol="069500", market="KR")
+    x = j.score([r], {"005930": stock, "069500": kodex, "SPY": _candles([100] * 35)}.__getitem__)[0]["scored"][20]
+    assert (x["ret"], x["bench"], x["excess"]) == (20.0, 10.0, 10.0)
