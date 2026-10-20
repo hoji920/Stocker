@@ -49,7 +49,17 @@ TRAIL_ATR, SMA, MIN_RISK_ATR = 3.0, 200, 0.5
 FIXED_EXIT = ("기준", "A", "D", "E")
 
 # 탐색 반을 본 뒤 여기에 적는다 (확인 반을 돌리기 전에). 형식: 이름 → (설명, 진입 조건 함수, 청산 방식)
-FIXES: dict[str, tuple] = {}
+# 2026-10-14 탐색 반(218종목, D 거래 77,586건)을 보고 정함:
+# - 진입 쪽 어떤 묶음도 거래 초과수익이 0 보다 확실히 크지 않았다 (지지/채널/추세선/손익비/손절·목표 거리 전부 −0.27 ~ +0.12%p).
+#   진입 조건을 더 조이는 수정은 잡음을 고르는 것이라 하나만, 방향이 가장 뚜렷했던 것만 고른다:
+#   200일선 위에서 산 거래 −0.17%p (구간이 0 을 안 걸침) vs 아래 −0.06%p → F1 '200일선 아래(눌림)에서만 산다'
+# - 이익은 청산 쪽에서만 났다: 단순 추세(200일선 이탈 때 판다)만 거래 초과수익이 + 였다.
+#   → F2 '200일선 위에서 내 규칙 자리가 오면 사서, 목표·손절 없이 200일선 이탈 때 판다' (200일선 아래에서 사면 바로 다음 날 팔게 되므로 위에서만).
+#   단순 추세(200일선 위로 올라오면 바로 삼)와 비교하면 '선으로 고른 진입 시점'이 보탬이 되는지 알 수 있다
+FIXES: dict[str, tuple] = {
+    "F1": ("F1 내 규칙 + 200일선 아래에서만 삼", lambda info, c, sma: not np.isnan(sma) and c < sma, "fixed"),
+    "F2": ("F2 200일선 위 + 내 규칙 자리에서 사고 200일선 이탈 때 팖", lambda info, c, sma: not np.isnan(sma) and c > sma, "trend"),
+}
 
 
 # ── 데이터 ──
@@ -78,10 +88,12 @@ def fetch_full(symbols: list[str]) -> dict[str, list[dict]]:
 
 # ── 봉마다 규칙 판정 (무겁다 → 종목별로 저장) ──
 def signals(args) -> dict | None:
-    symbol, candles, my = args
+    symbol, candles, my, *rest = args                  # rest[0] = 저장 폴더 (post2018 이 따로 쓴다)
+    cache = rest[0] if rest else CACHE
     analysis.LOG_TRENDS = False
+    analysis.DESPIKE = False                            # 이전 검증과 같은 선 (튀는 꼬리 무시는 2026-10-15 에 앱에 넣었다)
     key = hashlib.md5(json.dumps([CACHE_VERSION, len(candles), candles[-1], my, MIN_RISK_ATR], sort_keys=True).encode()).hexdigest()
-    path = CACHE / f"{symbol.replace('/', '_')}.pkl"
+    path = cache / f"{symbol.replace('/', '_')}.pkl"
     if path.exists():
         try:
             saved = pickle.loads(path.read_bytes())
@@ -110,7 +122,7 @@ def signals(args) -> dict | None:
                         "sup_name": (r["support"] or {}).get("name"), "target_name": r["target"]["name"],
                         "ch_label": (r["channel"] or {}).get("label"), "ch_pos": (r["channel"] or {}).get("position_pct")}
     out = {"symbol": symbol, "start": start, "sig": sig, "sig_e": sig_e, "sig_d": sig_d}
-    CACHE.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pickle.dumps({"key": key, "out": out}))
     return out
 

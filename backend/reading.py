@@ -186,7 +186,7 @@ def facts(chart: dict, price: float, fmt) -> dict:
     # 봉이 충분하면 선 말고도: 지난 저점·고점(선을 다 내줬을 때의 다음 자리), 최근 고점·저점, 거래량
     recent = volume = None
     if len(chart["candles"]) >= 60 and "volume" in chart["candles"][-1]:
-        df = analysis.to_frame(chart["candles"])
+        df = analysis.to_frame(chart["candles"], despike=analysis.DESPIKE)
         taken = [(l["price"], l["tol"]) for kind in ("support", "resistance") for l in chart["levels"][kind]]
         lines += _swing_zones(df, price, "low", taken, fmt, pct) + _swing_zones(df, price, "high", taken, fmt, pct)
         recent, volume = _recent(df, price, chart, fmt, pct), _volume(df)

@@ -139,7 +139,9 @@ def filter_relevant(settings: Settings, name: str, symbol: str, items: list[News
             messages=[{"role": "system", "content": _FILTER_SYSTEM},
                       {"role": "user", "content": f"종목: {name} ({symbol})\n기사 {len(items)}건:\n{block}"}],
         )
-        drop = {int(d["n"]) for d in json.loads(resp.choices[0].message.content or "{}").get("drop", [])}
+        # 모델이 [{"n": 3, "why": ..}] 대신 [3, 5] 처럼 번호만 주기도 한다 (그때 TypeError 로 거르기가 통째로 빠졌다)
+        raw = json.loads(resp.choices[0].message.content or "{}").get("drop") or []
+        drop = {int(d["n"] if isinstance(d, dict) else d) for d in raw if (d.get("n") if isinstance(d, dict) else d) is not None}
     except Exception as error:
         print(f"[news] 관련 기사 거르기 실패: {type(error).__name__}")
         return items

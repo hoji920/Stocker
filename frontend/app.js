@@ -137,7 +137,7 @@ function autoItems() {
     (d.trend_candidates?.[kind] || []).forEach((tl) => items.push({
       id: tl.id, group: "trend", layer: "trend", kind, rank: tl.rank, name: tl.label, why: tl.why,
       now: tl.price, points: tl.points, touch_points: tl.touch_points, defaultVisible: tl.rank === 1,
-      tentative: tl.tentative,
+      tentative: tl.tentative, log: tl.log,
     }));
   }
   // 최근에 깨진 추세선: 말없이 사라지지 않게 흐리게 남긴다 (알림·신호·내 규칙에는 안 쓰인다)
@@ -258,16 +258,66 @@ function snapToBar(idx, price, x, y) {
   return best || { idx, price };
 }
 
+// ── 비스듬한 선을 마지막 봉 뒤로 늘리기 ──
+// 선이 현재 봉에서 딱 끊기면 '앞으로 어디쯤 지나가는지'가 안 보인다 → EXTEND 봉만큼 같은 기울기로 늘려 흐린 점선으로 그린다.
+// 시간축은 데이터가 있는 시각에만 칸을 만들어서, 늘린 구간의 봉 시각을 하나하나 만들어 넣어야 기울기가 맞게 그려진다
+const EXTEND = 20;
+function futureTimes(n) {
+  const d = state.data, last = d.candles.at(-1).time, out = [];
+  if (d.intraday) {
+    const step = MINUTES[d.interval] * 60;
+    for (let k = 1; k <= n; k++) out.push(last + step * k);
+    return out;
+  }
+  const dt = new Date(`${last}T00:00:00Z`);
+  while (out.length < n) {
+    if (d.interval === "1w") dt.setUTCDate(dt.getUTCDate() + 7);
+    else if (d.interval === "1M") { dt.setUTCDate(1); dt.setUTCMonth(dt.getUTCMonth() + 1); }
+    else if (d.interval === "1y") { dt.setUTCMonth(0, 1); dt.setUTCFullYear(dt.getUTCFullYear() + 1); }
+    else {                                                    // 일봉: 주말은 건너뛴다 (휴장일까지는 모른다)
+      dt.setUTCDate(dt.getUTCDate() + 1);
+      if (dt.getUTCDay() === 0 || dt.getUTCDay() === 6) continue;
+    }
+    out.push(dt.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+// points = [시작점, …, 끝점] (끝점 = 선을 계산한 마지막 봉). 끝점에서 마지막 봉까지 + 그 뒤 EXTEND 봉. 로그 선은 같은 비율로
+function extension(points, log = false) {
+  if (!state.data || !points || points.length < 2) return null;
+  const times = state.data.candles.map((c) => c.time);
+  const first = points[0], end = points.at(-1);
+  const a = times.indexOf(first.time), e = times.indexOf(end.time), last = times.length - 1;
+  if (a < 0 || e <= a || (log && (first.value <= 0 || end.value <= 0))) return null;
+  const f = log ? Math.log : (v) => v, g = log ? Math.exp : (v) => v;
+  const step = (f(end.value) - f(first.value)) / (e - a);
+  const at = (i) => g(f(end.value) + step * (i - e));
+  const out = [{ time: end.time, value: end.value }];
+  for (let i = e + 1; i <= last; i++) out.push({ time: times[i], value: at(i) });
+  futureTimes(EXTEND).forEach((t, k) => out.push({ time: t, value: at(last + 1 + k) }));
+  return out.filter((p) => p.value > 0).length > 1 ? out.filter((p) => p.value > 0) : null;
+}
+
 function renderTrendlines() {
   state.trendSeries.forEach((s) => chart.removeSeries(s));
   state.trendSeries = [];
   if (!state.data) return;
   // quiet: 가격축 자동 범위에 영향을 주지 않는 선 (층 선이 차트를 위아래로 벌려 놓지 않게)
-  const line = (points, color, { width = 2, style = LW.LineStyle.Solid, title = "", quiet = false } = {}) => {
+  // extend: 마지막 봉 뒤로 늘린 부분을 같은 색의 흐린 점선으로 (가격축 범위는 안 건드린다)
+  const line = (points, color, { width = 2, style = LW.LineStyle.Solid, title = "", quiet = false, extend = false, log = false } = {}) => {
     const s = chart.addLineSeries({ color, lineWidth: width, lineStyle: style, priceLineVisible: false,
       lastValueVisible: !!title, title, crosshairMarkerVisible: false, ...(quiet ? { autoscaleInfoProvider: () => null } : {}) });
     s.setData(points);
     state.trendSeries.push(s);
+    const more = extend && extension(points, log);
+    if (more) {
+      const x = chart.addLineSeries({ color: color.length === 7 ? color + "80" : color, lineWidth: Math.max(1, width - 1),
+        lineStyle: LW.LineStyle.Dotted, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+        autoscaleInfoProvider: () => null });
+      x.setData(more);
+      state.trendSeries.push(x);
+    }
     return s;
   };
   const items = autoItems();
@@ -281,7 +331,7 @@ function renderTrendlines() {
     }
     line(it.points, faded(trendColor(it.kind), focused || it.rank === 1), {
       width: focused ? 3 : it.rank === 1 ? 2 : 1, style: focused ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed,
-      title: focused ? it.name : "",
+      title: focused ? it.name : "", extend: true, log: it.log,
     });
     shownTrendIds.add(it.id);
   }
@@ -291,9 +341,10 @@ function renderTrendlines() {
     const baseShown = shownTrendIds.has(`auto-${ch.base_kind}`);
     const color = baseShown ? trendColor(ch.base_kind) : CHANNEL_COLOR;
     // 기준 추세선이 이미 그려져 있으면 평행선만 같은 색 점선으로 → 어느 선의 짝인지 한눈에
-    if (!baseShown) line(ch.base, color, { width: focused ? 3 : 2 });
+    if (!baseShown) line(ch.base, color, { width: focused ? 3 : 2, extend: true, log: ch.log });
     // 반대편 선이 현재가에서 너무 멀면(넓은 채널) 차트가 위아래로 눌린다 → 채널을 골랐을 때만 그린다
-    if (!ch.other_far || focused) line(ch.other, color, { width: focused ? 3 : 2, style: LW.LineStyle.Dotted, title: focused ? "평행선" : "" });
+    if (!ch.other_far || focused) line(ch.other, color, { width: focused ? 3 : 2, style: LW.LineStyle.Dotted, title: focused ? "평행선" : "",
+      extend: true, log: ch.log });
   }
   // 차트 패턴 (노랑: 지표·지지저항 색과 안 겹침). 고른 패턴만 굵게, 아무것도 안 골랐으면 전부 보통
   if (on("patterns") && isDaily()) {
@@ -323,13 +374,13 @@ function renderTrendlines() {
   if (!isDaily()) return renderLegend();                           // 비스듬한 선은 날짜로 저장돼서 일봉에서만
   const accent = css("--accent");
   const drawChannel = (d, strong) => {
-    drawingLines(d).forEach((ln) => line(ln.points, accent + (strong ? "" : "b3"), { style: strong ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed }));
+    drawingLines(d).forEach((ln) => line(ln.points, accent + (strong ? "" : "b3"), { style: strong ? LW.LineStyle.Solid : LW.LineStyle.LargeDashed, extend: strong }));
     for (const ln of channelLayers(d)?.lines || []) line(ln.points, accent + (ln.quarter ? "40" : strong ? "a6" : "66"), {
       width: 1, style: ln.quarter ? LW.LineStyle.Dotted : LW.LineStyle.Solid, quiet: true });
   };
   if (on("drawings")) for (const d of state.drawings.filter((w) => w.type !== "horizontal")) {
     if (d.type === "channel") drawChannel(d, true);
-    else drawingLines(d).forEach((ln) => line(ln.points, accent));
+    else drawingLines(d).forEach((ln) => line(ln.points, accent, { extend: true }));
   }
   // 채널 긋는 중: 추천 채널 미리보기 + 찍을 자리 ①②③
   const sg = state.drawMode === "channel" && state.hint;
@@ -1021,7 +1072,7 @@ $("#why-btn").addEventListener("click", async () => {
 });
 
 // ── 오른쪽 아이콘 탭 (내 투자 / 관심 / 최근 본 / 알림) ──
-const SIDE_TITLES = { holdings: "내 투자", watch: "관심종목", recent: "최근 본 종목", market: "시장 한눈에", alerts: "알림", ask: "질문" };
+const SIDE_TITLES = { holdings: "내 투자", watch: "관심종목", recent: "최근 본 종목", market: "시장 한눈에", calendar: "증권 달력", alerts: "알림", ask: "질문" };
 function setTab(tab) {
   state.tab = tab;
   store.save("stocking.tab", tab);
@@ -1034,6 +1085,7 @@ function setTab(tab) {
   if (tab === "recent") renderRecent();
   if (tab === "market") loadMarket();
   else updateLiveSubscription();
+  if (tab === "calendar") loadCalendar();
   setCollapsed(false);
 }
 document.querySelectorAll(".rail-btn[data-tab]").forEach((b) => b.addEventListener("click", () => {
@@ -1042,6 +1094,37 @@ document.querySelectorAll(".rail-btn[data-tab]").forEach((b) => b.addEventListen
   setTab(b.dataset.tab);
 }));
 const isPhone = () => matchMedia("(max-width: 700px)").matches;
+
+// 오른쪽 패널 넓이: 왼쪽 끝을 끌어서 바꾸고 브라우저에 기억 (모든 탭 공통). 두 번 누르면 기본 340px
+const SIDE_W = { min: 260, def: 340 };
+const sideMax = () => Math.max(SIDE_W.min, Math.min(1000, window.innerWidth - 420));     // 차트 칸은 최소 350px 남긴다
+function setSideWidth(w, save = true) {
+  const px = Math.round(Math.max(SIDE_W.min, Math.min(sideMax(), w)));
+  document.documentElement.style.setProperty("--side-w", `${px}px`);
+  if (save) store.save("stocking.sideWidth", px);
+}
+setSideWidth(store.load("stocking.sideWidth", SIDE_W.def), false);
+$("#side-resize").addEventListener("pointerdown", (e) => {
+  if (isPhone()) return;
+  e.preventDefault();
+  const handle = e.currentTarget, railW = $("#rail").getBoundingClientRect().width;
+  handle.setPointerCapture(e.pointerId);
+  handle.classList.add("on");
+  document.body.classList.add("resizing");
+  const move = (ev) => setSideWidth(window.innerWidth - railW - ev.clientX, false);
+  const up = (ev) => {
+    setSideWidth(window.innerWidth - railW - ev.clientX);
+    handle.classList.remove("on");
+    document.body.classList.remove("resizing");
+    handle.removeEventListener("pointermove", move);
+    handle.removeEventListener("pointerup", up);
+  };
+  handle.addEventListener("pointermove", move);
+  handle.addEventListener("pointerup", up);
+});
+$("#side-resize").addEventListener("dblclick", () => setSideWidth(SIDE_W.def));
+window.addEventListener("resize", () => setSideWidth(store.load("stocking.sideWidth", SIDE_W.def), false));   // 창이 커지면 원래 고른 넓이로
+
 function setCollapsed(c) {
   $("#app").classList.toggle("collapsed", c);
   $("#rail-collapse").textContent = c ? "«" : "»";
@@ -1062,6 +1145,7 @@ function setStockTab(t) {
   if (t === "news") refineNews();              // 뉴스 탭을 열 때 AI 정리 (함수 선언이라 아래에 있어도 된다)
   if (t === "ask") loadRulesCheck();
   if (t === "judge") loadJudgments();
+  if (t === "thesis") loadThesis();
 }
 document.querySelectorAll(".stab").forEach((b) => b.addEventListener("click", () => setStockTab(b.dataset.st)));
 setStockTab(store.load("stocking.stockTab", "overview"));
@@ -1478,6 +1562,118 @@ function renderPrice(price) {
   }
 }
 
+// ── 증권 달력 (오른쪽 '달력' 탭): 미국 경제지표 발표 + 실적 발표 ──
+// 거르기: 지표는 '중요한 것만(CPI·고용·FOMC …)' / '전체', 실적은 '내 종목만' / '주요 종목 포함'. 고른 건 브라우저에 기억
+const calFilter = { econ: store.load("stocking.cal.econ", "major"), earn: store.load("stocking.cal.earn", "all") };
+let calLoaded = 0;
+
+// 달마다 따로 받는다 (state.calMonths["2026-09"]). 지난 달도 넘겨 보면 그때 받아온다
+async function loadCalendar(force = false) {
+  const box = $("#cal-list");
+  if (!force && state.calendar && Date.now() - calLoaded < 30 * 60000) return renderCalendar();
+  if (force || Date.now() - calLoaded >= 30 * 60000) state.calMonths = {};
+  const kst = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 7);
+  state.calMonth ??= kst;
+  if (!state.calendar) box.replaceChildren(el("p", { class: "muted" }, "달력 불러오는 중… (처음엔 10초쯤)"));
+  if (!(await fetchCalMonth(state.calMonth))) return box.replaceChildren(el("p", { class: "muted" }, "달력을 불러오지 못했어요"));
+  calLoaded = Date.now();
+  renderCalendar();
+}
+
+async function fetchCalMonth(month) {
+  state.calMonths ??= {};
+  if (state.calMonths[month]) return true;
+  const res = await fetch(`/api/calendar?month=${month}`).catch(() => null);
+  if (!res?.ok) {
+    state.calMonths[month] = { failed: (await res?.json().catch(() => null))?.detail || "못 받았어요", days: [] };
+    return !!state.calendar;
+  }
+  const c = await res.json();
+  state.calMonths[month] = c;
+  state.calendar = { today: c.today, errors: c.errors };
+  return true;
+}
+
+// 월간 달력 (한국 날짜). 칸마다 중요 지표 짧은 이름 + 실적 수, 누른 날의 상세는 아래에
+function renderCalendar() {
+  const c = state.calendar;
+  if (!c) return;
+  const cur = state.calMonths?.[state.calMonth];
+  const loading = !cur;
+  const chip = (group, value, label) => {
+    const b = el("button", { class: calFilter[group] === value ? "on" : "" }, label);
+    b.addEventListener("click", () => { calFilter[group] = value; store.save(`stocking.cal.${group}`, value); renderCalendar(); });
+    return b;
+  };
+  $("#cal-filters").replaceChildren(chip("econ", "major", "중요 지표만"), chip("econ", "all", "지표 전체"),
+    chip("earn", "all", "실적: 주요 종목 포함"), chip("earn", "mine", "실적: 내 종목만"));
+  const allDays = Object.values(state.calMonths || {}).flatMap((x) => x.days);
+  const byDate = Object.fromEntries(allDays.map((d) => [d.date, {
+    ...d, econ: d.econ.filter((e) => calFilter.econ === "all" || e.level === 2), earnings: d.earnings.filter((e) => calFilter.earn === "all" || e.mine),
+  }]));
+  state.calSel ??= c.today;
+  const [y, m] = state.calMonth.split("-").map(Number);
+  const iso = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  const first = new Date(y, m - 1, 1), startPad = first.getDay();               // 일요일 시작
+  const daysIn = new Date(y, m, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startPad; i++) cells.push(el("div", { class: "cal-cell blank" }));
+  for (let day = 1; day <= daysIn; day++) {
+    const ds = iso(new Date(y, m - 1, day)), d = byDate[ds];
+    const shorts = d ? [...new Set(d.econ.filter((e) => e.level === 2).map((e) => e.short))] : [];
+    const minor = d ? d.econ.filter((e) => e.level !== 2).length : 0;
+    const mine = d ? d.earnings.filter((e) => e.mine).map((e) => e.symbol) : [];
+    const others = d ? d.earnings.length - mine.length : 0;
+    const cell = el("button", { class: `cal-cell${ds === c.today ? " today" : ""}${ds === state.calSel ? " sel" : ""}${d ? "" : " nodata"}${ds < c.today ? " past" : ""}`,
+      title: d ? "" : "자료 범위 밖" },
+      el("span", { class: "cal-num" }, String(day)),
+      ...shorts.slice(0, 3).map((s) => el("span", { class: "cal-tag econ" }, s)),
+      minor && calFilter.econ === "all" && !shorts.length ? el("span", { class: "cal-tag minor" }, `지표 ${minor}`) : "",
+      ...mine.slice(0, 3).map((s) => el("span", { class: "cal-tag mine" }, s)),
+      others ? el("span", { class: "cal-tag earn" }, `실적 ${others}`) : "");
+    if (d) cell.addEventListener("click", () => { state.calSel = ds; renderCalendar(); });
+    cells.push(cell);
+  }
+  const move = async (k) => {
+    const dt = new Date(y, m - 1 + k, 1);
+    state.calMonth = iso(dt).slice(0, 7);
+    renderCalendar();
+    if (!state.calMonths?.[state.calMonth]) { await fetchCalMonth(state.calMonth); renderCalendar(); }
+  };
+  const prev = el("button", { class: "ghost small" }, "‹"), next = el("button", { class: "ghost small" }, "›");
+  prev.addEventListener("click", () => move(-1));
+  next.addEventListener("click", () => move(1));
+  const head = el("div", { class: "cal-head" }, prev, el("b", {}, `${y}년 ${m}월`), next, el("span", { class: "muted" }, loading ? "불러오는 중…" : cur.failed ? cur.failed : "한국 시간"));
+  const week = el("div", { class: "cal-grid cal-week" }, ..."일월화수목금토".split("").map((w, i) => el("span", { class: i === 0 ? "sun" : i === 6 ? "sat" : "" }, w)));
+  const grid = el("div", { class: "cal-grid" }, ...cells);
+
+  // 고른 날의 상세
+  const d = byDate[state.calSel];
+  const value = (v) => [v.actual ? `발표 ${v.actual}` : "", v.consensus ? `예상 ${v.consensus}` : "", v.previous ? `이전 ${v.previous}` : ""]
+    .filter(Boolean).join(" · ");
+  const items = d ? [
+    ...d.econ.map((e) => el("li", { class: `cal-ev${e.level === 2 ? " major" : ""}` },
+      el("span", { class: "cal-time" }, e.kst_time || "–"),
+      el("div", {}, el("b", {}, e.name), ...e.values.map((v) => el("div", { class: "cal-val" }, value(v))).filter((x) => x.textContent)))),
+    ...d.earnings.map((e) => {
+      const li = el("li", { class: `cal-earn${e.mine ? " mine" : ""}`, title: "누르면 차트로" },
+        el("span", { class: "cal-time" }, e.when === "장 후" ? "새벽" : e.when === "장 전" ? "밤" : "실적"),
+        el("div", {}, el("b", {}, e.symbol), e.mine ? el("span", { class: "rk" }, "내 종목") : "",
+          el("span", { class: "muted" }, ` ${e.quarter} 실적 · ${e.kst_note}`),
+          e.eps_estimate != null ? el("div", { class: "cal-val" },
+            `EPS 예상 ${e.eps_estimate.toFixed(2)}${e.eps_actual != null ? ` · 발표 ${e.eps_actual.toFixed(2)}` : ""}`) : ""));
+      li.addEventListener("click", () => load(e.symbol));
+      return li;
+    }),
+  ] : [];
+  const [sy, sm, sd] = state.calSel.split("-").map(Number);
+  const detail = el("section", { class: "cal-day" },
+    el("div", { class: "cal-date" }, `${sm}월 ${sd}일 (${"일월화수목금토"[new Date(sy, sm - 1, sd).getDay()]})${state.calSel === c.today ? " · 오늘" : ""}`),
+    items.length ? el("ul", {}, ...items) : el("p", { class: "muted hint" }, d ? "고른 조건의 일정이 없어요" : "달력에서 날짜를 눌러 보세요 (2년 전 ~ 6달 뒤)"));
+  const errs = cur?.errors?.length ? el("p", { class: "muted hint" }, `일부를 못 받았어요: ${cur.errors.join(", ")}`) : "";
+  $("#cal-list").replaceChildren(head, week, grid, detail, errs);
+}
+
 // ── 달러·원 변환 (시장 탭 맨 위 + 미국 종목 가격 옆 원화) ──
 // 환율은 토스 매매기준율 (1분마다 바뀜). 서버도 1분 캐시라 1분마다 다시 받는다
 async function loadFx() {
@@ -1537,13 +1733,16 @@ async function loadChart(symbol) {
   renderPatterns();
   loadReading();                              // 구조 읽기: 오늘 이미 만든 게 있으면 보여주고, 없으면 버튼만 (늘 일봉 기준)
   loadCompany();
+  loadOptions();
+  renderPeersBox();
+  if (state.stockTab === "thesis") loadThesis();
   $("#daily-only").hidden = isDaily();
   // 지수·선물·금리(야후)는 관심종목/이유찾기 대상이 아니고 토스 실시간도 없음
   $("#watch-toggle").hidden = $("#why-row").hidden = $("#live-dot").hidden = !!d.macro;
   ["#draw-trend", "#draw-hline", "#draw-channel"].forEach((id) => ($(id).disabled = !isDaily()));
   // autoSize 가 첫 레이아웃 후에 폭을 잡기 때문에 한 프레임 뒤에 범위를 지정해야 안 찌그러진다
   requestAnimationFrame(() => setTimeout(() =>
-    chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 3 }), 50));
+    chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 12 }), 50));   // 오른쪽에 늘린 선이 조금 보이게
   if (d.interval !== "1y" && !d.demo) loadOlder(d);           // 년봉은 처음부터 상장 이후 전부
 }
 
@@ -1583,12 +1782,15 @@ $("#log-scale").addEventListener("click", async () => {
   loadRulesCheck();
 });
 
-async function load(symbol) {
+// push: 종목을 바꿀 때 브라우저 기록에 한 칸 쌓는다 → 뒤로가기로 이전 종목. 처음 열 때·뒤로가기로 올 때는 안 쌓는다
+async function load(symbol, { push = true } = {}) {
   symbol = symbol.trim().toUpperCase();
   if (!symbol) return;
   if (state.drawMode) setDrawMode(null);
   $("#symbol").value = symbol;
-  history.replaceState(null, "", `?s=${symbol}`);
+  const here = new URLSearchParams(location.search).get("s");
+  if (push && here && here.toUpperCase() !== symbol) history.pushState({ s: symbol }, "", `?s=${symbol}`);
+  else history.replaceState({ s: symbol }, "", `?s=${symbol}`);
   state.loading = symbol;
   if (symbol !== state.data?.symbol) $("#why-box").replaceChildren();   // 이전 종목의 '왜 움직였지?' 결과 지우기
   const dres = await fetch(`/api/drawings/${encodeURIComponent(symbol)}`);
@@ -1644,6 +1846,203 @@ async function loadCompany() {
       c.website ? el("a", { href: c.website, target: "_blank", rel: "noopener" }, " · 홈페이지") : "")));
 }
 
+// ── 옵션이 예상하는 움직임 (한눈에 보기): 등가격 스트래들 = 그 만기까지 ±몇 %. 야후 옵션, 서버 15분 캐시 ──
+const usStock = (d) => d && !d.macro && d.market !== "KR";
+const md = (iso) => `${+iso.slice(5, 7)}/${+iso.slice(8, 10)}`;
+
+async function loadOptions() {
+  const d = state.data, box = $("#options-box");
+  if (state.options?.symbol !== d?.symbol) box.replaceChildren();
+  if (!usStock(d)) return;
+  const res = await fetch(`/api/options/${encodeURIComponent(d.symbol)}`).catch(() => null);
+  if (state.data?.symbol !== d.symbol) return;
+  if (!res?.ok) return box.replaceChildren();                       // 옵션이 없는 종목은 카드를 안 띄운다
+  const o = await res.json();
+  state.options = { symbol: d.symbol, o };
+  const range = (x) => `${fmt(x.low)} ~ ${fmt(x.high)}`;
+  const rows = o.expiries.map((x) => el("li", {},
+    el("span", { class: "opt-exp" }, `${md(x.expiry)} 만기`, el("span", { class: "muted" }, ` (${x.days}일)`)),
+    el("b", {}, `±${x.move_pct}%`), el("span", { class: "muted" }, ` ${range(x)}`)));
+  const e = o.earnings;
+  const first = o.expiries[0];
+  // 콜·풋 비중 막대: 거래량(오늘) / 미결제약정(쌓여 있는 계약). 많은 쪽이 이긴다는 뜻은 아니다
+  const n = (v) => v.toLocaleString();
+  const bar = (label, callPct, c, p) => callPct == null ? "" : el("div", { class: "opt-flow" },
+    el("span", { class: "opt-flow-label" }, label),
+    el("div", { class: "opt-bar", title: `콜 ${n(c)} · 풋 ${n(p)} 계약` },
+      el("span", { class: "call", style: `width:${callPct}%` }, callPct >= 15 ? `콜 ${callPct}%` : ""),
+      el("span", { class: "put", style: `width:${100 - callPct}%` }, 100 - callPct >= 15 ? `풋 ${100 - callPct}%` : "")));
+  const f = o.flow || {};
+  box.replaceChildren(el("div", { class: "opt-card" },
+    el("div", { class: "reading-head" }, el("b", {}, "옵션이 예상하는 움직임"),
+      el("span", { class: "muted" }, first?.atm_iv_pct != null ? `내재변동성 ${first.atm_iv_pct}%` : "")),
+    e ? el("p", { class: "opt-earn" }, `실적 ${md(e.date)} → ${md(e.expiry)} 만기까지 `, el("b", {}, `±${e.move_pct}%`), ` (${range(e)})`,
+      e.earnings_only_pct ? el("span", { class: "muted" }, ` · 그중 실적 몫 약 ±${e.earnings_only_pct}%`) : "") : "",
+    el("ul", {}, ...rows),
+    bar("거래량 (오늘)", f.call_volume_pct, f.call_volume, f.put_volume),
+    bar("쌓인 계약 (미결제)", f.call_oi_pct, f.call_oi, f.put_oi),
+    el("p", { class: "muted hint" }, `위 만기들을 합친 콜·풋 비중이에요. 많은 쪽이 이긴다는 뜻은 아니에요 (풋은 보험인 경우가 많아요). `
+      + "예상 폭은 등가격 콜+풋 가격으로 본 거라 그 안에 머문다는 보장은 없어요. 야후 옵션, 장이 닫혀 있으면 마지막 호가 기준.")));
+}
+
+// ── 경쟁사 비교 (한눈에 보기): 펼칠 때만 받는다 (처음엔 AI 가 비교 대상을 골라 몇 초 걸린다) ──
+function renderPeersBox() {
+  const d = state.data, box = $("#peers-box");
+  if (!usStock(d)) return box.replaceChildren();
+  const det = el("details", { class: "peers" }, el("summary", {}, "경쟁사 비교"), el("p", { class: "muted" }, "불러오는 중… (처음엔 AI 가 비교할 회사를 골라 10초쯤)"));
+  let loaded = false;
+  const fill = async (refresh = false) => {
+    const res = await fetch(`/api/peers/${encodeURIComponent(d.symbol)}${refresh ? "?refresh=1" : ""}`).catch(() => null);
+    if (state.data?.symbol !== d.symbol) return;
+    if (!res?.ok) return det.replaceChildren(det.firstChild, el("p", { class: "muted" }, "경쟁사 비교를 못 만들었어요"));
+    const p = await res.json();
+    const pct = (v) => (v == null ? "–" : `${v > 0 ? "+" : ""}${v}%`);
+    const num = (v) => (v == null ? "–" : String(v));
+    const cls = (v) => (v == null ? "" : v >= 0 ? "up" : "down");
+    const head = ["종목", "시총", "선행 PER", "매출 성장", "순이익률", "1개월", "3개월", "1년", "목표가 여력"];
+    const rows = p.rows.map((r) => {
+      const tr = el("tr", { class: r.self ? "self" : "", title: r.why || "" },
+        el("td", {}, el("b", {}, r.symbol), el("div", { class: "muted peer-why" }, r.self ? "지금 보는 종목" : r.why || r.name)),
+        el("td", {}, r.market_cap || "–"), el("td", {}, num(r.pe_forward)), el("td", {}, pct(r.revenue_growth)), el("td", {}, pct(r.net_margin)),
+        ...["1m", "3m", "12m"].map((k) => el("td", { class: cls(r[k]) }, pct(r[k]))), el("td", {}, pct(r.target_upside)));
+      if (!r.self) tr.addEventListener("click", () => load(r.symbol));
+      return tr;
+    });
+    const again = el("button", { class: "ghost small" }, "다시 고르기");
+    again.addEventListener("click", () => {
+      det.replaceChildren(det.firstChild, el("p", { class: "muted" }, "AI 가 비교할 회사를 다시 고르는 중… (10초쯤)"));
+      fill(true);
+    });
+    det.replaceChildren(det.firstChild,
+      el("div", { class: "judge-scroll" }, el("table", { class: "peer-table" }, el("tr", {}, ...head.map((h) => el("th", {}, h))), ...rows)),
+      el("div", { class: "th-btns" }, el("span", { class: "muted hint" }, `${p.source}. 줄을 누르면 그 종목 차트로 가요. 목표가 여력 = 애널리스트 평균 목표가 대비.`), again));
+  };
+  det.addEventListener("toggle", () => {
+    if (!det.open || loaded) return;
+    loaded = true;
+    fill();
+  });
+  box.replaceChildren(det);
+}
+
+// ── 투자 논리 (종목 탭): 왜 샀나 → 기둥·틀린 조건·이벤트로 정리 → 저장 → 뉴스·실적이 나올 때마다 점검 ──
+const STATUS_CLS = { 유지: "ok", 약화: "warn", 깨짐: "bad", "판단 못함": "na", 흔들림: "warn" };
+const lines = (v) => (v || []).join("\n");
+
+async function loadThesis() {
+  const d = state.data, box = $("#thesis-box");
+  if (!usStock(d)) return box.replaceChildren(el("p", { class: "muted" }, "미국 종목·ETF 에서 쓸 수 있어요."));
+  box.replaceChildren(el("p", { class: "muted" }, "불러오는 중…"));
+  const res = await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}`).catch(() => null);
+  if (state.data?.symbol !== d.symbol) return;
+  if (!res?.ok) return box.replaceChildren(el("p", { class: "muted" }, "투자 논리를 불러오지 못했어요"));
+  const body = await res.json();
+  body.thesis ? renderThesis(body.thesis, body.stale) : renderThesisForm(null);
+}
+
+function renderThesisForm(t, note = "") {
+  const d = state.data, box = $("#thesis-box");
+  const why = el("textarea", { class: "th-why", rows: 3, placeholder: "왜 샀어요? 자유롭게 (예: AI 데이터센터 수요로 메모리 가격이 오르고, 이번 분기 실적에서 확인될 것 같아서)" });
+  why.value = t?.why || "";
+  const area = (label, key, ph) => {
+    const ta = el("textarea", { rows: 3, placeholder: ph, "data-k": key });
+    ta.value = lines(t?.[key]);
+    return el("label", { class: "th-field" }, el("span", {}, label), ta);
+  };
+  const horizon = el("input", { class: "th-horizon", placeholder: "예: 3~6개월" });
+  horizon.value = t?.horizon || "";
+  const fields = el("div", { class: "th-fields" },
+    area("논리 기둥 (한 줄에 하나, 이게 사실이어야 맞는 투자)", "pillars", "예: 데이터센터 매출이 분기마다 20% 넘게 늘어난다"),
+    area("틀렸다고 볼 조건 (한 줄에 하나)", "invalid_if", "예: 다음 실적에서 가이던스를 낮춘다"),
+    area("기다리는 이벤트 (한 줄에 하나)", "catalysts", "예: 10/29 실적 발표"),
+    el("label", { class: "th-field" }, el("span", {}, "볼 기간"), horizon));
+  const msg = el("p", { class: "muted hint" }, note);
+  const draftBtn = el("button", { class: "ghost small" }, "AI 로 정리");
+  draftBtn.addEventListener("click", async () => {
+    draftBtn.disabled = true; msg.textContent = "AI 가 정리하는 중… (회사 자료·뉴스·실적일을 같이 봐요)";
+    const res = await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}/draft`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ why: why.value }) }).catch(() => null);
+    draftBtn.disabled = false;
+    if (!res?.ok) return (msg.textContent = "정리하지 못했어요");
+    const dr = await res.json();
+    fields.querySelectorAll("textarea").forEach((ta) => (ta.value = lines(dr[ta.dataset.k])));
+    horizon.value = dr.horizon || horizon.value;
+    msg.textContent = `AI 가 나눈 초안이에요. 고쳐서 저장하세요.${dr.why_note ? ` (${dr.why_note})` : ""}`;
+  });
+  const save = el("button", { class: "small" }, "저장");
+  save.addEventListener("click", async () => {
+    const val = (k) => fields.querySelector(`[data-k=${k}]`).value.split("\n");
+    const res = await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}`, { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ why: why.value, pillars: val("pillars"), invalid_if: val("invalid_if"), catalysts: val("catalysts"), horizon: horizon.value }) });
+    const b = await res.json();
+    if (!res.ok) return (msg.textContent = b.detail || "저장하지 못했어요");
+    renderThesis(b.thesis, b.stale);
+  });
+  const btns = [draftBtn, save];
+  if (t) {
+    const cancel = el("button", { class: "ghost small" }, "취소");
+    cancel.addEventListener("click", loadThesis);
+    btns.push(cancel);
+  }
+  box.replaceChildren(el("div", { class: "thesis" }, el("label", { class: "th-field" }, el("span", {}, "왜 샀나"), why), fields, msg,
+    el("div", { class: "th-btns" }, ...btns)));
+}
+
+function renderThesis(t, stale) {
+  const d = state.data, box = $("#thesis-box");
+  const last = (t.checks || []).at(-1);
+  const now = state.lastShown ?? d.candles.at(-1).close;
+  const since = t.entry_price ? (now / t.entry_price - 1) * 100 : null;
+  const badge = (s) => el("span", { class: `th-badge ${STATUS_CLS[s] || "na"}` }, s);
+  const statusOf = (text) => last?.pillars?.find((p) => p.text === text);
+  const check = el("button", { class: "small" }, "지금 점검 (AI)");
+  const msg = el("span", { class: "muted" }, "");
+  check.addEventListener("click", async () => {
+    check.disabled = true; msg.textContent = " 뉴스·실적·가격·옵션을 보고 점검하는 중… (20초쯤)";
+    const res = await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}/check`, { method: "POST" }).catch(() => null);
+    if (state.data?.symbol !== d.symbol) return;
+    check.disabled = false;
+    if (!res?.ok) return (msg.textContent = " 점검하지 못했어요");
+    const b = await res.json();
+    renderThesis(b.thesis, b.stale);
+  });
+  const edit = el("button", { class: "ghost small" }, "고치기");
+  edit.addEventListener("click", () => renderThesisForm(t));
+  const del = el("button", { class: "ghost small" }, "지우기");
+  del.addEventListener("click", async () => {
+    if (del.dataset.armed !== "1") { del.dataset.armed = "1"; del.textContent = "정말 지울까요? 한 번 더 누르세요"; return; }
+    await fetch(`/api/thesis/${encodeURIComponent(d.symbol)}`, { method: "DELETE" });
+    renderThesisForm(null, "지웠어요.");
+  });
+  const list = (title, items, render) => items?.length ? [el("div", { class: "brief-sub" }, title), el("ul", { class: "th-list" }, ...items.map(render))] : [];
+  const history = (t.checks || []).slice(0, -1).reverse();
+  box.replaceChildren(el("div", { class: "thesis" },
+    el("div", { class: "th-head" },
+      el("span", {}, `${t.created_at.slice(0, 10)} 저장 · 그때 ${fmt(t.entry_price)} → 지금 ${fmt(now)} `,
+        since != null ? el("b", { class: since >= 0 ? "up" : "down" }, `${since >= 0 ? "+" : ""}${since.toFixed(1)}%`) : ""),
+      stale ? el("span", { class: "th-badge warn" }, `점검 필요 · ${stale}`) : ""),
+    t.why ? el("p", { class: "th-why-text" }, t.why) : "",
+    ...list("논리 기둥", t.pillars, (p) => {
+      const s = statusOf(p);
+      return el("li", {}, s ? badge(s.status) : badge("판단 못함"), el("span", {}, ` ${p}`), s?.evidence ? el("div", { class: "muted th-ev" }, s.evidence) : "");
+    }),
+    ...list("틀렸다고 볼 조건", t.invalid_if, (x) => {
+      const h = last?.invalid_if?.find((i) => i.text === x);
+      return el("li", {}, h?.hit ? badge("깨짐") : el("span", { class: "th-badge na" }, "아직"), el("span", {}, ` ${x}`),
+        h?.evidence ? el("div", { class: "muted th-ev" }, h.evidence) : "");
+    }),
+    ...list("기다리는 이벤트", t.catalysts, (x) => el("li", {}, x)),
+    last ? el("div", { class: `th-check ${STATUS_CLS[last.overall] || ""}` },
+      el("div", {}, el("b", {}, "마지막 점검 "), badge(last.overall), el("span", { class: "muted" }, ` ${last.at.slice(0, 16).replace("T", " ")} · 그때 ${fmt(last.price)}`)),
+      el("p", {}, last.summary),
+      last.watch_next?.length ? el("p", { class: "muted" }, `다음에 볼 것: ${last.watch_next.join(" · ")}`) : "") : el("p", { class: "muted" }, "아직 점검한 적이 없어요."),
+    el("div", { class: "th-btns" }, check, edit, del, msg),
+    history.length ? el("details", {}, el("summary", {}, `지난 점검 ${history.length}건`),
+      ...history.map((c) => el("div", { class: "judge-rec" }, el("div", {}, badge(c.overall), el("span", { class: "muted" }, ` ${c.at.slice(0, 16).replace("T", " ")} · ${fmt(c.price)}`)),
+        el("div", {}, c.summary)))) : "",
+    el("p", { class: "muted hint" }, "점검은 코드가 모은 사실(가격, 뉴스, 펀더멘탈, 실적일, 옵션)만 보고 AI 가 써요. 이 PC 에만 저장돼요.")));
+}
+
 // ── 구조 읽기 (한눈에 보기 맨 위) ──
 // 아래 카드들(지지선, 추세선, 채널 …)을 AI 가 한 덩어리로 풀어 쓴 것. 버튼을 눌렀을 때만 만들고, 그날 이미 만든 게 있으면 바로 보여준다
 async function loadReading(make = false) {
@@ -1677,8 +2076,10 @@ async function loadReading(make = false) {
 // ── 판단 기록 ──
 // AI 의 판단을 미리 적어 두고 기간이 지나면 시세로 채점한다 (서버 judgments.py). 채점이 쌓이기 전의 판단은 근거 없는 의견이라
 // 종목별 판단은 접어 두고, 성적표를 먼저 보여준다.
-const ARM_NAMES = { news: "숫자 + 기사", nonews: "숫자만", news_r: "숫자 + 기사 (다시 물음)", nonews_r: "숫자만 (다시 물음)" };
-const DIR_NAMES = { outperform: "시장보다 강함", neutral: "판단 안 함", underperform: "시장보다 약함" };
+const ARM_NAMES = { news: "숫자 + 기사 (W42)", nonews: "숫자만", fund: "숫자 + 펀더멘탈", fund_news: "숫자 + 펀더멘탈 + 기사",
+  news_r: "숫자 + 기사 (다시 물음)", nonews_r: "숫자만 (다시 물음)", fund_news_r: "숫자 + 펀더멘탈 + 기사 (다시 물음)", asked: "질문 종합 검토" };
+const VIEW_NAMES = { strong: "강함", neutral: "중립", weak: "약함" };
+const DIR_NAMES = { outperform: "시장보다 강함", neutral: "중립 (시장과 비슷)", underperform: "시장보다 약함" };   // 중립은 맞음·틀림을 세지 않는다
 let judgePoll = null;
 
 async function loadJudgments() {
@@ -1723,14 +2124,20 @@ function renderJudgments() {
   // 성적표: 주된 판정은 20거래일·고정 100종목
   const pc = (v) => (v == null ? "–" : `${v.toFixed(1)}%`);
   const sg = (v) => (v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%p`);
+  // 출발 가격: W43 부터와 질문 탭 의견은 '판단 뒤 미국 정규장 첫 30분 평균'(한국 시간으로 표시), W42 는 기록된 그 시각 가격
+  const start = (r) => !r.entry_rule ? `기준 ${r.as_of} ${fmt(r.price)}`
+    : r.entry ? `출발 ${fmt(r.entry.price)} (${r.entry.t0 ? `한국 ${r.entry.t0.slice(5, 16).replace("T", " ")}부터 정규장 30분 평균` : r.entry.fallback})`
+    : "출발 가격 대기 (판단 뒤 미국 정규장 첫 30분 평균)";
   const table = (rows, caption) => {
     if (!rows.length) return [];
     const body = rows.map((r) => el("tr", { class: r.primary ? "primary" : "" },
       el("td", {}, `${r.model} · ${ARM_NAMES[r.arm]}`), el("td", {}, `${r.horizon}일`),
       el("td", {}, `${r.scored} / ${r.recorded}`), el("td", {}, r.calls ? `${pc(r.hit_rate_pct)} (${r.calls}건)` : "–"),
-      el("td", {}, sg(r.mean_signed_excess_pct)), el("td", {}, r.scored ? `${pc(r.always_up_hit_rate_pct)} · ${sg(r.always_up_mean_excess_pct)}` : "–")));
+      el("td", {}, sg(r.mean_signed_excess_pct)), el("td", {}, r.scored ? `${pc(r.always_up_hit_rate_pct)} · ${sg(r.always_up_mean_excess_pct)}` : "–"),
+      // 같은 기준선을 모델이 방향을 고른 기록에서만: '맞힌 비율'과 같은 묶음이라 이쪽과 비교하는 게 공정하다
+      el("td", {}, r.calls ? `${pc(r.always_up_calls_hit_rate_pct)} · ${sg(r.always_up_calls_mean_excess_pct)}` : "–")));
     return [el("div", { class: "brief-sub" }, caption), el("div", { class: "judge-scroll" }, el("table", { class: "judge-table" },
-      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면"].map((h) => el("th", {}, h))), ...body))];
+      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면"].map((h) => el("th", {}, h))), ...body))];
   };
   const anyScored = j.fixed.some((r) => r.scored);
   $("#judge-board").replaceChildren(
@@ -1738,6 +2145,15 @@ function renderJudgments() {
     ...table(j.ndx || [], "나스닥 100 성적"),
     ...table(j.paired || [], "모델 비교: 두 모델이 모두 판단한 종목·주만"),
     ...table(j.mine, "내 종목 성적 (참고)"),
+    ...table(j.asked || [], "내가 물어본 판단 (질문 탭의 종합 의견, 종목·날짜마다 처음 것만)"),
+    ...((j.asked_records || []).length ? [el("details", {}, el("summary", {}, `질문 탭에서 남긴 의견 최근 ${j.asked_records.length}건`),
+      ...j.asked_records.slice().reverse().map((r) => {
+        const s = r.scored[20];
+        return el("div", { class: "judge-rec" },
+          el("div", { class: "judge-rec-head" }, `${r.asked_at.slice(0, 16).replace("T", " ")} · ${r.name} (${r.symbol}) · ${start(r)}`),
+          el("div", {}, `20일: ${VIEW_NAMES[r.view]} (확신 ${r.c20})${s ? ` → 초과 ${sg(s.excess)} ${s.hit == null ? "" : s.hit ? "✓" : "✗"}` : " → 채점 대기"}`),
+          el("div", { class: "muted" }, r.reason), el("div", { class: "muted" }, `틀렸다고 볼 조건: ${r.invalid_if}`));
+      }))] : []),
     j.fixed.length && !anyScored ? el("p", { class: "muted hint" }, "아직 채점된 판단이 없어요. 5거래일 뒤에 첫 채점이, 20거래일 뒤에 주된 채점이 나와요.") : "",
     // 같은 입력을 한 번 더 물었을 때 판단이 얼마나 같았나 (성적과는 별개: 판단이 얼마나 흔들리는지)
     ...((j.consistency || []).length ? [el("div", { class: "brief-sub" }, "같은 입력에 다시 물었을 때"),
@@ -1754,7 +2170,7 @@ function renderJudgments() {
     ...recs.slice().reverse().map((r) => {
       const res = (h) => { const s = r.scored[h]; return s ? ` → 초과 ${sg(s.excess)} ${s.hit == null ? "" : s.hit ? "✓" : "✗"}` : " → 채점 대기"; };
       return el("div", { class: "judge-rec" },
-        el("div", { class: "judge-rec-head" }, `${r.week} · ${r.model} · ${ARM_NAMES[r.arm]} · 기준 ${r.as_of} ${fmt(r.price)}`),
+        el("div", { class: "judge-rec-head" }, `${r.week} · ${r.model} · ${ARM_NAMES[r.arm]} · ${start(r)}`),
         el("div", {}, `5일: ${DIR_NAMES[r.d5]} (확신 ${r.c5})${res(5)}`), el("div", {}, `20일: ${DIR_NAMES[r.d20]} (확신 ${r.c20})${res(20)}`),
         el("div", { class: "muted" }, r.reason), el("div", { class: "muted" }, `틀렸다고 볼 조건: ${r.invalid_if}`));
     }));
@@ -1976,8 +2392,9 @@ async function askAgent(text) {
         symbol: state.data?.macro ? null : state.data?.symbol }) });
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "답을 받지 못했어요");
+    const views = (body.views || []).map((v) => `판단 기록: ${v.symbol} ${VIEW_NAMES[v.view]}${v.counted ? "" : " (오늘 처음 것만 채점)"}`);
     state.chat.push({ role: "assistant", content: body.answer, actions: body.actions || [],
-      meta:`${body.steps.length ? `찾아본 것: ${body.steps.join(" → ")} · ` : ""}토큰 ${body.tokens.toLocaleString()}` });
+      meta: [body.steps.length ? `찾아본 것: ${body.steps.join(" → ")}` : "", ...views, `토큰 ${body.tokens.toLocaleString()}`].filter(Boolean).join(" · ") });
   } catch (error) {
     state.chat.push({ role: "assistant", content: error.message, meta: "오류" });
   } finally {
@@ -2262,5 +2679,10 @@ volume.applyOptions({ visible: on("volume") });
   setCollapsed(isPhone() ? true : store.load("stocking.sideCollapsed", false));   // 폰은 차트부터
   loadWatchSummary();
   setInterval(loadWatchSummary, 60000);    // 실시간이 못 주는 등락률 기준값·지지/저항 거리 보정
-  load(new URLSearchParams(location.search).get("s") || state.holdings[0]?.symbol || state.watchlist[0] || "AAPL");
+  load(new URLSearchParams(location.search).get("s") || state.holdings[0]?.symbol || state.watchlist[0] || "AAPL", { push: false });
+  // 뒤로가기·앞으로가기: 주소의 종목을 다시 연다 (기록은 더 쌓지 않는다)
+  window.addEventListener("popstate", () => {
+    const s = new URLSearchParams(location.search).get("s");
+    if (s && s.toUpperCase() !== state.data?.symbol) load(s, { push: false });
+  });
 })();

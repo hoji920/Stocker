@@ -52,6 +52,69 @@ def fetch_yahoo(symbol: str) -> dict:
     }
 
 
+_fund: dict[str, tuple[float, dict]] = {}
+
+
+def fundamentals(symbol: str) -> dict:
+    """에이전트가 종합 판단할 때 보는 펀더멘탈 (야후, 6시간 캐시). 숫자는 야후가 준 그대로, 없는 건 빼고 준다.
+    주식: 가치(PER·PEG·EV/EBITDA), 성장(매출·이익), 수익성(마진), 재무(부채·현금흐름), 애널리스트(목표가·의견), 다음 실적 발표일.
+    ETF: 운용사·분류·보수·순자산."""
+    hit = _fund.get(symbol)
+    if hit and time.time() - hit[0] < 6 * 3600:
+        return hit[1]
+    c, crumb = _client()
+    r = c.get(f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}",
+              params={"modules": "quoteType,financialData,defaultKeyStatistics,summaryDetail,calendarEvents,fundProfile", "crumb": crumb})
+    r.raise_for_status()
+    res = (r.json().get("quoteSummary", {}).get("result") or [{}])[0]
+    fd, ks, sd, ce, fp = (res.get(k) or {} for k in ("financialData", "defaultKeyStatistics", "summaryDetail", "calendarEvents", "fundProfile"))
+    raw = lambda d, k: (d.get(k) or {}).get("raw") if isinstance(d.get(k), dict) else d.get(k)
+    pct = lambda v: round(v * 100, 1) if isinstance(v, (int, float)) else None
+    num = lambda v, n=2: round(v, n) if isinstance(v, (int, float)) else None
+    kind = (res.get("quoteType") or {}).get("quoteType")
+    if kind == "ETF":
+        out = {"type": "ETF", "fund_family": fp.get("family"), "category": fp.get("categoryName"),
+               "expense_ratio_pct": pct(raw(fp.get("feesExpensesInvestment") or {}, "annualReportExpenseRatio")),
+               "total_assets": raw(sd, "totalAssets"), "beta_3y": num(raw(ks, "beta3Year"))}
+    else:
+        dates = [d.get("fmt") for d in ((ce.get("earnings") or {}).get("earningsDate") or []) if isinstance(d, dict)]
+        out = {
+            "type": kind, "market_cap": raw(sd, "marketCap"),
+            "valuation": {"pe_trailing": num(raw(sd, "trailingPE")), "pe_forward": num(raw(sd, "forwardPE") or raw(ks, "forwardPE")),
+                          "peg": num(raw(ks, "pegRatio")), "ev_to_ebitda": num(raw(ks, "enterpriseToEbitda")),
+                          "price_to_book": num(raw(ks, "priceToBook"))},
+            "growth_yoy_pct": {"revenue": pct(raw(fd, "revenueGrowth")), "earnings": pct(raw(fd, "earningsGrowth"))},
+            "margins_pct": {"gross": pct(raw(fd, "grossMargins")), "operating": pct(raw(fd, "operatingMargins")), "net": pct(raw(fd, "profitMargins"))},
+            "balance": {"debt_to_equity": num(raw(fd, "debtToEquity")), "total_cash": raw(fd, "totalCash"), "total_debt": raw(fd, "totalDebt"),
+                        "free_cashflow": raw(fd, "freeCashflow")},
+            "analysts": {"count": raw(fd, "numberOfAnalystOpinions"), "recommendation": fd.get("recommendationKey"),
+                         "target_mean": num(raw(fd, "targetMeanPrice")), "target_low": num(raw(fd, "targetLowPrice")),
+                         "target_high": num(raw(fd, "targetHighPrice")), "price_now": num(raw(fd, "currentPrice"))},
+            "short_pct_of_float": pct(raw(ks, "shortPercentOfFloat")), "beta": num(raw(sd, "beta")),
+            "dividend_yield_pct": pct(raw(sd, "dividendYield")),
+            "next_earnings_date": dates[0] if dates else None,
+        }
+    # 큰 금액은 읽는 말로 (−22,587,523,072 같은 숫자를 LLM 이 그대로 옮겨 적었다)
+    def money(v):
+        if not isinstance(v, (int, float)):
+            return v
+        a = abs(v)
+        text = f"{a / 1e12:.2f}조 달러" if a >= 1e12 else f"{a / 1e8:,.0f}억 달러" if a >= 1e8 else f"{a / 1e4:,.0f}만 달러"
+        return ("-" if v < 0 else "") + text
+    for k in ("market_cap", "total_assets"):
+        if k in out:
+            out[f"{k}_usd"] = out[k] if isinstance(out[k], (int, float)) else None    # 비교·거르기용 원래 숫자
+            out[k] = money(out[k])
+    for k in ("total_cash", "total_debt", "free_cashflow"):
+        if k in out.get("balance", {}):
+            out["balance"][k] = money(out["balance"][k])
+    prune = lambda d: {k: (prune(v) if isinstance(v, dict) else v) for k, v in d.items() if v not in (None, {}, "")}
+    out = prune(prune(out))
+    out["source"] = "야후 파이낸스 (몇 시간 늦을 수 있음)"
+    _fund[symbol] = (time.time(), out)
+    return out
+
+
 _SYSTEM = (
     "너는 미국 주식 앱의 회사 소개를 쓰는 도우미다. 주어진 영문 사업 설명만 보고 한국어로 쓴다.\n"
     "1) summary: 해요체 2~3문장. 무엇을 하는 회사(펀드)인지, 돈을 어떻게 버는지(펀드면 무엇을 따라가고 몇 배인지)를 쉽게. "

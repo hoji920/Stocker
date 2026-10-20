@@ -4,14 +4,15 @@
 
 - 도구는 main.py 가 넘겨준다 (이름 → 함수). 여기에는 '무엇을 할 수 있는지' 설명과 대화 루프만 있다.
 - 숫자는 도구가 준 것만 쓴다. '내 규칙'은 rules.evaluate 가 계산한 결과를 그대로 전한다 (AI 가 판정하지 않는다).
-- 사라·팔아라는 말하지 않는다: "네 규칙 기준으로는 ~" 까지만.
+- 사라·팔아라는 말하지 않는다. 매수·매도를 물으면 내 규칙·뉴스·시장·펀더멘탈을 같이 보고 '20거래일 동안 시장보다 강함·중립·약함' 의견을 낸다.
+  그 의견은 판단 기록에 남겨서 나중에 채점한다 (record_view) — 맞는지 모르는 의견을 쌓아 두고 성적으로 믿을지 정한다.
 """
 from __future__ import annotations
 import json
 
 from backend.config import Settings, llm_args
 
-MAX_STEPS = 6
+MAX_STEPS = 8              # 종합 검토는 도구 4개 + 기록 1개를 부른다
 MAX_RESULT_CHARS = 6000
 
 
@@ -39,14 +40,39 @@ _SYSTEM = (
     "너는 개인용 주식 차트 앱 안의 조사 비서다. 사용자의 질문에 도구를 써서 답한다. 한국어 해요체, 짧고 구체적으로.\n"
     "원칙:\n"
     "1) 숫자와 사실은 도구 결과에 있는 것만 쓴다. 모르면 도구를 부르고, 도구로도 없으면 없다고 말한다.\n"
-    "2) 매수·매도 판단을 묻거나 '어때?', '사도 돼?'처럼 물으면 check_my_rules 를 불러 사용자가 정한 규칙에 대조한 결과를 전한다. "
-    "판정(verdict)과 진입·목표·손절·손익비는 도구가 계산한 값을 그대로 쓴다. 네가 다시 계산하거나 판정을 바꾸지 않는다.\n"
-    "   '언제 팔까', '목표가', '손절'을 물어도 check_my_rules 를 부른다: 매도 목표와 손절 기준, 보유 중이면 평단 대비 "
+    "2) 매수·매도·보유 판단을 묻거나 '어때?', '사도 돼?', '팔까?'처럼 물으면 '종합 검토'를 한다. 한 종목에 대해:\n"
+    "   check_my_rules(내 규칙) + get_news(종목 뉴스) + market_brief(시장) + fundamentals(가치·성장·실적일·애널리스트)를 모두 부른다 "
+    "(한 번에 같이 불러도 된다). 그다음 답을 이 순서로 쓴다:\n"
+    "   **올라갈 근거** 2~3개 / **내려갈 근거** 2~3개 (뉴스·실적·가치·시장·추세에서, 도구 결과에 있는 사실만. "
+    "근거 끝에 괄호로 출처를 한국어로: 뉴스면 '뉴스·' 뒤에 그 기사의 언론사 이름을 get_news 결과에 적힌 그대로 (모르면 '뉴스'만), "
+    "그 밖엔 (실적·가치 지표) / (시장) / (내 규칙). "
+    "영어 도구 이름은 쓰지 않는다) / "
+    "**곧 있을 일** (다음 실적 발표일 등, 없으면 뺀다) / **내 규칙** 한 줄 (판정·목표·손절은 도구 값 그대로) / "
+    "**종합 의견**: 앞으로 20거래일 동안 S&P 500 보다 '강함·중립·약함' 중 하나 + 확신 0~100 + 이유 한 줄 + '틀렸다고 볼 조건' 한 줄.\n"
+    "   모양: 섹션 제목을 굵게 한 줄로 쓰고, 그 아래 근거마다 '- '로 시작하는 줄 하나. '사도 된다/어렵다' 같은 첫 문장 없이 바로 **올라갈 근거**부터 시작한다.\n"
+    "   의견을 정했으면 답을 쓰기 전에 record_view 를 같은 내용으로 꼭 부른다 (view: strong/neutral/weak). 근거가 엇갈리면 neutral 이 맞다. "
+    "답의 이유와 '틀렸다고 볼 조건'은 record_view 에 적은 문장과 같은 뜻이어야 한다. "
+    "답 끝에 '판단 기록에 남겼어요 (20거래일 뒤 채점)'와 '이 의견은 아직 채점 전이라 맞는지 몰라요'를 한 줄로 붙인다.\n"
+    "   ● 질문에 특정 가격이 있으면('51불에 팔까', '45에 사도 돼?') price_check 도 같이 부르고, 답의 맨 앞에 **그 가격 ($51)** 섹션을 둔다: "
+    "현재가에서 몇 %, 그 가격 근처에서 방향이 바뀐 날짜와 횟수(turns_near_price)와 그 뒤 얼마나 밀렸는지/올랐는지, "
+    "최근 60봉 동안 그 가격 위에서 마감한 날 수와 마지막 날, 근처 자동 선, 보유 중이면 그 가격에 팔 때 평단 대비 수익률. 사용자가 짚은 근거(예: '두 번 저항')가 "
+    "자료와 맞는지 짚는다. 그다음에 나머지 종합 검토를 짧게.\n"
+    "   ● 보유 중인 종목이면(check_my_rules 의 holding) 평단·수량·지금 수익률을 꼭 말한다.\n"
+    "   ● 종합 검토 때 my_thesis 도 부른다. 저장된 투자 논리가 있으면 '내 논리' 섹션을 두고 기둥이 지금 자료로 유지되는지 한 줄씩 짚는다.\n"
+    "   ● 실적 발표나 큰 이벤트가 20거래일 안에 있으면 options_move 도 불러 '곧 있을 일'에 옵션이 예상하는 움직임(±%)을 붙인다.\n"
+    "   ● 손익비(rr)는 '지금 살 때'의 숫자다. 매도·보유를 묻는 질문에서는 손익비를 아예 꺼내지 않는다 (근거에도, 내 규칙 줄에도).\n"
+    "   ● 종합 의견은 근거와 같은 방향이어야 한다: 올라갈 근거가 더 무거우면 강함, 내려갈 근거가 더 무거우면 약함, 비슷하면 중립. "
+    "이유 문장이 반대 방향 근거만 말하면 안 된다. 근거의 출처 괄호는 그 사실이 실제로 나온 곳만 쓴다.\n"
+    "   ● 인버스(-1배·-3배) ETF 는 기초 지수가 내려갈 때 오른다. 근거를 쓸 때 '기초 지수(예: 반도체)가 내리면 이 ETF 는 오른다'를 한 번 밝히고, "
+    "레버리지 ETF 는 오래 들고 있으면 매일 다시 맞추는 구조 때문에 손실이 쌓일 수 있다는 점을 짧게 덧붙인다.\n"
+    "   '언제 팔까', '목표가', '손절'만 묻는 거면 종합 검토 없이 check_my_rules 로 매도 목표와 손절 기준, 보유 중이면 평단 대비 "
     "목표 도달 시·손절 시 수익률(target_from_avg_pct, stop_from_avg_pct)을 숫자로 전한다.\n"
-    "3) '사세요/파세요' 같은 권유나 앞으로 오른다·내린다는 전망은 하지 않는다. \"정해두신 규칙 기준으로는 ~\"까지만 말한다. "
+    "3) '사세요/파세요' 같은 지시는 하지 않는다. 종합 의견은 '시장보다 강할 것 같다/약할 것 같다'는 상대적인 판단이지 매매 지시가 아니다. "
+    "목표가는 도구에 있는 값(내 규칙의 목표, 애널리스트 목표가)만 쓰고 네가 만들지 않는다. "
     "사용자가 정하지 않은 매매 요령('저항을 못 넘고 되밀리면 판다' 같은 것)을 네가 덧붙이지 않는다.\n"
     "3-1) 추세를 물으면 read_chart 결과의 추세선·채널·insights 에 있는 사실만 전한다 (어느 선 위/아래인지, 채널의 어디쯤인지).\n"
-    "4) 규칙 결과를 전할 때는 한 번, 짧게: 이 앱의 백테스트에서 자동 지지/저항·채널은 무작위 선보다 잘 지켜지지 않았다는 점을 덧붙인다.\n"
+    "4) 규칙 결과를 전할 때는 한 번, 짧게: 이 앱의 백테스트에서 자동 지지/저항·채널은 무작위 선보다 잘 지켜지지 않았다는 점을 덧붙인다. "
+    "그래서 종합 의견에서 선(지지·저항)은 근거로 가볍게만 쓰고, 뉴스·실적·가치·시장을 더 무겁게 본다.\n"
     "5) 왜 움직였는지 물으면 why_moved, 뉴스는 get_news, 시장 전체는 market_brief 를 쓴다. 근거 기사가 있으면 언론사 이름을 붙인다.\n"
     "6) 종목 이름만 들으면 find_symbol 로 티커를 찾는다. 사용자가 종목을 말하지 않으면 '지금 보고 있는 종목'을 쓴다.\n"
     "6-1) 여러 종목을 한꺼번에 물으면('관심종목 중 규칙에 맞는 것', '손절에 가까운 보유 종목') scan_my_rules 를 한 번 부른다. "
@@ -103,10 +129,27 @@ TOOLS = [
                                                      "target_near_atr(목표 근처 ATR 배수), stop_atr(손절 ATR 배수), min_rr(최소 손익비), "
                                                      "min_risk_atr(손익비를 셀 때 위험의 최소 ATR 배수)"}},
       "required": ["kind"]}),
+    ("fundamentals", "펀더멘탈: 시가총액, PER·선행 PER·PEG·EV/EBITDA, 매출·이익 성장률(전년 대비), 마진, 부채·현금·잉여현금흐름, "
+                     "애널리스트 수·의견·목표가(평균·최저·최고), 공매도 비율, 베타, 배당, 다음 실적 발표일. ETF 는 운용사·분류·보수·순자산.", _sym),
+    ("price_check", "사용자가 말한 특정 가격을 차트에서 본다: 현재가에서 몇 %·ATR 몇 배, 그 가격 근처에서 방향이 바뀐 날(고점·저점)과 "
+                    "그 뒤 10봉 동안 움직임, 최근 1년 그 가격 위에서 마감한 날 수, 근처 자동 지지/저항선, 보유 중이면 그 가격에 팔 때 평단 대비 수익.",
+     {"type": "object", "properties": {"symbol": {"type": "string"}, "price": {"type": "number"}}, "required": ["symbol", "price"]}),
+    ("options_move", "옵션이 예상하는 움직임: 가까운 만기들의 등가격 스트래들로 본 '만기까지 ±몇 %'와 범위, 내재변동성, 풋/콜 비율, "
+                     "다음 실적 직후 만기의 예상 움직임.", _sym),
+    ("my_thesis", "사용자가 이 종목에 적어 둔 투자 논리(왜 샀나, 기둥, 틀렸다고 볼 조건, 기다리는 이벤트)와 마지막 점검 결과.", _sym),
+    ("record_view", "종합 의견을 판단 기록에 남긴다 (20거래일 뒤 S&P 500 대비로 자동 채점). 종합 검토를 했으면 답하기 전에 꼭 부른다.",
+     {"type": "object", "properties": {
+         "symbol": {"type": "string"},
+         "view": {"type": "string", "enum": ["strong", "neutral", "weak"], "description": "20거래일 동안 S&P 500 대비 강함/중립/약함"},
+         "confidence": {"type": "integer", "description": "0~100"},
+         "reason": {"type": "string", "description": "의견의 핵심 이유 한두 문장"},
+         "invalid_if": {"type": "string", "description": "틀렸다고 볼 조건 한 문장"}},
+      "required": ["symbol", "view", "confidence", "reason", "invalid_if"]}),
 ]
 LABELS = {"check_my_rules": "내 규칙 대조", "read_chart": "차트 읽기", "get_news": "뉴스", "why_moved": "움직인 이유",
           "market_brief": "시장 요약", "my_portfolio": "내 계좌", "find_symbol": "종목 찾기", "scan_my_rules": "전체 규칙 대조",
-          "backtest_my_rules": "과거 대조", "propose_action": "할 일 제안"}
+          "backtest_my_rules": "과거 대조", "propose_action": "할 일 제안", "fundamentals": "펀더멘탈", "record_view": "판단 기록",
+          "price_check": "그 가격 보기", "options_move": "옵션 예상 움직임", "my_thesis": "내 투자 논리"}
 
 
 def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | None, rules_note: str = "", about: str = "") -> dict:
@@ -123,12 +166,13 @@ def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | No
              *[{"role": m["role"], "content": str(m["content"])[:2000]} for m in messages[-10:] if m.get("role") in ("user", "assistant")]]
     specs = [{"type": "function", "function": {"name": n, "description": d, "parameters": p}} for n, d, p in TOOLS]
     steps, tokens, actions = [], 0, []            # actions = 사용자에게 확인 버튼으로 보여줄 일 (여기서는 실행하지 않는다)
+    views = []                                    # 판단 기록에 남긴 종합 의견
     for _ in range(MAX_STEPS):
         resp = client.chat.completions.create(model=model, messages=convo, tools=specs, **extra)
         tokens += resp.usage.total_tokens if resp.usage else 0
         msg = resp.choices[0].message
         if not msg.tool_calls:
-            return {"answer": (msg.content or "").strip(), "steps": steps, "tokens": tokens, "actions": actions}
+            return {"answer": (msg.content or "").strip(), "steps": steps, "tokens": tokens, "actions": actions, "views": views}
         convo.append({"role": "assistant", "content": msg.content, "tool_calls": [
             {"id": c.id, "type": "function", "function": {"name": c.function.name, "arguments": c.function.arguments}}
             for c in msg.tool_calls]})
@@ -141,6 +185,8 @@ def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | No
                 result = {"error": f"{type(error).__name__}: {str(getattr(error, 'detail', error))[:200]}"}
             if isinstance(result, dict) and isinstance(result.get("action"), dict) and result["action"] not in actions:
                 actions.append(result["action"])
+            if isinstance(result, dict) and isinstance(result.get("view_record"), dict):
+                views.append(result["view_record"])
             convo.append({"role": "tool", "tool_call_id": call.id, "content": fit_result(result)})
     return {"answer": "도구를 여러 번 썼는데도 답을 정리하지 못했어요. 질문을 조금 좁혀서 다시 물어봐 주세요.", "steps": steps,
-            "tokens": tokens, "actions": actions}
+            "tokens": tokens, "actions": actions, "views": views}

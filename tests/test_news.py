@@ -67,16 +67,21 @@ def test_get_news_without_ai_calls_no_model_and_asks_to_come_back(monkeypatch):
     assert news.get_news(replace(s, openai_api_key=""), "US", "TSLA", "테슬라", ai=False)["ai_pending"] is False   # 키가 없으면 다시 올 필요 없음
 
 
-def test_news_endpoint_uses_ai_only_when_asked_and_reuses_it(monkeypatch):
-    from backend import main
+def test_news_endpoint_uses_ai_only_when_asked_and_reuses_it(monkeypatch, tmp_path):
+    from backend import ai_cache, main
     calls = []
+    items = [{"title": "기사 1", "url": "u1"}]
     monkeypatch.setattr(main, "load_stock", lambda s: ({"name": "테슬라"}, [], False))
-    monkeypatch.setattr(main.news, "get_news", lambda s, market, symbol, name, ai: calls.append(ai) or {"ai_pending": not ai})
+    monkeypatch.setattr(main, "ai_disk", ai_cache.DiskCache(tmp_path))
+    monkeypatch.setattr(main.news, "get_news", lambda s, market, symbol, name, ai: calls.append(ai) or
+                        {"items": items, "summary": {"lines": ["요약"]} if ai else None, "ai_pending": not ai})
     main._cache.pop("news:ZZTEST", None), main._cache.pop("news-ai:ZZTEST", None)
     assert main.stock_news("zztest")["ai_pending"] is True and calls == [False]        # 차트를 열 때: AI 없이
     assert main.stock_news("ZZTEST")["ai_pending"] is True and calls == [False]        # 10분 안엔 다시 안 가져온다
     assert main.stock_news("ZZTEST", ai=True)["ai_pending"] is False and calls == [False, True]   # 뉴스 탭을 열 때
     assert main.stock_news("ZZTEST")["ai_pending"] is False and calls == [False, True]  # 그 뒤 1시간은 정리된 걸 그대로
+    main._cache.pop("news-ai:ZZTEST", None)                                             # 서버를 다시 켠 것처럼 메모리를 비워도
+    assert main.stock_news("ZZTEST", ai=True)["summary"] == {"lines": ["요약"]} and calls == [False, True]   # 같은 기사면 디스크에서
 
 
 def test_get_news_keeps_everything_without_summary(monkeypatch):
