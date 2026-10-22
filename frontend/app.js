@@ -2113,7 +2113,7 @@ function renderJudgments() {
     `이번 주(${j.week}) ${j.recorded_this_week.toLocaleString()}건 기록` + (left <= 0 ? " · 이번 주는 끝났어요" : ` · ${left.toLocaleString()}건 남음` + (j.due ? "" : " · 월요일 아침 6시 이후에 남겨요")),
     `이번 주 종목 ${p.symbols}개 (중형·고변동성 ${p.universe} + 내 종목` + (j.week >= p.ndx_from ? ` + 나스닥 100 중 ${p.ndx}, 겹치는 종목은 한 번만` : `. 나스닥 100 중 ${p.ndx}개는 ${p.ndx_from}부터`)
       + (j.week >= p.kr_from ? ` + 코스피 ${p.kr}` : `. 코스피 ${p.kr}개는 ${p.kr_from}부터 (KODEX 200 대비)`) + `) · 모델 ${models}`,
-    `조건 2가지(숫자 + 기사 / 숫자만) · 채점 ${p.horizons.join("·")}거래일 뒤 (${p.bench} 대비)`,
+    `조건 ${p.arms.length}가지(${p.arms.map((a) => ARM_NAMES[a]).join(" / ")}) · 채점 ${p.horizons.join("·")}거래일 뒤 (미국 ${p.bench}, 코스피 KODEX 200 대비)`,
     p.auto ? "주 1회 자동으로 남겨요." : "자동 기록은 꺼져 있어요. 버튼을 눌러야 남겨요.",
   ];
   const status = [el("ul", { class: "judge-facts" }, ...lines.map((t) => el("li", {}, t)))];
@@ -2138,9 +2138,13 @@ function renderJudgments() {
       // 같은 기준선을 모델이 방향을 고른 기록에서만: '맞힌 비율'과 같은 묶음이라 이쪽과 비교하는 게 공정하다
       el("td", {}, r.calls ? `${pc(r.always_up_calls_hit_rate_pct)} · ${sg(r.always_up_calls_mean_excess_pct)}` : "–"),
       // 보조: 종목이 원래 시장보다 크게(베타) 움직인 몫을 뺀 초과수익. 모델 / 같은 종목 전부 '강함'
-      el("td", {}, r.beta_calls ? `${pc(r.hit_rate_beta_pct)} · ${sg(r.mean_signed_excess_beta_pct)} / ${pc(r.always_up_calls_hit_rate_beta_pct)} · ${sg(r.always_up_calls_mean_excess_beta_pct)}` : "–")));
+      el("td", {}, r.beta_calls ? `${pc(r.hit_rate_beta_pct)} · ${sg(r.mean_signed_excess_beta_pct)} / ${pc(r.always_up_calls_hit_rate_beta_pct)} · ${sg(r.always_up_calls_mean_excess_beta_pct)}` : "–"),
+      // 참고: 강함이라 한 종목 평균 − 약함이라 한 종목 평균 (전부 약함으로 맞히는 몫과 상관없이 갈라낸 정도)
+      el("td", {}, sg(r.spread_pct)),
+      // 참고: AI 없이 같은 숫자(20일 지수 대비 수익률)로 위 1/3 강함 · 아래 1/3 약함. 모델이 이것보다 나아야 의미가 있다
+      el("td", {}, r.momo_calls ? `${pc(r.momo_hit_rate_pct)} · 차이 ${sg(r.momo_spread_pct)} · 같은 방향 ${pc(r.agree_momo_pct)}` : "–")));
     return [el("div", { class: "brief-sub" }, caption), el("div", { class: "judge-scroll" }, el("table", { class: "judge-table" },
-      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면", "베타 반영 (모델 / 같은 종목 '강함')"].map((h) => el("th", {}, h))), ...body))];
+      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면", "베타 반영 (모델 / 같은 종목 '강함')", "강함−약함 차이", "모멘텀 규칙 (맞힌 비율 · 강함−약함 · 모델과 같은 방향)"].map((h) => el("th", {}, h))), ...body))];
   };
   const anyScored = j.fixed.some((r) => r.scored);
   $("#judge-board").replaceChildren(

@@ -421,3 +421,23 @@ def test_kospi_records_use_kodex_200(monkeypatch):
     r = _rec("005930", d20="outperform", bench_symbol="069500", market="KR")
     x = j.score([r], {"005930": stock, "069500": kodex, "SPY": _candles([100] * 35)}.__getitem__)[0]["scored"][20]
     assert (x["ret"], x["bench"], x["excess"]) == (20.0, 10.0, 10.0)
+
+
+def test_momentum_rule_ranks_the_week_by_20_day_excess_and_spread_compares_strong_with_weak():
+    # 종목 6개: 20일 동안 SPY 대비 +30·+20·+10·−10·−20·−30%, 그 뒤 5일은 각자 +6·+4·+2·−2·−4·−6%
+    bench = _candles([100.0] * 30)
+    data, recs = {"SPY": bench}, []
+    names = ["MU", "NET", "DDOG", "COIN", "RBLX", "SOFI"]
+    for k, (past, nxt) in enumerate(zip((30, 20, 10, -10, -20, -30), (6, 4, 2, -2, -4, -6))):
+        closes = [100.0] * 5 + [100 * (1 + past / 100 * t / 20) for t in range(1, 21)] + [100 * (1 + past / 100) * (1 + nxt / 100)] * 5
+        data[names[k]] = _candles(closes)
+        recs.append(_rec(names[k], d5="outperform" if k in (0, 3) else "underperform", d20="neutral", as_of="d0025",
+                         price=100 * (1 + past / 100)))
+    s = j.score(recs, data.__getitem__)
+    assert [r["momo"] for r in s] == ["outperform", "outperform", "neutral", "neutral", "underperform", "underperform"]
+    row = [r for r in j.summarize(s) if r["horizon"] == 5][0]
+    # 모델: 강함 = MU(+6)·COIN(−2) → 평균 +2, 약함 = 나머지 → (4+2−4−6)/4 = −1 → 차이 +3
+    assert row["spread_pct"] == 3.0
+    # 규칙: 강함 MU·NET (+5), 약함 RBLX·SOFI (−5) → 차이 +10, 4건 다 맞음, 모델과 같은 방향 = MU·NET·RBLX·SOFI 중 MU·RBLX·SOFI
+    assert (row["momo_calls"], row["momo_hit_rate_pct"], row["momo_spread_pct"]) == (4, 100.0, 10.0)
+    assert row["agree_momo_pct"] == 50.0      # 방향을 고른 6건 중 규칙도 방향이 있고 같은 것: MU·RBLX·SOFI / 규칙이 중립인 DDOG·COIN 은 다름

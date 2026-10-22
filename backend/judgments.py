@@ -100,6 +100,15 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
     KODEX 200 은 넥스트레이드에서 거래되지 않아 토스·야후 값이 같다.
   - 기사: 네이버 국내 기사만 (판단 전 7일, 최대 30건, 미국과 같은 규칙). 펀더멘탈: 야후 (.KS), 못 받으면 없이 판단하고 표시.
   - 채점·주된 판정·베타 반영은 미국과 같다 (비교 대상만 KODEX 200). 성적표는 미국과 섞지 않는다.
+- 참고 지표 2개 추가 (2026-10-22, W42 의 5거래일 채점을 본 뒤. W43 부터는 채점 전에 정한 셈이다). 주된 판정은 그대로.
+  W42 5일 결과에서 모델이 '강함'이라 한 종목은 거의 다 '최근 5·20일 SPY 대비 강하고 이평선 위'라는 이유였다 (모멘텀).
+  그래서 'AI 없이 같은 숫자로 만든 모멘텀 규칙'보다 나은지를 같이 본다. W42 에 대해서는 결과를 보고 만든 비교라 참고로만 쓴다.
+  - 강함−약함 차이(spread): 모델이 강함이라 한 종목의 평균 초과수익 − 약함이라 한 종목의 평균 초과수익.
+    시장 전체가 빠진 주에 '전부 약함'으로 맞히는 몫과 상관없이, 종목을 갈라낸 정도만 본다.
+  - 단순 모멘텀 규칙(momo): 기준일까지의 20거래일 수익률 − 같은 기간 비교 지수(SPY / KODEX 200) 수익률을
+    그 주·그 시장에서 채점된 종목끼리 줄 세워 위 1/3 = 강함, 아래 1/3 = 약함, 가운데 = 중립. 5일·20일 모두 같은 방향.
+    모델에 준 숫자(return_pct 20d − spy_return_pct 20d)와 같은 값이다. 같은 기록에서 맞힌 비율·방향대로 초과수익·강함−약함 차이를 내고,
+    모델 방향이 규칙과 같았던 비율(agree_momo)도 낸다.
 - 펀더멘탈 금액 단위 고침 (W44 부터 입력에 반영): company.fundamentals 가 큰 금액에 통화와 상관없이 '달러'를 붙였다.
   야후가 준 통화대로 고쳤다 (원 → '원', 그 밖의 통화는 통화 코드). 미국 종목 중 다른 통화로 재무제표를 내는 회사
   (예: 유로·위안으로 보고하는 회사)는 W43 까지 현금·부채 금액에 '달러'가 잘못 붙어 모델에 들어갔다. 숫자 자체는 그대로다.
@@ -554,9 +563,11 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
                 out.append({**r, "scored": {}, "entry": None, "entry_rule": True})
                 continue
             start, start_bench = entry["price"], entry["bench_price"]
-        scored, s, b = {}, cache.get(r["symbol"]), cache.get(r.get("bench_symbol", BENCH))
+        scored, s, b, m20 = {}, cache.get(r["symbol"]), cache.get(r.get("bench_symbol", BENCH)), None
         if s and b and r["as_of"] in s[0] and r["bench_as_of"] in b[0]:
             i, j = s[0].index(r["as_of"]), b[0].index(r["bench_as_of"])
+            if i >= MOMO_DAYS and j >= MOMO_DAYS:                         # 모멘텀 규칙용: 기준일까지 20거래일, 비교 지수 대비
+                m20 = ((s[1][i] / s[1][i - MOMO_DAYS]) - (b[1][j] / b[1][j - MOMO_DAYS])) * 100
             if (key := (r["symbol"], r["as_of"])) not in betas:
                 betas[key] = beta_before(s, b, r["as_of"])
             beta = betas[key]
@@ -574,8 +585,34 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
                              "hit": None if d == "neutral" else (ret > bench) == (d == "outperform"),
                              "beta": None if beta is None else round(beta, 2), "excess_beta": None if xb is None else round(xb, 2),
                              "hit_beta": None if d == "neutral" or xb is None else (xb > 0) == (d == "outperform")}
-        out.append({**r, "scored": scored, "entry": entry, "entry_rule": needs_entry(r)})
-    return out
+        out.append({**r, "scored": scored, "entry": entry, "entry_rule": needs_entry(r), "m20x": None if m20 is None else round(m20, 2)})
+    return momentum_calls(out)
+
+
+MOMO_DAYS = 20
+
+
+def momentum_calls(scored: list[dict]) -> list[dict]:
+    """단순 모멘텀 규칙(AI 없음): 그 주·그 시장에서 채점된 종목을 20거래일 초과수익(m20x)으로 줄 세워
+    위 1/3 = outperform, 아래 1/3 = underperform, 나머지 neutral. 기록마다 momo 칸에 적는다 (채점 안 된 기록은 None)."""
+    groups: dict[tuple, dict[str, float]] = {}
+    for r in scored:
+        if r.get("m20x") is not None and r["scored"]:
+            groups.setdefault((r["week"], market_of(r["symbol"])), {})[r["symbol"]] = r["m20x"]
+    calls: dict[tuple, str] = {}
+    for key, vals in groups.items():
+        order = sorted(vals, key=lambda sym: -vals[sym])
+        k = len(order) // 3
+        for n, sym in enumerate(order):
+            calls[(*key, sym)] = "outperform" if n < k else "underperform" if n >= len(order) - k else "neutral"
+    return [{**r, "momo": calls.get((r["week"], market_of(r["symbol"]), r["symbol"]))} for r in scored]
+
+
+def _spread(rows: list[dict], h: int, direction) -> float | None:
+    """강함이라 한 기록의 평균 초과수익 − 약함이라 한 기록의 평균 초과수익. direction(r) = 그 기록의 방향."""
+    up = [r["scored"][h]["excess"] for r in rows if direction(r) == "outperform"]
+    dn = [r["scored"][h]["excess"] for r in rows if direction(r) == "underperform"]
+    return round(sum(up) / len(up) - sum(dn) / len(dn), 2) if up and dn else None
 
 
 # ── 내가 물어본 판단: 질문 에이전트가 매수/매도 질문에 낸 종합 의견 ──
@@ -638,10 +675,23 @@ def summarize(scored: list[dict], fixed_only: bool = True, arms: tuple = ALL_ARM
                     "always_up_calls_hit_rate_pct": round(sum(r["scored"][h]["excess"] > 0 for r in calls) / len(calls) * 100, 1) if calls else None,
                     "always_up_calls_mean_excess_pct": mean([r["scored"][h]["excess"] for r in calls]),
                     **_beta_cols(calls, h),                # 보조: 베타 반영 초과수익 (베타를 구할 수 있던 기록만)
+                    **_momo_cols(done, calls, h),          # 참고: 강함−약함 차이, 단순 모멘텀 규칙
                     "calibration": [{"bucket": f"{lo}~{hi}", "n": len(b), "hit_rate_pct": round(sum(r["scored"][h]["hit"] for r in b) / len(b) * 100, 1)}
                                     for lo, hi in BUCKETS if (b := [r for r in calls if lo <= r[f"c{h}"] <= hi])],
                 })
     return rows
+
+
+def _momo_cols(done: list[dict], calls: list[dict], h: int) -> dict:
+    mo = [r for r in done if r.get("momo") in ("outperform", "underperform")]
+    signed = [r["scored"][h]["excess"] * (1 if r["momo"] == "outperform" else -1) for r in mo]
+    both = [r for r in calls if r.get("momo")]
+    return {"spread_pct": _spread(calls, h, lambda r: r[f"d{h}"]),
+            "momo_calls": len(mo),
+            "momo_hit_rate_pct": round(sum(x > 0 for x in signed) / len(signed) * 100, 1) if signed else None,
+            "momo_mean_signed_excess_pct": round(sum(signed) / len(signed), 2) if signed else None,
+            "momo_spread_pct": _spread(done, h, lambda r: r.get("momo")),
+            "agree_momo_pct": round(sum(r[f"d{h}"] == r["momo"] for r in both) / len(both) * 100, 1) if both else None}
 
 
 def _beta_cols(calls: list[dict], h: int) -> dict:
