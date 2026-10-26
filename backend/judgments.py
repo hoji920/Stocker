@@ -109,6 +109,11 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
     그 주·그 시장에서 채점된 종목끼리 줄 세워 위 1/3 = 강함, 아래 1/3 = 약함, 가운데 = 중립. 5일·20일 모두 같은 방향.
     모델에 준 숫자(return_pct 20d − spy_return_pct 20d)와 같은 값이다. 같은 기록에서 맞힌 비율·방향대로 초과수익·강함−약함 차이를 내고,
     모델 방향이 규칙과 같았던 비율(agree_momo)도 낸다.
+- 본 실험 키 순서 (2026-10-26, W45 부터): 학교 키(OPENAI_API_KEY)를 먼저 쓰고, 그 호출이 API 오류(인증·결제·한도 등)로
+  실패하면 같은 입력으로 개인 키(OPENAI_JUDGE_API_KEY)로 다시 부른다. 학교 키를 쓸 수 있는 동안 개인 비용을 줄이면서,
+  학교 키가 끊겨도 본 실험이 빠지지 않게 하려는 것. 같은 모델·같은 입력이라 판단 조건은 바뀌지 않는다.
+  기록에 어느 키로 답을 받았는지 적는다 (key: school / personal). 모델 답의 형식 오류는 키를 바꿔 다시 묻지 않는다.
+  보조 실험(bridge)은 전처럼 학교 키만 쓴다. W44 까지 본 실험은 개인 키로만 불렀다 (key 칸 없음).
 - 펀더멘탈 금액 단위 고침 (W44 부터 입력에 반영): company.fundamentals 가 큰 금액에 통화와 상관없이 '달러'를 붙였다.
   야후가 준 통화대로 고쳤다 (원 → '원', 그 밖의 통화는 통화 코드). 미국 종목 중 다른 통화로 재무제표를 내는 회사
   (예: 유로·위안으로 보고하는 회사)는 W43 까지 현금·부채 금액에 '달러'가 잘못 붙어 모델에 들어갔다. 숫자 자체는 그대로다.
@@ -217,6 +222,18 @@ def system_for(symbol: str) -> str:
 def symbols_for(week: str) -> list[str]:
     """그 주에 판단할 고정 종목 (내 종목은 따로 더한다). 겹치는 종목은 한 번만."""
     return list(dict.fromkeys(UNIVERSE + (NDX if week >= NDX_FROM else [])))
+
+
+SCHOOL_FIRST_FROM = "2026-W45"      # 이 주부터 본 실험도 학교 키 먼저 (실패하면 개인 키)
+
+
+def _api_error(error: Exception) -> bool:
+    """키를 바꾸면 될 수도 있는 실패인가 (인증·결제·한도·서버 오류). 모델 답 형식 오류(ValueError)는 아니다."""
+    try:
+        import openai
+        return isinstance(error, openai.APIError)
+    except ImportError:
+        return False
 
 
 def in_bridge(week: str | None) -> bool:
@@ -420,18 +437,26 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
             save_input({"week": week, "symbol": symbol, "arm": k, "prompt_sha": sha(text), "prompt": text})
     out = []
     models = settings.openai_judge_models
-    main_settings = replace(settings, openai_api_key=settings.openai_judge_api_key)    # 본 실험은 판단 기록 전용 키로
+    personal = replace(settings, openai_api_key=settings.openai_judge_api_key)          # 판단 기록 전용(개인) 키
+    school_first = week >= SCHOOL_FIRST_FROM and settings.openai_api_key != settings.openai_judge_api_key
+    extra = {"system": system} if market == "KR" else {}
     for model, arm in todo:
         bridge = is_bridge(symbol, model, models, week)
+        key = "school" if bridge or school_first else "personal"
         try:
-            result = judge(settings if bridge else main_settings, model, prompts[kind(arm)], **({"system": system} if market == "KR" else {}))
+            result = judge(settings if key == "school" else personal, model, prompts[kind(arm)], **extra)
         except Exception as error:
-            if not bridge:
+            if bridge:
+                print(f"[judgments] 보조 실험 {symbol} {model} {arm} 건너뜀: {type(error).__name__}")
+                continue
+            if not (school_first and _api_error(error)):
                 raise
-            print(f"[judgments] 보조 실험 {symbol} {model} {arm} 건너뜀: {type(error).__name__}")
-            continue
+            print(f"[judgments] 학교 키 실패 → 개인 키로 {symbol} {model} {arm}: {type(error).__name__}")
+            result, key = judge(personal, model, prompts[kind(arm)], **extra), "personal"
         if bridge:
             result = {**result, "bridge": True}
+        if week >= SCHOOL_FIRST_FROM:
+            result = {**result, "key": key}
         out.append({**base, "model": model, "arm": arm, "news_count": len(items[:NEWS_MAX]) if kind(arm) in USES_NEWS else 0,
                     "fundamentals": bool(fund) and kind(arm) in USES_FUND,
                     "prompt_sha": sha(prompts[kind(arm)]), "system_sha": sha(system),

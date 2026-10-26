@@ -441,3 +441,34 @@ def test_momentum_rule_ranks_the_week_by_20_day_excess_and_spread_compares_stron
     # 규칙: 강함 MU·NET (+5), 약함 RBLX·SOFI (−5) → 차이 +10, 4건 다 맞음, 모델과 같은 방향 = MU·NET·RBLX·SOFI 중 MU·RBLX·SOFI
     assert (row["momo_calls"], row["momo_hit_rate_pct"], row["momo_spread_pct"]) == (4, 100.0, 10.0)
     assert row["agree_momo_pct"] == 50.0      # 방향을 고른 6건 중 규칙도 방향이 있고 같은 것: MU·RBLX·SOFI / 규칙이 중립인 DDOG·COIN 은 다름
+
+
+def test_from_w45_the_main_run_tries_the_school_key_first_and_falls_back_to_the_personal_key(monkeypatch):
+    import openai
+    s = replace(get_settings(), openai_api_key="school", openai_judge_api_key="mine", openai_judge_models=("mini", "big"))
+    used, broken = [], {"school"}
+
+    def fake(settings, model, prompt, system=None):
+        used.append(settings.openai_api_key)
+        if settings.openai_api_key in broken:
+            raise openai.APIError("billing_not_active", request=None, body=None)
+        return {"d5": "neutral", "c5": 50, "d20": "neutral", "c20": 50, "reason": "", "invalid_if": "", "tokens": 1}
+    monkeypatch.setattr(j, "judge", fake)
+    days = pd.bdate_range(end="2026-10-30", periods=300).strftime("%Y-%m-%d")
+    candles = [{"time": d, "open": 100, "high": 101, "low": 99, "close": 100.0 + i, "volume": 10.0} for i, d in enumerate(days)]
+    now = datetime(2026, 11, 2, 8, 30, tzinfo=j.KST)
+    run = lambda week: j.make_records(s, week, j.PREMIUM[0], "x", False, candles, candles, [], [("mini", "nonews")], now=now)
+    assert [r["key"] for r in run("2026-W45")] == ["personal"] and used == ["school", "mine"]   # 학교 키 실패 → 개인 키
+    broken.clear(); used.clear()
+    assert [r["key"] for r in run("2026-W45")] == ["school"] and used == ["school"]
+    used.clear()
+    assert "key" not in run("2026-W44")[0] and used == ["mine"]                                  # W44 까지는 개인 키만
+
+    def bad_format(settings, model, prompt, system=None):
+        used.append(settings.openai_api_key)
+        raise ValueError("형식 오류")
+    monkeypatch.setattr(j, "judge", bad_format)
+    used.clear()
+    with pytest.raises(ValueError):                                                             # 형식 오류는 키를 바꿔 다시 묻지 않는다
+        run("2026-W45")
+    assert used == ["school"]
