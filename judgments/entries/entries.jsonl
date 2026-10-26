@@ -1441,3 +1441,4 @@
 {"symbol": "SOXX", "at": "2026-10-19T09:03:44+09:00", "rule": "regular30", "minutes": 30, "price": 508.0771, "bars": 30, "bench_price": 767.0333, "bench_bars": 30, "t0": "2026-10-19T22:30+09:00"}
 {"symbol": "SOXX", "at": "2026-10-19T09:03:46+09:00", "rule": "regular30", "minutes": 30, "price": 508.0771, "bars": 30, "bench_price": 767.0333, "bench_bars": 30, "t0": "2026-10-19T22:30+09:00"}
 {"symbol": "SOXX", "at": "2026-10-19T09:03:49+09:00", "rule": "regular30", "minutes": 30, "price": 508.0771, "bars": 30, "bench_price": 767.0333, "bench_bars": 30, "t0": "2026-10-19T22:30+09:00"}
+{"symbol": "IREN", "at": "2026-10-22T17:23:40+09:00", "rule": "regular30", "minutes": 30, "price": 26.152, "bars": 30, "bench_price": 766.5522, "bench_bars": 30, "t0": "2026-10-22T22:30+09:00"}
