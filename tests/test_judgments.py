@@ -366,7 +366,7 @@ def test_bridge_uses_the_app_key_and_a_failure_skips_only_that_call(monkeypatch)
     candles = [{"time": d, "open": 100, "high": 101, "low": 99, "close": 100.0 + i, "volume": 10.0} for i, d in enumerate(days)]
     now = datetime(2026, 10, 26, 8, 30, tzinfo=j.KST)
     recs = j.make_records(s, "2026-W44", other, other, False, candles, candles, [], [("mini", "nonews"), ("big", "nonews")], now=now)
-    assert used == [("mini", "mine"), ("big", "school")]
+    assert used == [("mini", "school"), ("big", "school")]                               # W44 부터 본 실험도 학교 키 먼저
     assert [(r["model"], r.get("bridge")) for r in recs] == [("mini", None)]          # 보조 실험이 실패해도 본 실험은 적힌다
     with pytest.raises(RuntimeError):                                                    # 본 실험(PREMIUM 의 big)이 실패하면 그대로 에러
         j.make_records(s, "2026-W44", j.PREMIUM[0], "x", False, candles, candles, [], [("big", "nonews")], now=now)
@@ -443,7 +443,7 @@ def test_momentum_rule_ranks_the_week_by_20_day_excess_and_spread_compares_stron
     assert row["agree_momo_pct"] == 50.0      # 방향을 고른 6건 중 규칙도 방향이 있고 같은 것: MU·RBLX·SOFI / 규칙이 중립인 DDOG·COIN 은 다름
 
 
-def test_from_w45_the_main_run_tries_the_school_key_first_and_falls_back_to_the_personal_key(monkeypatch):
+def test_from_w44_the_main_run_tries_the_school_key_first_and_falls_back_to_the_personal_key(monkeypatch):
     import openai
     s = replace(get_settings(), openai_api_key="school", openai_judge_api_key="mine", openai_judge_models=("mini", "big"))
     used, broken = [], {"school"}
@@ -462,7 +462,7 @@ def test_from_w45_the_main_run_tries_the_school_key_first_and_falls_back_to_the_
     broken.clear(); used.clear()
     assert [r["key"] for r in run("2026-W45")] == ["school"] and used == ["school"]
     used.clear()
-    assert "key" not in run("2026-W44")[0] and used == ["mine"]                                  # W44 까지는 개인 키만
+    assert "key" not in run("2026-W43")[0] and used == ["mine"]                                  # W43 까지는 개인 키만
 
     def bad_format(settings, model, prompt, system=None):
         used.append(settings.openai_api_key)
