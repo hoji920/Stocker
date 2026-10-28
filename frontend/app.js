@@ -2099,7 +2099,7 @@ async function loadJudgments() {
   if (j.state.running) judgePoll = setTimeout(loadJudgments, 3000);       // 남기는 중이면 진행 상황을 따라간다
 }
 
-// 결과 한눈에: 표 대신 '골라내는 힘' 막대 하나로. 0 = 못 고름, 회색 선 = AI 없는 모멘텀 규칙
+// 결과 한눈에: 표 대신 '골라내는 힘' 막대 하나로. 0 = 못 고름, 회색 선 = 모멘텀(AI 없이 최근 20일 잘 오른 종목 = 강함)
 const SET_NAMES = { fixed: "미국 중형·고변동 100", ndx: "나스닥 100", kr: "코스피 100" };
 const SHORT_ARM = { news: "숫자+기사(W42)", nonews: "숫자만", fund: "+재무", fund_news: "+재무+기사" };
 const shortModel = (m) => (m.includes("mini") ? "mini" : m.replace("gpt-", ""));
@@ -2123,7 +2123,7 @@ function judgeOverview(j) {
     if (r.spread_pct <= 0) return ["bad", "못 골라냄"];
     if (r.momo_spread_pct == null) return ["", "골라냄"];
     const d = r.spread_pct - r.momo_spread_pct;
-    return d > 1 ? ["good", "규칙보다 잘 골라냄"] : d < -1 ? ["meh", "규칙보다 못함"] : ["meh", "규칙과 비슷"];
+    return d > 1 ? ["good", "모멘텀보다 나음"] : d < -1 ? ["meh", "모멘텀보다 못함"] : ["meh", "모멘텀과 비슷"];
   };
 
   const cards = Object.entries(sets).map(([key, rows]) => {
@@ -2145,11 +2145,11 @@ function judgeOverview(j) {
         const up = r.always_up_calls_hit_rate_pct, base = up == null ? null : Math.max(up, 100 - up);
         return el("div", { class: "jo-row" },
           el("div", { class: "jo-label" }, `${shortModel(r.model)} · ${SHORT_ARM[r.arm]}`),
-          el("div", { class: "jo-bar", title: `강함이라 한 종목 평균 − 약함이라 한 종목 평균 = ${sg(r.spread_pct, 2)} · AI 없는 모멘텀 규칙 ${sg(r.momo_spread_pct, 2)}` },
+          el("div", { class: "jo-bar", title: `강함이라 한 종목 평균 − 약함이라 한 종목 평균 = ${sg(r.spread_pct, 2)} · 모멘텀 ${sg(r.momo_spread_pct, 2)}` },
             el("i", { class: "jo-zero" }),
             el("i", { class: `jo-fill ${r.spread_pct >= 0 ? "up" : "down"}`, style: `left:${pos(lo)};width:${(hi - lo) / scale * 50}%` }),
             r.momo_spread_pct != null ? el("i", { class: "jo-momo", style: `left:${pos(r.momo_spread_pct)}` }) : ""),
-          el("div", { class: "jo-num" }, sg(r.spread_pct), el("span", { class: "muted" }, ` 규칙 ${sg(r.momo_spread_pct)}`)),
+          el("div", { class: "jo-num" }, sg(r.spread_pct), el("span", { class: "muted" }, ` 모멘텀 ${sg(r.momo_spread_pct)}`)),
           el("span", { class: `jo-tag ${cls}` }, word),
           el("div", { class: "jo-sub muted" },
             `맞힌 비율 ${r.hit_rate_pct?.toFixed(0) ?? "–"}% (한쪽으로만 찍으면 ${base?.toFixed(0) ?? "–"}%) · ${r.calls}건`
@@ -2161,7 +2161,7 @@ function judgeOverview(j) {
   const fx = sets.fixed.filter((r) => r.horizon === judgeH && r.spread_pct != null);
   const notes = [];
   const best = fx.slice().sort((a, b) => b.spread_pct - a.spread_pct)[0];
-  if (best) notes.push(`가장 잘 골라낸 조건: ${shortModel(best.model)} · ${SHORT_ARM[best.arm]} (${sg(best.spread_pct)}, AI 없는 규칙 ${sg(best.momo_spread_pct)})`);
+  if (best) notes.push(`가장 잘 골라낸 조건: ${shortModel(best.model)} · ${SHORT_ARM[best.arm]} (${sg(best.spread_pct)}, 모멘텀 ${sg(best.momo_spread_pct)})`);
   const avg = (m) => { const xs = fx.filter((r) => r.model.includes(m) && r.arm !== "news").map((r) => r.spread_pct); return xs.length ? xs.reduce((a, b) => a + b) / xs.length : null; };
   if (avg("mini") != null && avg("5.5") != null) notes.push(`모델: mini 평균 ${sg(avg("mini"))} · 5.5 평균 ${sg(avg("5.5"))} (5.5 는 W44 전까지 30종목뿐)`);
   const f = fx.find((r) => r.model.includes("mini") && r.arm === "fund"), fn = fx.find((r) => r.model.includes("mini") && r.arm === "fund_news");
@@ -2171,7 +2171,7 @@ function judgeOverview(j) {
     el("div", { class: "brief-sub" }, "결과 한눈에"),
     el("div", { class: "jo-help" },
       el("div", {}, el("b", {}, "골라내는 힘"), " = AI 가 ‘시장보다 강함’이라 한 종목이 ‘약함’이라 한 종목보다 실제로 몇 %p 더 올랐나."),
-      el("div", {}, "0 이하면 못 고른 것. ", el("i", { class: "jo-momo-key" }), " 회색 선 = AI 없이 ‘최근 20일 잘 오른 종목 = 강함’ 규칙. 이 선보다 오른쪽이어야 AI 가 한 일이 있는 것."),
+      el("div", {}, "0 이하면 못 고른 것. ", el("i", { class: "jo-momo-key" }), " 회색 선 = 모멘텀: AI 없이 ‘최근 20일 시장보다 잘 오른 종목 = 강함’으로만 골랐을 때. 이 선보다 오른쪽이어야 AI 가 한 일이 있는 것."),
       el("div", { class: "muted" }, "한 주는 사실상 표본 하나예요. 여러 주가 쌓이기 전까지는 방향만 보세요.")),
     el("div", { class: "seg jo-h" }, chip(5), chip(20)),
     notes.length ? el("ul", { class: "judge-facts jo-notes" }, ...notes.map((t) => el("li", {}, t))) : "",
@@ -2221,10 +2221,10 @@ function renderJudgments() {
       el("td", {}, r.beta_calls ? `${pc(r.hit_rate_beta_pct)} · ${sg(r.mean_signed_excess_beta_pct)} / ${pc(r.always_up_calls_hit_rate_beta_pct)} · ${sg(r.always_up_calls_mean_excess_beta_pct)}` : "–"),
       // 참고: 강함이라 한 종목 평균 − 약함이라 한 종목 평균 (전부 약함으로 맞히는 몫과 상관없이 갈라낸 정도)
       el("td", {}, sg(r.spread_pct)),
-      // 참고: AI 없이 같은 숫자(20일 지수 대비 수익률)로 위 1/3 강함 · 아래 1/3 약함. 모델이 이것보다 나아야 의미가 있다
+      // 참고: 모멘텀 — AI 없이 같은 숫자(20일 지수 대비 수익률)로 위 1/3 강함 · 아래 1/3 약함. 모델이 이것보다 나아야 의미가 있다
       el("td", {}, r.momo_calls ? `${pc(r.momo_hit_rate_pct)} · 차이 ${sg(r.momo_spread_pct)} · 같은 방향 ${pc(r.agree_momo_pct)}` : "–")));
     return [el("div", { class: "brief-sub" }, caption), el("div", { class: "judge-scroll" }, el("table", { class: "judge-table" },
-      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면", "베타 반영 (모델 / 같은 종목 '강함')", "강함−약함 차이", "모멘텀 규칙 (맞힌 비율 · 강함−약함 · 모델과 같은 방향)"].map((h) => el("th", {}, h))), ...body))];
+      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면", "베타 반영 (모델 / 같은 종목 '강함')", "강함−약함 차이", "모멘텀 (맞힌 비율 · 강함−약함 · 모델과 같은 방향)"].map((h) => el("th", {}, h))), ...body))];
   };
   const anyScored = j.fixed.some((r) => r.scored);
   $("#judge-board").replaceChildren(
