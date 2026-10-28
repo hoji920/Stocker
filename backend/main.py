@@ -1387,6 +1387,10 @@ def judgments_summary(symbol: str | None = None):
         "paired": judgments.summarize(judgments.paired(scored), fixed_only=True),      # 모델끼리 비교는 둘 다 판단한 기록만
         "kr": judgments.summarize(judgments.in_set(scored, judgments.KR_UNIVERSE), fixed_only=False),     # 코스피: 미국과 따로
         "kr_paired": judgments.summarize(judgments.paired(scored, judgments.KR_UNIVERSE), fixed_only=False),
+        # 주마다 따로 (같은 주 종목은 같이 움직여서 한 주가 사실상 표본 하나 → 화면에서 주별로 나눠 보여준다)
+        "weekly": [{"week": w, "set": name, "rows": judgments.summarize(judgments.in_set([r for r in scored if r["week"] == w], syms), fixed_only=False)}
+                   for w in sorted({r["week"] for r in scored if r["scored"]})
+                   for name, syms in (("fixed", judgments.UNIVERSE), ("ndx", judgments.NDX), ("kr", judgments.KR_UNIVERSE))],
         "mine": judgments.summarize([r for r in scored if r.get("mine")], fixed_only=False),
     }
     # 내가 물어본 판단 (질문 에이전트의 종합 의견). 종목·기준일마다 처음 것만 채점
