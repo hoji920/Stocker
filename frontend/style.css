@@ -645,3 +645,6 @@ button.chip:hover { border-color: var(--accent); color: var(--accent); }
 .js-d { font-weight: 600; }
 .js-d.outperform { color: var(--up); } .js-d.underperform { color: var(--down); } .js-d.neutral { color: var(--muted); font-weight: 400; }
 .js-d.miss { opacity: 0.55; }
+
+.short-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 13px; margin: 6px 0 2px; cursor: help; }
+.short-line b { display: inline; margin: 0; font-size: 12px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 15%, transparent); }

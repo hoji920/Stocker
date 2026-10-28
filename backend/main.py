@@ -1448,6 +1448,16 @@ def company_info(symbol: str):
         raise HTTPException(status_code=502, detail=f"회사 정보를 못 받았어요 ({type(error).__name__})")
 
 
+@app.get("/api/short/{symbol}")
+def short_interest(symbol: str):
+    """공매도 잔고 (미국 종목만, 야후). 국내 공매도는 아직 없다."""
+    symbol = _us_stock(symbol)
+    try:
+        return {"short": company.short_interest(symbol)}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"공매도 정보를 못 받았어요 ({type(error).__name__})")
+
+
 def _us_stock(symbol: str) -> str:
     symbol = symbol.strip().upper()
     if macro.is_macro(symbol) or market_of(symbol) == "KR":

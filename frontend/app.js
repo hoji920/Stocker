@@ -1847,8 +1847,28 @@ async function loadCompany() {
   box.replaceChildren(el("div", { class: "company" },
     el("div", { class: "company-facts" }, ...facts.filter(Boolean).map((t) => el("span", {}, t))),
     c.summary ? el("p", {}, c.summary) : c.summary_en ? el("p", { class: "muted" }, c.summary_en.slice(0, 300) + "…") : "",
+    el("div", { id: "short-line" }),
     el("p", { class: "muted hint" }, "야후 파이낸스 프로필 · 설명은 AI 가 한국어로 줄인 것",
       c.website ? el("a", { href: c.website, target: "_blank", rel: "noopener" }, " · 홈페이지") : "")));
+  loadShort(d.symbol);
+}
+
+// 공매도 잔고: 미국 거래소가 한 달에 두 번 공시 (2주쯤 늦음). 많다고 내린다는 뜻은 아니다 (헤지·차익거래도 섞인다)
+async function loadShort(symbol) {
+  const res = await fetch(`/api/short/${encodeURIComponent(symbol)}`).catch(() => null);
+  const s = res?.ok ? (await res.json()).short : null;
+  const box = $("#short-line");
+  if (!s || !box || state.data?.symbol !== symbol) return;
+  const man = (v) => (v >= 1e8 ? `${(v / 1e8).toFixed(2)}억` : `${Math.round(v / 1e4).toLocaleString()}만`);
+  const chg = s.change_pct == null ? "" : ` · 전월 대비 ${s.change_pct >= 0 ? "+" : ""}${s.change_pct}%`;
+  const pct = s.pct_float ?? s.pct_out;
+  box.replaceChildren(el("div", { class: "short-line", title: "공매도 비율 = 빌려서 판 주식 ÷ 유통 주식. 다 갚는 데 걸리는 날 = 공매도 잔고 ÷ 하루 평균 거래량.\n"
+      + "비율이 높으면 하락에 건 돈이 많다는 뜻이지만, 반대로 갑자기 오르면 되사려는 매수(숏 스퀴즈)가 몰릴 수도 있어요. 헤지·차익거래도 섞여 있어요." },
+    el("b", {}, "공매도"),
+    el("span", {}, pct != null ? `유통 주식의 ${pct}%` : "비율 없음"),
+    el("span", { class: "muted" }, `${man(s.shares)}주${chg}`),
+    s.days_to_cover != null ? el("span", { class: "muted" }, `다 갚는 데 ${s.days_to_cover}일`) : "",
+    s.date ? el("span", { class: "muted" }, `${md(s.date)} 기준`) : ""));
 }
 
 // ── 옵션이 예상하는 움직임 (한눈에 보기): 등가격 스트래들 = 그 만기까지 ±몇 %. 야후 옵션, 서버 15분 캐시 ──
