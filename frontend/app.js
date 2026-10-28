@@ -1853,22 +1853,39 @@ async function loadCompany() {
   loadShort(d.symbol);
 }
 
-// 공매도 잔고: 미국 거래소가 한 달에 두 번 공시 (2주쯤 늦음). 많다고 내린다는 뜻은 아니다 (헤지·차익거래도 섞인다)
+// 공매도 잔고 (회사 카드에 보여주는 참고 정보). 판단 기록 실험과는 상관없다 — 서버도 따로 받고(/api/short, company.short_interest)
+// 따로 저장한다. 미국 거래소가 한 달에 두 번 공시 (2주쯤 늦음). 숫자를 일반인이 읽을 수 있는 말로 풀어서 보여준다
 async function loadShort(symbol) {
   const res = await fetch(`/api/short/${encodeURIComponent(symbol)}`).catch(() => null);
   const s = res?.ok ? (await res.json()).short : null;
   const box = $("#short-line");
   if (!s || !box || state.data?.symbol !== symbol) return;
   const man = (v) => (v >= 1e8 ? `${(v / 1e8).toFixed(2)}억` : `${Math.round(v / 1e4).toLocaleString()}만`);
-  const chg = s.change_pct == null ? "" : ` · 전월 대비 ${s.change_pct >= 0 ? "+" : ""}${s.change_pct}%`;
   const pct = s.pct_float ?? s.pct_out;
-  box.replaceChildren(el("div", { class: "short-line", title: "공매도 비율 = 빌려서 판 주식 ÷ 유통 주식. 다 갚는 데 걸리는 날 = 공매도 잔고 ÷ 하루 평균 거래량.\n"
-      + "비율이 높으면 하락에 건 돈이 많다는 뜻이지만, 반대로 갑자기 오르면 되사려는 매수(숏 스퀴즈)가 몰릴 수도 있어요. 헤지·차익거래도 섞여 있어요." },
-    el("b", {}, "공매도"),
-    el("span", {}, pct != null ? `유통 주식의 ${pct}%` : "비율 없음"),
-    el("span", { class: "muted" }, `${man(s.shares)}주${chg}`),
-    s.days_to_cover != null ? el("span", { class: "muted" }, `다 갚는 데 ${s.days_to_cover}일`) : "",
-    s.date ? el("span", { class: "muted" }, `${md(s.date)} 기준`) : ""));
+  // 흔히 쓰는 대략적인 눈금: 5% 아래 낮음, 5~10% 보통, 10~20% 높음, 20% 넘으면 매우 높음
+  const level = pct == null ? null : pct < 5 ? ["낮은 편", "low"] : pct < 10 ? ["보통", ""] : pct < 20 ? ["높은 편", "high"] : ["매우 높은 편", "high"];
+  const lines = [];
+  if (pct != null) {
+    const n = Math.round(pct);
+    lines.push(`이 회사 주식 100주 중 약 ${n < 1 ? "1주가 안 되는 양" : `${n}주`}를 누군가 빌려서 팔아 둔 상태예요. 주가가 내려야 돈을 버는 쪽이에요.`);
+  }
+  if (s.change_pct != null) {
+    lines.push(s.change_pct > 5 ? `지난달보다 ${s.change_pct}% 늘었어요. 하락에 거는 사람이 늘었다는 뜻이에요.`
+      : s.change_pct < -5 ? `지난달보다 ${Math.abs(s.change_pct)}% 줄었어요. 하락에 걸었던 사람들이 일부 정리했다는 뜻이에요.`
+      : "지난달과 거의 비슷해요.");
+  }
+  if (s.days_to_cover != null) {
+    lines.push(`이 사람들이 빌린 주식을 갚으려고 한꺼번에 되사면, 평소 거래량으로 약 ${s.days_to_cover}일이 걸려요. `
+      + "이 날짜가 길수록, 주가가 갑자기 오를 때 되사려는 주문이 몰려 더 크게 뛸 수 있어요 (숏 스퀴즈).");
+  }
+  lines.push(`${s.date ? `${md(s.date)} 기준이라` : ""} 2주쯤 늦은 숫자예요. 공매도가 많다고 꼭 내리는 건 아니에요 (위험을 줄이려고 파는 거래도 섞여 있어요).`);
+  box.replaceChildren(el("div", { class: "short-box" },
+    el("div", { class: "short-line" },
+      el("b", {}, "공매도"),
+      el("span", {}, pct != null ? `유통 주식의 ${pct}%` : "비율 없음"),
+      level ? el("span", { class: `short-level ${level[1]}` }, level[0]) : "",
+      el("span", { class: "muted" }, `${man(s.shares)}주`)),
+    el("ul", { class: "short-explain" }, ...lines.map((t) => el("li", {}, t)))));
 }
 
 // ── 옵션이 예상하는 움직임 (한눈에 보기): 등가격 스트래들 = 그 만기까지 ±몇 %. 야후 옵션, 서버 15분 캐시 ──

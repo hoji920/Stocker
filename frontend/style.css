@@ -646,5 +646,9 @@ button.chip:hover { border-color: var(--accent); color: var(--accent); }
 .js-d.outperform { color: var(--up); } .js-d.underperform { color: var(--down); } .js-d.neutral { color: var(--muted); font-weight: 400; }
 .js-d.miss { opacity: 0.55; }
 
-.short-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 13px; margin: 6px 0 2px; cursor: help; }
+.short-box { margin: 8px 0 2px; padding: 8px 10px; border-radius: 8px; background: var(--bg); }
+.short-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 13px; }
+.short-level { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 15%, transparent); }
+.short-level.high { background: color-mix(in srgb, var(--down) 25%, transparent); }
+.short-explain { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.65; color: var(--muted); }
 .short-line b { display: inline; margin: 0; font-size: 12px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 15%, transparent); }
