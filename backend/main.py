@@ -360,6 +360,8 @@ def chart(symbol: str, interval: str = "1d"):
     symbol = symbol.strip().upper()
     if interval not in bars.INTERVALS:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 봉 단위: {interval}")
+    if macro.is_macro(symbol) and interval in bars.MINUTE:
+        interval = "1d"                      # 야후 지표(지수·코인·금리)는 분봉이 없어서 일봉으로 보여준다 (응답의 interval 로 화면이 맞춘다)
     info, daily, is_demo = load_stock(symbol)
     if len(daily) < 30:
         raise HTTPException(status_code=404, detail="일봉 데이터가 너무 적어요 (신규 상장 종목?)")

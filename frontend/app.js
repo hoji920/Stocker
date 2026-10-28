@@ -1515,16 +1515,20 @@ const INTERVALS = [
   ["1d", "일"], ["1w", "주"], ["1M", "월"], ["1y", "년"],
 ];
 state.interval = store.load("stocking.interval", "1d");
-const isDaily = () => state.interval === "1d";
+// 실제로 보이는 봉 단위: 야후 지표(비트코인·지수 등)는 분봉을 골라도 서버가 일봉을 준다 → 응답의 interval 을 따른다.
+// 고른 봉 단위(state.interval)는 그대로 두어서 다른 종목으로 가면 다시 분봉
+const shownInterval = () => state.data?.interval || state.interval;
+const isDaily = () => shownInterval() === "1d";
 
-function renderIntervalBar() {
+function renderIntervalBar(shown = shownInterval()) {
   $("#intervals").replaceChildren(...INTERVALS.map(([iv, label], i) => {
-    const b = el("button", { class: `iv${iv === state.interval ? " on" : ""}${i === 6 ? " sep" : ""}` }, label);
+    const b = el("button", { class: `iv${iv === shown ? " on" : ""}${i === 6 ? " sep" : ""}`,
+      ...(state.data?.macro && /^\d+m$/.test(iv) ? { title: "이 지표는 분봉이 없어서 일봉으로 보여줘요" } : {}) }, label);
     b.addEventListener("click", () => {
       if (iv === state.interval) return;
       state.interval = iv;
       store.save("stocking.interval", iv);
-      renderIntervalBar();
+      renderIntervalBar(iv);
       if (state.data) loadChart(state.data.symbol);
     });
     return b;
@@ -1714,6 +1718,7 @@ async function loadChart(symbol) {
   state.focus = null;
   state.patFocus = null;
   banner(d.demo ? demoText : "");
+  renderIntervalBar();                       // 야후 지표는 분봉을 골라도 일봉이 온다 → 실제 봉 단위에 불을 켠다
 
   chart.applyOptions({ timeScale: { timeVisible: d.intraday, secondsVisible: false } });
   state.panes.forEach((p) => p.chart.applyOptions({ timeScale: { timeVisible: d.intraday } }));
