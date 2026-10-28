@@ -360,6 +360,8 @@ def chart(symbol: str, interval: str = "1d"):
     symbol = symbol.strip().upper()
     if interval not in bars.INTERVALS:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 봉 단위: {interval}")
+    if macro.is_macro(symbol) and interval in bars.MINUTE:
+        interval = "1d"                      # 야후 지표(지수·코인·금리)는 분봉이 없어서 일봉으로 보여준다 (응답의 interval 로 화면이 맞춘다)
     info, daily, is_demo = load_stock(symbol)
     if len(daily) < 30:
         raise HTTPException(status_code=404, detail="일봉 데이터가 너무 적어요 (신규 상장 종목?)")
@@ -1362,6 +1364,32 @@ def _store_judge_score(records: list[dict]) -> None:
     _judge_score.update(at=time.time(), n=(len(records), len(entries)), value=value)
 
 
+@app.get("/api/judgments/stocks")
+def judgments_stocks(week: str, h: int = 5):
+    """한 주의 종목별 결과: 종목마다 실제 초과수익(지수 대비), 모델·조건별 판단과 맞음 여부, 모멘텀 판단.
+    반복 판단(_r)은 빼고, 질문 탭 의견도 뺀다. 아직 채점 안 된 종목은 판단만."""
+    h = 20 if h == 20 else 5
+    scored = [r for r in judge_scored(judge_log.read()) if r["week"] == week and r["arm"] in judgments.ALL_ARMS]
+    sets = lambda sym: ("kr" if sym in judgments.KR_UNIVERSE else "fixed" if sym in judgments.UNIVERSE else
+                        "ndx" if sym in judgments.NDX else "mine")
+    by: dict[str, dict] = {}
+    for r in scored:
+        x = r["scored"].get(h)
+        row = by.setdefault(r["symbol"], {"symbol": r["symbol"], "name": r["name"], "set": sets(r["symbol"]), "excess": None,
+                                          "excess_beta": None, "momo": r.get("momo"), "calls": []})
+        if x and row["excess"] is None and not r.get("bridge"):          # 실제 결과는 본 실험 기록 기준 (같은 종목이면 거의 같다)
+            row["excess"], row["excess_beta"] = x["excess"], x.get("excess_beta")
+        row["calls"].append({"model": r["model"], "arm": r["arm"], "d": r[f"d{h}"], "c": r[f"c{h}"],
+                             "hit": None if not x else x["hit"], "reason": r.get("reason", "")[:200]})
+    for row in by.values():
+        if row["excess"] is None:                                         # 본 실험 기록이 채점 전이면 아무 채점이나
+            x = next((r["scored"][h] for r in scored if r["symbol"] == row["symbol"] and h in r["scored"]), None)
+            if x:
+                row["excess"], row["excess_beta"] = x["excess"], x.get("excess_beta")
+    weeks = sorted({r["week"] for r in judge_log.read()})
+    return {"week": week, "h": h, "weeks": weeks, "rows": sorted(by.values(), key=lambda r: (r["excess"] is None, -(r["excess"] or 0)))}
+
+
 @app.get("/api/judgments")
 def judgments_summary(symbol: str | None = None):
     """기록 현황 + 채점 (읽을 때마다 지금 시세로 계산). symbol 을 주면 그 종목의 기록도."""
@@ -1387,6 +1415,10 @@ def judgments_summary(symbol: str | None = None):
         "paired": judgments.summarize(judgments.paired(scored), fixed_only=True),      # 모델끼리 비교는 둘 다 판단한 기록만
         "kr": judgments.summarize(judgments.in_set(scored, judgments.KR_UNIVERSE), fixed_only=False),     # 코스피: 미국과 따로
         "kr_paired": judgments.summarize(judgments.paired(scored, judgments.KR_UNIVERSE), fixed_only=False),
+        # 주마다 따로 (같은 주 종목은 같이 움직여서 한 주가 사실상 표본 하나 → 화면에서 주별로 나눠 보여준다)
+        "weekly": [{"week": w, "set": name, "rows": judgments.summarize(judgments.in_set([r for r in scored if r["week"] == w], syms), fixed_only=False)}
+                   for w in sorted({r["week"] for r in scored if r["scored"]})
+                   for name, syms in (("fixed", judgments.UNIVERSE), ("ndx", judgments.NDX), ("kr", judgments.KR_UNIVERSE))],
         "mine": judgments.summarize([r for r in scored if r.get("mine")], fixed_only=False),
     }
     # 내가 물어본 판단 (질문 에이전트의 종합 의견). 종목·기준일마다 처음 것만 채점

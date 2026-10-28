@@ -366,7 +366,7 @@ def test_bridge_uses_the_app_key_and_a_failure_skips_only_that_call(monkeypatch)
     candles = [{"time": d, "open": 100, "high": 101, "low": 99, "close": 100.0 + i, "volume": 10.0} for i, d in enumerate(days)]
     now = datetime(2026, 10, 26, 8, 30, tzinfo=j.KST)
     recs = j.make_records(s, "2026-W44", other, other, False, candles, candles, [], [("mini", "nonews"), ("big", "nonews")], now=now)
-    assert used == [("mini", "mine"), ("big", "school")]
+    assert used == [("mini", "school"), ("big", "school")]                               # W44 부터 본 실험도 학교 키 먼저
     assert [(r["model"], r.get("bridge")) for r in recs] == [("mini", None)]          # 보조 실험이 실패해도 본 실험은 적힌다
     with pytest.raises(RuntimeError):                                                    # 본 실험(PREMIUM 의 big)이 실패하면 그대로 에러
         j.make_records(s, "2026-W44", j.PREMIUM[0], "x", False, candles, candles, [], [("big", "nonews")], now=now)
@@ -421,3 +421,54 @@ def test_kospi_records_use_kodex_200(monkeypatch):
     r = _rec("005930", d20="outperform", bench_symbol="069500", market="KR")
     x = j.score([r], {"005930": stock, "069500": kodex, "SPY": _candles([100] * 35)}.__getitem__)[0]["scored"][20]
     assert (x["ret"], x["bench"], x["excess"]) == (20.0, 10.0, 10.0)
+
+
+def test_momentum_rule_ranks_the_week_by_20_day_excess_and_spread_compares_strong_with_weak():
+    # 종목 6개: 20일 동안 SPY 대비 +30·+20·+10·−10·−20·−30%, 그 뒤 5일은 각자 +6·+4·+2·−2·−4·−6%
+    bench = _candles([100.0] * 30)
+    data, recs = {"SPY": bench}, []
+    names = ["MU", "NET", "DDOG", "COIN", "RBLX", "SOFI"]
+    for k, (past, nxt) in enumerate(zip((30, 20, 10, -10, -20, -30), (6, 4, 2, -2, -4, -6))):
+        closes = [100.0] * 5 + [100 * (1 + past / 100 * t / 20) for t in range(1, 21)] + [100 * (1 + past / 100) * (1 + nxt / 100)] * 5
+        data[names[k]] = _candles(closes)
+        recs.append(_rec(names[k], d5="outperform" if k in (0, 3) else "underperform", d20="neutral", as_of="d0025",
+                         price=100 * (1 + past / 100)))
+    s = j.score(recs, data.__getitem__)
+    assert [r["momo"] for r in s] == ["outperform", "outperform", "neutral", "neutral", "underperform", "underperform"]
+    row = [r for r in j.summarize(s) if r["horizon"] == 5][0]
+    # 모델: 강함 = MU(+6)·COIN(−2) → 평균 +2, 약함 = 나머지 → (4+2−4−6)/4 = −1 → 차이 +3
+    assert row["spread_pct"] == 3.0
+    # 규칙: 강함 MU·NET (+5), 약함 RBLX·SOFI (−5) → 차이 +10, 4건 다 맞음, 모델과 같은 방향 = MU·NET·RBLX·SOFI 중 MU·RBLX·SOFI
+    assert (row["momo_calls"], row["momo_hit_rate_pct"], row["momo_spread_pct"]) == (4, 100.0, 10.0)
+    assert row["agree_momo_pct"] == 50.0      # 방향을 고른 6건 중 규칙도 방향이 있고 같은 것: MU·RBLX·SOFI / 규칙이 중립인 DDOG·COIN 은 다름
+
+
+def test_from_w44_the_main_run_tries_the_school_key_first_and_falls_back_to_the_personal_key(monkeypatch):
+    import openai
+    s = replace(get_settings(), openai_api_key="school", openai_judge_api_key="mine", openai_judge_models=("mini", "big"))
+    used, broken = [], {"school"}
+
+    def fake(settings, model, prompt, system=None):
+        used.append(settings.openai_api_key)
+        if settings.openai_api_key in broken:
+            raise openai.APIError("billing_not_active", request=None, body=None)
+        return {"d5": "neutral", "c5": 50, "d20": "neutral", "c20": 50, "reason": "", "invalid_if": "", "tokens": 1}
+    monkeypatch.setattr(j, "judge", fake)
+    days = pd.bdate_range(end="2026-10-30", periods=300).strftime("%Y-%m-%d")
+    candles = [{"time": d, "open": 100, "high": 101, "low": 99, "close": 100.0 + i, "volume": 10.0} for i, d in enumerate(days)]
+    now = datetime(2026, 11, 2, 8, 30, tzinfo=j.KST)
+    run = lambda week: j.make_records(s, week, j.PREMIUM[0], "x", False, candles, candles, [], [("mini", "nonews")], now=now)
+    assert [r["key"] for r in run("2026-W45")] == ["personal"] and used == ["school", "mine"]   # 학교 키 실패 → 개인 키
+    broken.clear(); used.clear()
+    assert [r["key"] for r in run("2026-W45")] == ["school"] and used == ["school"]
+    used.clear()
+    assert "key" not in run("2026-W43")[0] and used == ["mine"]                                  # W43 까지는 개인 키만
+
+    def bad_format(settings, model, prompt, system=None):
+        used.append(settings.openai_api_key)
+        raise ValueError("형식 오류")
+    monkeypatch.setattr(j, "judge", bad_format)
+    used.clear()
+    with pytest.raises(ValueError):                                                             # 형식 오류는 키를 바꿔 다시 묻지 않는다
+        run("2026-W45")
+    assert used == ["school"]

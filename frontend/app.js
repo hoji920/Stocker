@@ -1515,16 +1515,20 @@ const INTERVALS = [
   ["1d", "일"], ["1w", "주"], ["1M", "월"], ["1y", "년"],
 ];
 state.interval = store.load("stocking.interval", "1d");
-const isDaily = () => state.interval === "1d";
+// 실제로 보이는 봉 단위: 야후 지표(비트코인·지수 등)는 분봉을 골라도 서버가 일봉을 준다 → 응답의 interval 을 따른다.
+// 고른 봉 단위(state.interval)는 그대로 두어서 다른 종목으로 가면 다시 분봉
+const shownInterval = () => state.data?.interval || state.interval;
+const isDaily = () => shownInterval() === "1d";
 
-function renderIntervalBar() {
+function renderIntervalBar(shown = shownInterval()) {
   $("#intervals").replaceChildren(...INTERVALS.map(([iv, label], i) => {
-    const b = el("button", { class: `iv${iv === state.interval ? " on" : ""}${i === 6 ? " sep" : ""}` }, label);
+    const b = el("button", { class: `iv${iv === shown ? " on" : ""}${i === 6 ? " sep" : ""}`,
+      ...(state.data?.macro && /^\d+m$/.test(iv) ? { title: "이 지표는 분봉이 없어서 일봉으로 보여줘요" } : {}) }, label);
     b.addEventListener("click", () => {
       if (iv === state.interval) return;
       state.interval = iv;
       store.save("stocking.interval", iv);
-      renderIntervalBar();
+      renderIntervalBar(iv);
       if (state.data) loadChart(state.data.symbol);
     });
     return b;
@@ -1714,6 +1718,7 @@ async function loadChart(symbol) {
   state.focus = null;
   state.patFocus = null;
   banner(d.demo ? demoText : "");
+  renderIntervalBar();                       // 야후 지표는 분봉을 골라도 일봉이 온다 → 실제 봉 단위에 불을 켠다
 
   chart.applyOptions({ timeScale: { timeVisible: d.intraday, secondsVisible: false } });
   state.panes.forEach((p) => p.chart.applyOptions({ timeScale: { timeVisible: d.intraday } }));
@@ -2099,6 +2104,162 @@ async function loadJudgments() {
   if (j.state.running) judgePoll = setTimeout(loadJudgments, 3000);       // 남기는 중이면 진행 상황을 따라간다
 }
 
+// 결과 한눈에: 표 대신 '골라내는 힘' 막대 하나로. 0 = 못 고름, 회색 선 = 모멘텀(AI 없이 최근 20일 잘 오른 종목 = 강함)
+const SET_NAMES = { fixed: "미국 중형·고변동 100", ndx: "나스닥 100", kr: "코스피 100" };
+const SHORT_ARM = { news: "숫자+기사(W42)", nonews: "숫자만", fund: "+재무", fund_news: "+재무+기사" };
+const shortModel = (m) => (m.includes("mini") ? "mini" : m.replace("gpt-", ""));
+let judgeH = null;
+
+function judgeOverview(j) {
+  const sets = { fixed: j.fixed, ndx: j.ndx || [], kr: j.kr || [] };
+  const has = (h) => Object.values(sets).some((rows) => rows.some((r) => r.horizon === h && r.spread_pct != null));
+  judgeH ??= has(20) ? 20 : 5;
+  if (!has(5) && !has(20)) return [];
+  const sg = (v, d = 1) => (v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(d)}%p`);
+  const weekly = j.weekly || [];
+
+  const chip = (h) => {
+    const b = el("button", { class: judgeH === h ? "on" : "", ...(has(h) ? {} : { disabled: "" }) }, `${h}거래일 뒤${has(h) ? "" : " (아직 없음)"}`);
+    b.addEventListener("click", () => { judgeH = h; renderJudgments(); });
+    return b;
+  };
+  const verdict = (r) => {
+    if (r.spread_pct == null) return ["", "–"];
+    if (r.spread_pct <= 0) return ["bad", "못 골라냄"];
+    if (r.momo_spread_pct == null) return ["", "골라냄"];
+    const d = r.spread_pct - r.momo_spread_pct;
+    return d > 1 ? ["good", "모멘텀보다 나음"] : d < -1 ? ["meh", "모멘텀보다 못함"] : ["meh", "모멘텀과 비슷"];
+  };
+
+  const cards = Object.entries(sets).map(([key, rows]) => {
+    const rs = rows.filter((r) => r.horizon === judgeH && r.spread_pct != null && SHORT_ARM[r.arm]);
+    if (!rs.length) return "";
+    const scale = Math.max(5, ...rs.flatMap((r) => [Math.abs(r.spread_pct), Math.abs(r.momo_spread_pct ?? 0)]));
+    const pos = (v) => `${50 + (v / scale) * 50}%`;
+    const weeksOf = (r) => weekly.filter((w) => w.set === key).map((w) => {
+      const x = w.rows.find((y) => y.model === r.model && y.arm === r.arm && y.horizon === judgeH);
+      return x && x.spread_pct != null ? `${w.week.slice(5)} ${sg(x.spread_pct)}` : null;
+    }).filter(Boolean);
+    const nWeeks = new Set(weekly.filter((w) => w.set === key && w.rows.some((y) => y.horizon === judgeH && y.spread_pct != null)).map((w) => w.week)).size;
+    return el("div", { class: "jo-card" },
+      el("div", { class: "jo-head" }, el("b", {}, SET_NAMES[key]), el("span", { class: "muted" }, `채점된 주 ${nWeeks}개`)),
+      ...rs.map((r) => {
+        const [cls, word] = verdict(r);
+        const lo = Math.min(r.spread_pct, 0), hi = Math.max(r.spread_pct, 0);
+        // 맞힌 비율 옆에는 '같은 종목을 전부 한쪽으로 찍었을 때' 중 더 잘 맞는 쪽을 둔다
+        const up = r.always_up_calls_hit_rate_pct, base = up == null ? null : Math.max(up, 100 - up);
+        return el("div", { class: "jo-row" },
+          el("div", { class: "jo-label" }, `${shortModel(r.model)} · ${SHORT_ARM[r.arm]}`),
+          el("div", { class: "jo-bar", title: `강함이라 한 종목 평균 − 약함이라 한 종목 평균 = ${sg(r.spread_pct, 2)} · 모멘텀 ${sg(r.momo_spread_pct, 2)}` },
+            el("i", { class: "jo-zero" }),
+            el("i", { class: `jo-fill ${r.spread_pct >= 0 ? "up" : "down"}`, style: `left:${pos(lo)};width:${(hi - lo) / scale * 50}%` }),
+            r.momo_spread_pct != null ? el("i", { class: "jo-momo", style: `left:${pos(r.momo_spread_pct)}` }) : ""),
+          el("div", { class: "jo-num" }, sg(r.spread_pct), el("span", { class: "muted" }, ` 모멘텀 ${sg(r.momo_spread_pct)}`)),
+          el("span", { class: `jo-tag ${cls}` }, word),
+          el("div", { class: "jo-sub muted" },
+            `맞힌 비율 ${r.hit_rate_pct?.toFixed(0) ?? "–"}% (한쪽으로만 찍으면 ${base?.toFixed(0) ?? "–"}%) · ${r.calls}건`
+            + (weeksOf(r).length > 1 ? ` · 주별 ${weeksOf(r).join(" / ")}` : "")));
+      }));
+  });
+
+  // 지금까지의 요약 (미국 중형 100 기준, 같은 기간): 숫자로 바로 말할 수 있는 것만
+  const fx = sets.fixed.filter((r) => r.horizon === judgeH && r.spread_pct != null);
+  const notes = [];
+  const best = fx.slice().sort((a, b) => b.spread_pct - a.spread_pct)[0];
+  if (best) notes.push(`가장 잘 골라낸 조건: ${shortModel(best.model)} · ${SHORT_ARM[best.arm]} (${sg(best.spread_pct)}, 모멘텀 ${sg(best.momo_spread_pct)})`);
+  const avg = (m) => { const xs = fx.filter((r) => r.model.includes(m) && r.arm !== "news").map((r) => r.spread_pct); return xs.length ? xs.reduce((a, b) => a + b) / xs.length : null; };
+  if (avg("mini") != null && avg("5.5") != null) notes.push(`모델: mini 평균 ${sg(avg("mini"))} · 5.5 평균 ${sg(avg("5.5"))} (5.5 는 W44 전까지 30종목뿐)`);
+  const f = fx.find((r) => r.model.includes("mini") && r.arm === "fund"), fn = fx.find((r) => r.model.includes("mini") && r.arm === "fund_news");
+  if (f && fn) notes.push(`기사를 더하면 (mini): +재무 ${sg(f.spread_pct)} → +재무+기사 ${sg(fn.spread_pct)}`);
+
+  return [
+    el("div", { class: "brief-sub" }, "결과 한눈에"),
+    el("div", { class: "jo-help" },
+      el("div", {}, el("b", {}, "골라내는 힘"), " = AI 가 ‘시장보다 강함’이라 한 종목이 ‘약함’이라 한 종목보다 실제로 몇 %p 더 올랐나."),
+      el("div", {}, "0 이하면 못 고른 것. ", el("i", { class: "jo-momo-key" }), " 회색 선 = 모멘텀: AI 없이 ‘최근 20일 시장보다 잘 오른 종목 = 강함’으로만 골랐을 때. 이 선보다 오른쪽이어야 AI 가 한 일이 있는 것."),
+      el("div", { class: "muted" }, "한 주는 사실상 표본 하나예요. 여러 주가 쌓이기 전까지는 방향만 보세요.")),
+    el("div", { class: "seg jo-h" }, chip(5), chip(20)),
+    notes.length ? el("ul", { class: "judge-facts jo-notes" }, ...notes.map((t) => el("li", {}, t))) : "",
+    ...cards,
+  ];
+}
+
+// 종목별 결과: 주 하나를 골라 종목마다 실제 결과(지수 대비)와 AI 판단·맞음 여부. 펼칠 때만 받아온다
+const judgeStocks = { open: false, week: null, set: "fixed", data: null, loading: false };
+const DIR_SHORT = { outperform: "강", neutral: "중", underperform: "약" };
+
+async function loadJudgeStocks() {
+  const key = `${judgeStocks.week}:${judgeH}`;
+  if (judgeStocks.data?.key === key || judgeStocks.loading) return;
+  judgeStocks.loading = true;
+  renderJudgeStocks();
+  const res = await fetch(`/api/judgments/stocks?week=${judgeStocks.week}&h=${judgeH}`).catch(() => null);
+  judgeStocks.loading = false;
+  judgeStocks.data = res?.ok ? { key, ...(await res.json()) } : { key, rows: [], error: true };
+  renderJudgeStocks();
+}
+
+function judgeStocksSection(j) {
+  const scoredWeeks = [...new Set((j.weekly || []).filter((w) => w.rows.some((r) => r.horizon === judgeH && r.scored)).map((w) => w.week))];
+  if (!scoredWeeks.length) return "";
+  if (!scoredWeeks.includes(judgeStocks.week)) judgeStocks.week = scoredWeeks[scoredWeeks.length - 1];
+  const d = el("details", { class: "jo-detail", id: "judge-stocks" });
+  if (judgeStocks.open) d.open = true;
+  d.append(el("summary", {}, `종목별 결과 보기 (${judgeH}거래일 뒤)`),
+    el("div", { class: "js-controls" },
+      el("div", { class: "seg" }, ...scoredWeeks.map((w) => {
+        const b = el("button", { class: w === judgeStocks.week ? "on" : "" }, w.slice(5));
+        b.addEventListener("click", () => { judgeStocks.week = w; loadJudgeStocks(); renderJudgeStocks(); });
+        return b;
+      })),
+      el("div", { class: "seg" }, ...Object.entries({ fixed: "미국 중형 100", ndx: "나스닥 100", kr: "코스피 100", mine: "내 종목" }).map(([k, label]) => {
+        const b = el("button", { class: k === judgeStocks.set ? "on" : "" }, label);
+        b.addEventListener("click", () => { judgeStocks.set = k; renderJudgeStocks(); });
+        return b;
+      }))),
+    el("div", { id: "judge-stocks-body" }));
+  d.addEventListener("toggle", () => { judgeStocks.open = d.open; if (d.open) loadJudgeStocks(); });
+  if (judgeStocks.open) setTimeout(() => { renderJudgeStocks(); loadJudgeStocks(); });      // 다시 그려도 펼친 채로 (기간을 바꿨으면 새로 받는다)
+  return d;
+}
+
+function renderJudgeStocks() {
+  const box = $("#judge-stocks-body");
+  if (!box) return;
+  $("#judge-stocks")?.querySelectorAll(".js-controls .seg").forEach((seg, i) => seg.querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("on", i === 0 ? b.textContent === judgeStocks.week?.slice(5) : b.textContent.startsWith(
+      { fixed: "미국", ndx: "나스닥", kr: "코스피", mine: "내 종목" }[judgeStocks.set]));
+  }));
+  const data = judgeStocks.data;
+  if (judgeStocks.loading || !data || data.key !== `${judgeStocks.week}:${judgeH}`) return box.replaceChildren(el("p", { class: "muted" }, "불러오는 중… (처음엔 10초쯤)"));
+  if (data.error) return box.replaceChildren(el("p", { class: "muted" }, "불러오지 못했어요"));
+  const rows = data.rows.filter((r) => r.set === judgeStocks.set);
+  if (!rows.length) return box.replaceChildren(el("p", { class: "muted" }, "이 주에는 이 종목군 기록이 없어요"));
+  // 열: 그 주에 나온 (모델, 조건) 전부 — mini 먼저, 조건 순서대로
+  const order = ["news", "nonews", "fund", "fund_news"];
+  const cols = [...new Map(rows.flatMap((r) => r.calls).map((c) => [`${c.model}|${c.arm}`, c])).values()]
+    .sort((a, b) => (a.model.includes("mini") ? 0 : 1) - (b.model.includes("mini") ? 0 : 1) || order.indexOf(a.arm) - order.indexOf(b.arm));
+  const bench = judgeStocks.set === "kr" ? "KODEX 200" : "SPY";
+  const cell = (c) => {
+    if (!c) return el("td", { class: "muted" }, "·");
+    const mark = c.hit == null ? "" : c.hit ? " ✓" : " ✗";
+    return el("td", { class: `js-d ${c.d}${c.hit === false ? " miss" : ""}`, title: `${c.model} · ${ARM_NAMES[c.arm]} · 확신 ${c.c}\n${c.reason}` }, DIR_SHORT[c.d] + mark);
+  };
+  const head = el("tr", {}, el("th", {}, "종목"), el("th", {}, `실제 (${bench} 대비)`),
+    ...cols.map((c) => el("th", {}, `${shortModel(c.model)}`, el("br"), SHORT_ARM[c.arm])), el("th", {}, "모멘텀"));
+  const body = rows.map((r) => {
+    const name = el("td", { class: "js-name" }, el("b", {}, r.name), el("span", { class: "muted" }, ` ${r.symbol}`));
+    name.addEventListener("click", () => load(r.symbol));
+    const ex = r.excess == null ? el("td", { class: "muted" }, "채점 전")
+      : el("td", { class: `js-ex ${r.excess >= 0 ? "up" : "down"}` }, `${r.excess >= 0 ? "+" : ""}${r.excess.toFixed(1)}%p`);
+    return el("tr", {}, name, ex, ...cols.map((c) => cell(r.calls.find((x) => x.model === c.model && x.arm === c.arm))),
+      r.momo ? el("td", { class: `js-d ${r.momo}` }, DIR_SHORT[r.momo]) : el("td", { class: "muted" }, "·"));
+  });
+  box.replaceChildren(
+    el("p", { class: "muted hint" }, `강·중·약 = AI 가 '${bench}보다 강함·중립·약함'이라고 한 것, ✓ 맞음 ✗ 틀림 (중립은 채점 안 함). 칸에 마우스를 올리면 이유. 종목을 누르면 차트로. 실제 결과가 좋은 순.`),
+    el("div", { class: "judge-scroll" }, el("table", { class: "judge-table js-table" }, head, ...body)));
+}
+
 function renderJudgments() {
   const j = state.judge, st = j.state, p = j.protocol;
   const left = j.left;
@@ -2113,7 +2274,7 @@ function renderJudgments() {
     `이번 주(${j.week}) ${j.recorded_this_week.toLocaleString()}건 기록` + (left <= 0 ? " · 이번 주는 끝났어요" : ` · ${left.toLocaleString()}건 남음` + (j.due ? "" : " · 월요일 아침 6시 이후에 남겨요")),
     `이번 주 종목 ${p.symbols}개 (중형·고변동성 ${p.universe} + 내 종목` + (j.week >= p.ndx_from ? ` + 나스닥 100 중 ${p.ndx}, 겹치는 종목은 한 번만` : `. 나스닥 100 중 ${p.ndx}개는 ${p.ndx_from}부터`)
       + (j.week >= p.kr_from ? ` + 코스피 ${p.kr}` : `. 코스피 ${p.kr}개는 ${p.kr_from}부터 (KODEX 200 대비)`) + `) · 모델 ${models}`,
-    `조건 2가지(숫자 + 기사 / 숫자만) · 채점 ${p.horizons.join("·")}거래일 뒤 (${p.bench} 대비)`,
+    `조건 ${p.arms.length}가지(${p.arms.map((a) => ARM_NAMES[a]).join(" / ")}) · 채점 ${p.horizons.join("·")}거래일 뒤 (미국 ${p.bench}, 코스피 KODEX 200 대비)`,
     p.auto ? "주 1회 자동으로 남겨요." : "자동 기록은 꺼져 있어요. 버튼을 눌러야 남겨요.",
   ];
   const status = [el("ul", { class: "judge-facts" }, ...lines.map((t) => el("li", {}, t)))];
@@ -2138,18 +2299,25 @@ function renderJudgments() {
       // 같은 기준선을 모델이 방향을 고른 기록에서만: '맞힌 비율'과 같은 묶음이라 이쪽과 비교하는 게 공정하다
       el("td", {}, r.calls ? `${pc(r.always_up_calls_hit_rate_pct)} · ${sg(r.always_up_calls_mean_excess_pct)}` : "–"),
       // 보조: 종목이 원래 시장보다 크게(베타) 움직인 몫을 뺀 초과수익. 모델 / 같은 종목 전부 '강함'
-      el("td", {}, r.beta_calls ? `${pc(r.hit_rate_beta_pct)} · ${sg(r.mean_signed_excess_beta_pct)} / ${pc(r.always_up_calls_hit_rate_beta_pct)} · ${sg(r.always_up_calls_mean_excess_beta_pct)}` : "–")));
+      el("td", {}, r.beta_calls ? `${pc(r.hit_rate_beta_pct)} · ${sg(r.mean_signed_excess_beta_pct)} / ${pc(r.always_up_calls_hit_rate_beta_pct)} · ${sg(r.always_up_calls_mean_excess_beta_pct)}` : "–"),
+      // 참고: 강함이라 한 종목 평균 − 약함이라 한 종목 평균 (전부 약함으로 맞히는 몫과 상관없이 갈라낸 정도)
+      el("td", {}, sg(r.spread_pct)),
+      // 참고: 모멘텀 — AI 없이 같은 숫자(20일 지수 대비 수익률)로 위 1/3 강함 · 아래 1/3 약함. 모델이 이것보다 나아야 의미가 있다
+      el("td", {}, r.momo_calls ? `${pc(r.momo_hit_rate_pct)} · 차이 ${sg(r.momo_spread_pct)} · 같은 방향 ${pc(r.agree_momo_pct)}` : "–")));
     return [el("div", { class: "brief-sub" }, caption), el("div", { class: "judge-scroll" }, el("table", { class: "judge-table" },
-      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면", "베타 반영 (모델 / 같은 종목 '강함')"].map((h) => el("th", {}, h))), ...body))];
+      el("tr", {}, ...["모델 · 조건", "기간", "채점 / 기록", "맞힌 비율", "방향대로 초과수익", "전부 '강함'으로 찍으면", "같은 종목만 '강함'으로 찍으면", "베타 반영 (모델 / 같은 종목 '강함')", "강함−약함 차이", "모멘텀 (맞힌 비율 · 강함−약함 · 모델과 같은 방향)"].map((h) => el("th", {}, h))), ...body))];
   };
   const anyScored = j.fixed.some((r) => r.scored);
   $("#judge-board").replaceChildren(
-    ...table(j.fixed, "중형·고변동성 100종목 성적 (주된 판정은 20일)"),
-    ...table(j.ndx || [], "나스닥 100 성적"),
-    ...table(j.paired || [], "모델 비교: 두 모델이 모두 판단한 종목·주만"),
-    ...table(j.kr || [], "코스피 100 성적 (KODEX 200 대비, 미국과 따로)"),
-    ...table(j.kr_paired || [], "코스피 모델 비교: 두 모델이 모두 판단한 종목·주만"),
-    ...table(j.mine, "내 종목 성적 (참고)"),
+    ...judgeOverview(j),
+    judgeStocksSection(j),
+    anyScored ? el("details", { class: "jo-detail" }, el("summary", {}, "자세한 표 (모든 지표 · 기준선 · 베타 반영)"),
+      ...table(j.fixed, "중형·고변동성 100종목 성적 (주된 판정은 20일)"),
+      ...table(j.ndx || [], "나스닥 100 성적"),
+      ...table(j.paired || [], "모델 비교: 두 모델이 모두 판단한 종목·주만"),
+      ...table(j.kr || [], "코스피 100 성적 (KODEX 200 대비, 미국과 따로)"),
+      ...table(j.kr_paired || [], "코스피 모델 비교: 두 모델이 모두 판단한 종목·주만"),
+      ...table(j.mine, "내 종목 성적 (참고)")) : "",
     ...table(j.asked || [], "내가 물어본 판단 (질문 탭의 종합 의견, 종목·날짜마다 처음 것만)"),
     ...((j.asked_records || []).length ? [el("details", {}, el("summary", {}, `질문 탭에서 남긴 의견 최근 ${j.asked_records.length}건`),
       ...j.asked_records.slice().reverse().map((r) => {

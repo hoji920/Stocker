@@ -100,6 +100,23 @@ LLM 의 판단은 과거 데이터로 검증할 수 없다 (모델이 학습하�
     KODEX 200 은 넥스트레이드에서 거래되지 않아 토스·야후 값이 같다.
   - 기사: 네이버 국내 기사만 (판단 전 7일, 최대 30건, 미국과 같은 규칙). 펀더멘탈: 야후 (.KS), 못 받으면 없이 판단하고 표시.
   - 채점·주된 판정·베타 반영은 미국과 같다 (비교 대상만 KODEX 200). 성적표는 미국과 섞지 않는다.
+- 참고 지표 2개 추가 (2026-10-22, W42 의 5거래일 채점을 본 뒤. W43 부터는 채점 전에 정한 셈이다). 주된 판정은 그대로.
+  W42 5일 결과에서 모델이 '강함'이라 한 종목은 거의 다 '최근 5·20일 SPY 대비 강하고 이평선 위'라는 이유였다 (모멘텀).
+  그래서 'AI 없이 같은 숫자로 만든 모멘텀 규칙'보다 나은지를 같이 본다. W42 에 대해서는 결과를 보고 만든 비교라 참고로만 쓴다.
+  - 강함−약함 차이(spread): 모델이 강함이라 한 종목의 평균 초과수익 − 약함이라 한 종목의 평균 초과수익.
+    시장 전체가 빠진 주에 '전부 약함'으로 맞히는 몫과 상관없이, 종목을 갈라낸 정도만 본다.
+  - 단순 모멘텀 규칙(momo): 기준일까지의 20거래일 수익률 − 같은 기간 비교 지수(SPY / KODEX 200) 수익률을
+    그 주·그 시장에서 채점된 종목끼리 줄 세워 위 1/3 = 강함, 아래 1/3 = 약함, 가운데 = 중립. 5일·20일 모두 같은 방향.
+    모델에 준 숫자(return_pct 20d − spy_return_pct 20d)와 같은 값이다. 같은 기록에서 맞힌 비율·방향대로 초과수익·강함−약함 차이를 내고,
+    모델 방향이 규칙과 같았던 비율(agree_momo)도 낸다.
+- 본 실험 키 순서 (2026-10-26, W44 남은 판단부터): 학교 키(OPENAI_API_KEY)를 먼저 쓰고, 그 호출이 API 오류(인증·결제·한도 등)로
+  실패하면 같은 입력으로 개인 키(OPENAI_JUDGE_API_KEY)로 다시 부른다. 학교 키를 쓸 수 있는 동안 개인 비용을 줄이면서,
+  학교 키가 끊겨도 본 실험이 빠지지 않게 하려는 것. 같은 모델·같은 입력이라 판단 조건은 바뀌지 않는다.
+  기록에 어느 키로 답을 받았는지 적는다 (key: school / personal). 모델 답의 형식 오류는 키를 바꿔 다시 묻지 않는다.
+  보조 실험(bridge)은 전처럼 학교 키만 쓴다. W43 까지 본 실험은 개인 키로만 불렀다 (key 칸 없음).
+  W44: 10-26 08:50 부터 개인 키로 돌리다가 09:22 쯤 개인 키 크레딧이 떨어져(429 no credits) 코스피 17종목이 통째로 실패했다
+  (보조 실험 판단 포함 110건). 그래서 이 방식을 W44 부터 앞당겨 적용하고, 빠진 판단만 같은 날 학교 키로 다시 남겼다.
+  먼저 적힌 W44 기록에는 key 칸이 없다(= 개인 키). 다시 남긴 판단은 판단 시각이 늦어서 출발 가격도 그 시각 기준(장중이면 판단 직후 30분)이다.
 - 펀더멘탈 금액 단위 고침 (W44 부터 입력에 반영): company.fundamentals 가 큰 금액에 통화와 상관없이 '달러'를 붙였다.
   야후가 준 통화대로 고쳤다 (원 → '원', 그 밖의 통화는 통화 코드). 미국 종목 중 다른 통화로 재무제표를 내는 회사
   (예: 유로·위안으로 보고하는 회사)는 W43 까지 현금·부채 금액에 '달러'가 잘못 붙어 모델에 들어갔다. 숫자 자체는 그대로다.
@@ -208,6 +225,18 @@ def system_for(symbol: str) -> str:
 def symbols_for(week: str) -> list[str]:
     """그 주에 판단할 고정 종목 (내 종목은 따로 더한다). 겹치는 종목은 한 번만."""
     return list(dict.fromkeys(UNIVERSE + (NDX if week >= NDX_FROM else [])))
+
+
+SCHOOL_FIRST_FROM = "2026-W44"      # 이 주부터 본 실험도 학교 키 먼저 (실패하면 개인 키). W44 는 개인 키 크레딧이 떨어진 뒤의 판단부터
+
+
+def _api_error(error: Exception) -> bool:
+    """키를 바꾸면 될 수도 있는 실패인가 (인증·결제·한도·서버 오류). 모델 답 형식 오류(ValueError)는 아니다."""
+    try:
+        import openai
+        return isinstance(error, openai.APIError)
+    except ImportError:
+        return False
 
 
 def in_bridge(week: str | None) -> bool:
@@ -411,18 +440,26 @@ def make_records(settings: Settings, week: str, symbol: str, name: str, mine: bo
             save_input({"week": week, "symbol": symbol, "arm": k, "prompt_sha": sha(text), "prompt": text})
     out = []
     models = settings.openai_judge_models
-    main_settings = replace(settings, openai_api_key=settings.openai_judge_api_key)    # 본 실험은 판단 기록 전용 키로
+    personal = replace(settings, openai_api_key=settings.openai_judge_api_key)          # 판단 기록 전용(개인) 키
+    school_first = week >= SCHOOL_FIRST_FROM and settings.openai_api_key != settings.openai_judge_api_key
+    extra = {"system": system} if market == "KR" else {}
     for model, arm in todo:
         bridge = is_bridge(symbol, model, models, week)
+        key = "school" if bridge or school_first else "personal"
         try:
-            result = judge(settings if bridge else main_settings, model, prompts[kind(arm)], **({"system": system} if market == "KR" else {}))
+            result = judge(settings if key == "school" else personal, model, prompts[kind(arm)], **extra)
         except Exception as error:
-            if not bridge:
+            if bridge:
+                print(f"[judgments] 보조 실험 {symbol} {model} {arm} 건너뜀: {type(error).__name__}")
+                continue
+            if not (school_first and _api_error(error)):
                 raise
-            print(f"[judgments] 보조 실험 {symbol} {model} {arm} 건너뜀: {type(error).__name__}")
-            continue
+            print(f"[judgments] 학교 키 실패 → 개인 키로 {symbol} {model} {arm}: {type(error).__name__}")
+            result, key = judge(personal, model, prompts[kind(arm)], **extra), "personal"
         if bridge:
             result = {**result, "bridge": True}
+        if week >= SCHOOL_FIRST_FROM:
+            result = {**result, "key": key}
         out.append({**base, "model": model, "arm": arm, "news_count": len(items[:NEWS_MAX]) if kind(arm) in USES_NEWS else 0,
                     "fundamentals": bool(fund) and kind(arm) in USES_FUND,
                     "prompt_sha": sha(prompts[kind(arm)]), "system_sha": sha(system),
@@ -554,9 +591,11 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
                 out.append({**r, "scored": {}, "entry": None, "entry_rule": True})
                 continue
             start, start_bench = entry["price"], entry["bench_price"]
-        scored, s, b = {}, cache.get(r["symbol"]), cache.get(r.get("bench_symbol", BENCH))
+        scored, s, b, m20 = {}, cache.get(r["symbol"]), cache.get(r.get("bench_symbol", BENCH)), None
         if s and b and r["as_of"] in s[0] and r["bench_as_of"] in b[0]:
             i, j = s[0].index(r["as_of"]), b[0].index(r["bench_as_of"])
+            if i >= MOMO_DAYS and j >= MOMO_DAYS:                         # 모멘텀 규칙용: 기준일까지 20거래일, 비교 지수 대비
+                m20 = ((s[1][i] / s[1][i - MOMO_DAYS]) - (b[1][j] / b[1][j - MOMO_DAYS])) * 100
             if (key := (r["symbol"], r["as_of"])) not in betas:
                 betas[key] = beta_before(s, b, r["as_of"])
             beta = betas[key]
@@ -574,8 +613,34 @@ def score(records: list[dict], candles_of, today: str | None = None, workers: in
                              "hit": None if d == "neutral" else (ret > bench) == (d == "outperform"),
                              "beta": None if beta is None else round(beta, 2), "excess_beta": None if xb is None else round(xb, 2),
                              "hit_beta": None if d == "neutral" or xb is None else (xb > 0) == (d == "outperform")}
-        out.append({**r, "scored": scored, "entry": entry, "entry_rule": needs_entry(r)})
-    return out
+        out.append({**r, "scored": scored, "entry": entry, "entry_rule": needs_entry(r), "m20x": None if m20 is None else round(m20, 2)})
+    return momentum_calls(out)
+
+
+MOMO_DAYS = 20
+
+
+def momentum_calls(scored: list[dict]) -> list[dict]:
+    """단순 모멘텀 규칙(AI 없음): 그 주·그 시장에서 채점된 종목을 20거래일 초과수익(m20x)으로 줄 세워
+    위 1/3 = outperform, 아래 1/3 = underperform, 나머지 neutral. 기록마다 momo 칸에 적는다 (채점 안 된 기록은 None)."""
+    groups: dict[tuple, dict[str, float]] = {}
+    for r in scored:
+        if r.get("m20x") is not None and r["scored"]:
+            groups.setdefault((r["week"], market_of(r["symbol"])), {})[r["symbol"]] = r["m20x"]
+    calls: dict[tuple, str] = {}
+    for key, vals in groups.items():
+        order = sorted(vals, key=lambda sym: -vals[sym])
+        k = len(order) // 3
+        for n, sym in enumerate(order):
+            calls[(*key, sym)] = "outperform" if n < k else "underperform" if n >= len(order) - k else "neutral"
+    return [{**r, "momo": calls.get((r["week"], market_of(r["symbol"]), r["symbol"]))} for r in scored]
+
+
+def _spread(rows: list[dict], h: int, direction) -> float | None:
+    """강함이라 한 기록의 평균 초과수익 − 약함이라 한 기록의 평균 초과수익. direction(r) = 그 기록의 방향."""
+    up = [r["scored"][h]["excess"] for r in rows if direction(r) == "outperform"]
+    dn = [r["scored"][h]["excess"] for r in rows if direction(r) == "underperform"]
+    return round(sum(up) / len(up) - sum(dn) / len(dn), 2) if up and dn else None
 
 
 # ── 내가 물어본 판단: 질문 에이전트가 매수/매도 질문에 낸 종합 의견 ──
@@ -638,10 +703,23 @@ def summarize(scored: list[dict], fixed_only: bool = True, arms: tuple = ALL_ARM
                     "always_up_calls_hit_rate_pct": round(sum(r["scored"][h]["excess"] > 0 for r in calls) / len(calls) * 100, 1) if calls else None,
                     "always_up_calls_mean_excess_pct": mean([r["scored"][h]["excess"] for r in calls]),
                     **_beta_cols(calls, h),                # 보조: 베타 반영 초과수익 (베타를 구할 수 있던 기록만)
+                    **_momo_cols(done, calls, h),          # 참고: 강함−약함 차이, 단순 모멘텀 규칙
                     "calibration": [{"bucket": f"{lo}~{hi}", "n": len(b), "hit_rate_pct": round(sum(r["scored"][h]["hit"] for r in b) / len(b) * 100, 1)}
                                     for lo, hi in BUCKETS if (b := [r for r in calls if lo <= r[f"c{h}"] <= hi])],
                 })
     return rows
+
+
+def _momo_cols(done: list[dict], calls: list[dict], h: int) -> dict:
+    mo = [r for r in done if r.get("momo") in ("outperform", "underperform")]
+    signed = [r["scored"][h]["excess"] * (1 if r["momo"] == "outperform" else -1) for r in mo]
+    both = [r for r in calls if r.get("momo")]
+    return {"spread_pct": _spread(calls, h, lambda r: r[f"d{h}"]),
+            "momo_calls": len(mo),
+            "momo_hit_rate_pct": round(sum(x > 0 for x in signed) / len(signed) * 100, 1) if signed else None,
+            "momo_mean_signed_excess_pct": round(sum(signed) / len(signed), 2) if signed else None,
+            "momo_spread_pct": _spread(done, h, lambda r: r.get("momo")),
+            "agree_momo_pct": round(sum(r[f"d{h}"] == r["momo"] for r in both) / len(both) * 100, 1) if both else None}
 
 
 def _beta_cols(calls: list[dict], h: int) -> dict:
