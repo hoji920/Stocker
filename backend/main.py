@@ -1362,6 +1362,32 @@ def _store_judge_score(records: list[dict]) -> None:
     _judge_score.update(at=time.time(), n=(len(records), len(entries)), value=value)
 
 
+@app.get("/api/judgments/stocks")
+def judgments_stocks(week: str, h: int = 5):
+    """한 주의 종목별 결과: 종목마다 실제 초과수익(지수 대비), 모델·조건별 판단과 맞음 여부, 모멘텀 판단.
+    반복 판단(_r)은 빼고, 질문 탭 의견도 뺀다. 아직 채점 안 된 종목은 판단만."""
+    h = 20 if h == 20 else 5
+    scored = [r for r in judge_scored(judge_log.read()) if r["week"] == week and r["arm"] in judgments.ALL_ARMS]
+    sets = lambda sym: ("kr" if sym in judgments.KR_UNIVERSE else "fixed" if sym in judgments.UNIVERSE else
+                        "ndx" if sym in judgments.NDX else "mine")
+    by: dict[str, dict] = {}
+    for r in scored:
+        x = r["scored"].get(h)
+        row = by.setdefault(r["symbol"], {"symbol": r["symbol"], "name": r["name"], "set": sets(r["symbol"]), "excess": None,
+                                          "excess_beta": None, "momo": r.get("momo"), "calls": []})
+        if x and row["excess"] is None and not r.get("bridge"):          # 실제 결과는 본 실험 기록 기준 (같은 종목이면 거의 같다)
+            row["excess"], row["excess_beta"] = x["excess"], x.get("excess_beta")
+        row["calls"].append({"model": r["model"], "arm": r["arm"], "d": r[f"d{h}"], "c": r[f"c{h}"],
+                             "hit": None if not x else x["hit"], "reason": r.get("reason", "")[:200]})
+    for row in by.values():
+        if row["excess"] is None:                                         # 본 실험 기록이 채점 전이면 아무 채점이나
+            x = next((r["scored"][h] for r in scored if r["symbol"] == row["symbol"] and h in r["scored"]), None)
+            if x:
+                row["excess"], row["excess_beta"] = x["excess"], x.get("excess_beta")
+    weeks = sorted({r["week"] for r in judge_log.read()})
+    return {"week": week, "h": h, "weeks": weeks, "rows": sorted(by.values(), key=lambda r: (r["excess"] is None, -(r["excess"] or 0)))}
+
+
 @app.get("/api/judgments")
 def judgments_summary(symbol: str | None = None):
     """기록 현황 + 채점 (읽을 때마다 지금 시세로 계산). symbol 을 주면 그 종목의 기록도."""

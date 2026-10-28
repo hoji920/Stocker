@@ -2179,6 +2179,82 @@ function judgeOverview(j) {
   ];
 }
 
+// 종목별 결과: 주 하나를 골라 종목마다 실제 결과(지수 대비)와 AI 판단·맞음 여부. 펼칠 때만 받아온다
+const judgeStocks = { open: false, week: null, set: "fixed", data: null, loading: false };
+const DIR_SHORT = { outperform: "강", neutral: "중", underperform: "약" };
+
+async function loadJudgeStocks() {
+  const key = `${judgeStocks.week}:${judgeH}`;
+  if (judgeStocks.data?.key === key || judgeStocks.loading) return;
+  judgeStocks.loading = true;
+  renderJudgeStocks();
+  const res = await fetch(`/api/judgments/stocks?week=${judgeStocks.week}&h=${judgeH}`).catch(() => null);
+  judgeStocks.loading = false;
+  judgeStocks.data = res?.ok ? { key, ...(await res.json()) } : { key, rows: [], error: true };
+  renderJudgeStocks();
+}
+
+function judgeStocksSection(j) {
+  const scoredWeeks = [...new Set((j.weekly || []).filter((w) => w.rows.some((r) => r.horizon === judgeH && r.scored)).map((w) => w.week))];
+  if (!scoredWeeks.length) return "";
+  if (!scoredWeeks.includes(judgeStocks.week)) judgeStocks.week = scoredWeeks[scoredWeeks.length - 1];
+  const d = el("details", { class: "jo-detail", id: "judge-stocks" });
+  if (judgeStocks.open) d.open = true;
+  d.append(el("summary", {}, `종목별 결과 보기 (${judgeH}거래일 뒤)`),
+    el("div", { class: "js-controls" },
+      el("div", { class: "seg" }, ...scoredWeeks.map((w) => {
+        const b = el("button", { class: w === judgeStocks.week ? "on" : "" }, w.slice(5));
+        b.addEventListener("click", () => { judgeStocks.week = w; loadJudgeStocks(); renderJudgeStocks(); });
+        return b;
+      })),
+      el("div", { class: "seg" }, ...Object.entries({ fixed: "미국 중형 100", ndx: "나스닥 100", kr: "코스피 100", mine: "내 종목" }).map(([k, label]) => {
+        const b = el("button", { class: k === judgeStocks.set ? "on" : "" }, label);
+        b.addEventListener("click", () => { judgeStocks.set = k; renderJudgeStocks(); });
+        return b;
+      }))),
+    el("div", { id: "judge-stocks-body" }));
+  d.addEventListener("toggle", () => { judgeStocks.open = d.open; if (d.open) loadJudgeStocks(); });
+  if (judgeStocks.open) setTimeout(() => { renderJudgeStocks(); loadJudgeStocks(); });      // 다시 그려도 펼친 채로 (기간을 바꿨으면 새로 받는다)
+  return d;
+}
+
+function renderJudgeStocks() {
+  const box = $("#judge-stocks-body");
+  if (!box) return;
+  $("#judge-stocks")?.querySelectorAll(".js-controls .seg").forEach((seg, i) => seg.querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("on", i === 0 ? b.textContent === judgeStocks.week?.slice(5) : b.textContent.startsWith(
+      { fixed: "미국", ndx: "나스닥", kr: "코스피", mine: "내 종목" }[judgeStocks.set]));
+  }));
+  const data = judgeStocks.data;
+  if (judgeStocks.loading || !data || data.key !== `${judgeStocks.week}:${judgeH}`) return box.replaceChildren(el("p", { class: "muted" }, "불러오는 중… (처음엔 10초쯤)"));
+  if (data.error) return box.replaceChildren(el("p", { class: "muted" }, "불러오지 못했어요"));
+  const rows = data.rows.filter((r) => r.set === judgeStocks.set);
+  if (!rows.length) return box.replaceChildren(el("p", { class: "muted" }, "이 주에는 이 종목군 기록이 없어요"));
+  // 열: 그 주에 나온 (모델, 조건) 전부 — mini 먼저, 조건 순서대로
+  const order = ["news", "nonews", "fund", "fund_news"];
+  const cols = [...new Map(rows.flatMap((r) => r.calls).map((c) => [`${c.model}|${c.arm}`, c])).values()]
+    .sort((a, b) => (a.model.includes("mini") ? 0 : 1) - (b.model.includes("mini") ? 0 : 1) || order.indexOf(a.arm) - order.indexOf(b.arm));
+  const bench = judgeStocks.set === "kr" ? "KODEX 200" : "SPY";
+  const cell = (c) => {
+    if (!c) return el("td", { class: "muted" }, "·");
+    const mark = c.hit == null ? "" : c.hit ? " ✓" : " ✗";
+    return el("td", { class: `js-d ${c.d}${c.hit === false ? " miss" : ""}`, title: `${c.model} · ${ARM_NAMES[c.arm]} · 확신 ${c.c}\n${c.reason}` }, DIR_SHORT[c.d] + mark);
+  };
+  const head = el("tr", {}, el("th", {}, "종목"), el("th", {}, `실제 (${bench} 대비)`),
+    ...cols.map((c) => el("th", {}, `${shortModel(c.model)}`, el("br"), SHORT_ARM[c.arm])), el("th", {}, "모멘텀"));
+  const body = rows.map((r) => {
+    const name = el("td", { class: "js-name" }, el("b", {}, r.name), el("span", { class: "muted" }, ` ${r.symbol}`));
+    name.addEventListener("click", () => load(r.symbol));
+    const ex = r.excess == null ? el("td", { class: "muted" }, "채점 전")
+      : el("td", { class: `js-ex ${r.excess >= 0 ? "up" : "down"}` }, `${r.excess >= 0 ? "+" : ""}${r.excess.toFixed(1)}%p`);
+    return el("tr", {}, name, ex, ...cols.map((c) => cell(r.calls.find((x) => x.model === c.model && x.arm === c.arm))),
+      r.momo ? el("td", { class: `js-d ${r.momo}` }, DIR_SHORT[r.momo]) : el("td", { class: "muted" }, "·"));
+  });
+  box.replaceChildren(
+    el("p", { class: "muted hint" }, `강·중·약 = AI 가 '${bench}보다 강함·중립·약함'이라고 한 것, ✓ 맞음 ✗ 틀림 (중립은 채점 안 함). 칸에 마우스를 올리면 이유. 종목을 누르면 차트로. 실제 결과가 좋은 순.`),
+    el("div", { class: "judge-scroll" }, el("table", { class: "judge-table js-table" }, head, ...body)));
+}
+
 function renderJudgments() {
   const j = state.judge, st = j.state, p = j.protocol;
   const left = j.left;
@@ -2229,6 +2305,7 @@ function renderJudgments() {
   const anyScored = j.fixed.some((r) => r.scored);
   $("#judge-board").replaceChildren(
     ...judgeOverview(j),
+    judgeStocksSection(j),
     anyScored ? el("details", { class: "jo-detail" }, el("summary", {}, "자세한 표 (모든 지표 · 기준선 · 베타 반영)"),
       ...table(j.fixed, "중형·고변동성 100종목 성적 (주된 판정은 20일)"),
       ...table(j.ndx || [], "나스닥 100 성적"),
