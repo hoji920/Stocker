@@ -1511,7 +1511,7 @@ function focusDate(date) {
 // ── 로드 ──
 // 봉 단위. 토스 API 는 1분·일봉만 주고 나머지는 서버가 묶어서 만든다
 const INTERVALS = [
-  ["1m", "1분"], ["3m", "3분"], ["5m", "5분"], ["15m", "15분"], ["30m", "30분"], ["60m", "1시간"],
+  ["1m", "1분"], ["3m", "3분"], ["5m", "5분"], ["15m", "15분"], ["30m", "30분"], ["60m", "1시간"], ["240m", "4시간"],
   ["1d", "일"], ["1w", "주"], ["1M", "월"], ["1y", "년"],
 ];
 state.interval = store.load("stocking.interval", "1d");
@@ -1522,7 +1522,7 @@ const isDaily = () => shownInterval() === "1d";
 
 function renderIntervalBar(shown = shownInterval()) {
   $("#intervals").replaceChildren(...INTERVALS.map(([iv, label], i) => {
-    const b = el("button", { class: `iv${iv === shown ? " on" : ""}${i === 6 ? " sep" : ""}`,
+    const b = el("button", { class: `iv${iv === shown ? " on" : ""}${iv === "1d" ? " sep" : ""}`,
       ...(state.data?.macro && /^\d+m$/.test(iv) ? { title: "이 지표는 분봉이 없어서 일봉으로 보여줘요" } : {}) }, label);
     b.addEventListener("click", () => {
       if (iv === state.interval) return;
@@ -2793,7 +2793,7 @@ const mondayOf = (day) => {
   return d.toISOString().slice(0, 10);
 };
 const samePeriod = (a, b, iv) => (iv === "1w" ? mondayOf(a) === mondayOf(b) : iv === "1M" ? a.slice(0, 7) === b.slice(0, 7) : iv === "1y" ? a.slice(0, 4) === b.slice(0, 4) : a === b);
-const MINUTES = { "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "60m": 60 };
+const MINUTES = { "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "240m": 240 };
 
 // 체결 하나로 차트 마지막 봉을 갱신하거나 새 봉을 연다
 function updateLastBar(price, tsIso) {
