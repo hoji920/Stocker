@@ -1559,6 +1559,9 @@ function renderPrice(price) {
   box.replaceChildren(inKrw ? krw : fmt(price),
     el("span", { class: `chg ${chg >= 0 ? "up" : "down"}` }, `${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`),
     usd ? el("span", { class: "krw", title: `${state.fx.source} ${state.fx.usd_krw.toLocaleString()}원 기준` }, `≈ ${inKrw ? fmt(price) : krw}`) : "");
+  // 브라우저 탭 제목: 'Stocking' 대신 지금 보는 종목과 가격·등락 (미국은 티커, 국내·지표는 이름이 알아보기 쉽다)
+  const label = d.market === "US" && !d.macro ? d.symbol : d.name || d.symbol;
+  document.title = `${label} ${fmt(price)} ${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`;
   if (prev != null && prev !== price) {           // 토스처럼 바뀔 때 깜빡임
     box.classList.remove("flash-up", "flash-down");
     void box.offsetWidth;
