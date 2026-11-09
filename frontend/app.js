@@ -8,7 +8,7 @@ const $ = (sel) => document.querySelector(sel);
 const LAYERS = {
   levels: { name: "지지/저항선", params: { count: 1 }, paramLabel: { count: "위아래 개수" },
     desc: "과거에 여러 번 방향이 바뀐 가격대. 현재가 아래에 있으면 지지, 위에 있으면 저항이에요 (막혔던 가격을 뚫고 올라오면 지지로 바뀌어요). 가장 가까운 선만 진하게 보여요." },
-  fib: { name: "피보나치 되돌림", button: true, params: { bars: 120 }, paramLabel: { bars: "최근 몇 봉에서 고점·저점" }, paramRange: { bars: [20, 500] },
+  fib: { name: "피보나치 되돌림", button: true, params: { bars: 120, mode: "auto" }, paramLabel: { bars: "최근 몇 봉에서 고점·저점" }, paramRange: { bars: [20, 500] },
     desc: "최근 N봉의 가장 높은 가격과 가장 낮은 가격 사이를 23.6·38.2·50·61.8·78.6%로 나눈 선. 오르다 쉬면 위에서부터, 내리다 반등하면 아래에서부터 재요. 많은 사람이 38.2·50·61.8% 근처에서 멈추거나 되돌아온다고 보는데, 우리 검증(미국 30 + 국내 10종목, 8년)에선 피보나치 지지가 무작위 선보다 잘 지켜지지 않았어요 (57.7% vs 57.1%, 차이 없음)." },
   extremes: { name: "52주 최고·최저", desc: "최근 1년(일봉이 아니면 보고 있는 기간) 중 가장 높았던 가격과 가장 낮았던 가격. 지지/저항선이 안 잡히는 신고가 근처에서도 기준이 돼요." },
   trend: { name: "자동 추세선", desc: "저점끼리 이은 상승 추세선, 고점끼리 이은 하락 추세선. 비스듬한 지지/저항이에요. 두 점만 이은 선은 '임시'로 표시해요 (세 번째로 닿아야 확인된 선)." },
@@ -167,20 +167,38 @@ const FIB_COLOR = "#fab005";
 const FIB_RATIOS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
 
 // 최근 bars 봉에서 고점·저점과 그 사이 되돌림 가격. key = 축에 라벨을 붙일 주요 선 (38.2·50·61.8%)
-function fibLevels(cs, bars) {
+// mode: up = 상승분 되돌림 (최고가와 그 전 최저가, 고점에서 아래로) / down = 하락분 회복 (최저가와 그 전 최고가, 저점에서 위로)
+//       auto = 최고가·최저가 중 나중에 나온 쪽으로. 서버 analysis.fib_levels 와 같은 규칙
+const FIB_MODES = { auto: "자동", up: "상승분 되돌림", down: "하락분 회복" };
+function fibLevels(cs, bars, mode = "auto") {
   const seg = cs.slice(-bars);
   if (seg.length < 10) return null;
   let hi = 0, lo = 0;
   seg.forEach((c, i) => { if (c.high > seg[hi].high) hi = i; if (c.low < seg[lo].low) lo = i; });
-  const H = seg[hi].high, L = seg[lo].low;
-  if (!(H > L)) return null;
-  const up = lo < hi;                                  // 저점 → 고점 (오른 뒤 되돌림) / 고점 → 저점 (내린 뒤 반등)
+  if (mode === "auto") mode = lo < hi ? "up" : "down";
+  if (mode === "up") { lo = 0; for (let i = 0; i <= hi; i++) if (seg[i].low < seg[lo].low) lo = i; }
+  else { hi = 0; for (let i = 0; i <= lo; i++) if (seg[i].high > seg[hi].high) hi = i; }
+  const H = seg[hi].high, L = seg[lo].low, last = seg.at(-1).close;
+  if (!(H > L) || hi === lo) return null;              // 그 방향 파동이 없다 (최저가가 기간 맨 앞 등)
+  const up = mode === "up";
   const levels = FIB_RATIOS.map((r) => ({
     r, price: up ? H - (H - L) * r : L + (H - L) * r,
     label: `${(r * 100).toFixed(r === 0.236 || r === 0.382 || r === 0.618 || r === 0.786 ? 1 : 0)}%`,
     key: r === 0.382 || r === 0.5 || r === 0.618,
   }));
-  return { up, high: { time: seg[hi].time, price: H }, low: { time: seg[lo].time, price: L }, levels };
+  const nowPct = ((up ? H - last : last - L) / (H - L)) * 100;
+  return { up, mode, nowPct, high: { time: seg[hi].time, price: H }, low: { time: seg[lo].time, price: L }, levels };
+}
+
+// 지금 위치를 말로: '상승분의 98% 되돌림 (78.6% 아래)' — 어느 두 선 사이인지까지
+function fibWhere(f) {
+  const p = f.nowPct ?? f.now_pct;
+  const word = (f.up ?? f.mode === "up") ? "상승분의" : "하락분의";
+  const verb = (f.up ?? f.mode === "up") ? "되돌림" : "회복";
+  const marks = [0, 23.6, 38.2, 50, 61.8, 78.6, 100];
+  const below = marks.filter((m) => m <= p).at(-1), above = marks.find((m) => m > p);
+  const band = p < 0 ? "0% 밖" : above == null ? "100% 넘음" : `${below}~${above}% 사이`;
+  return `${word} ${p.toFixed(0)}% ${verb} (${band})`;
 }
 
 function renderLevels() {
@@ -203,7 +221,7 @@ function renderLevels() {
     }));
   }
   // 피보나치 되돌림: 최근 N봉의 고점·저점 사이. 저점이 먼저면(오른 뒤) 고점에서 아래로, 고점이 먼저면(내린 뒤) 저점에서 위로 잰다
-  const fib = on("fib") ? fibLevels(state.data.candles, state.layers.fib.bars) : null;
+  const fib = on("fib") ? fibLevels(state.data.candles, state.layers.fib.bars, state.layers.fib.mode) : null;
   if (fib) for (const lv of fib.levels) state.priceLines.push(candles.createPriceLine({
     price: lv.price, color: FIB_COLOR + (lv.key ? "cc" : "66"), lineWidth: lv.key ? 1 : 1,
     lineStyle: lv.r === 0 || lv.r === 1 ? LW.LineStyle.Solid : LW.LineStyle.Dotted,
@@ -582,6 +600,7 @@ function labelOf(ind) {
 function applyLayers() {
   saveLayers();
   $("#fib-toggle")?.classList.toggle("on", on("fib"));
+  if (on("fib") && state.data) loadFibUnderlying();
   volume.applyOptions({ visible: on("volume") });
   renderLevels();
   renderTrendlines();
@@ -601,7 +620,7 @@ function toggleLayer(key) {
 function layerChips() {
   return Object.keys(LAYERS).filter(on).map((key) => {
     const def = LAYERS[key];
-    const inputs = Object.entries(state.layers[key]).map(([k, v]) => {
+    const inputs = Object.entries(state.layers[key]).filter(([, v]) => typeof v === "number").map(([k, v]) => {
       const [lo, hi] = def.paramRange?.[k] || [1, 3];
       const input = el("input", { type: "number", min: String(lo), max: String(hi), value: String(v), title: def.paramLabel?.[k] || k });
       input.addEventListener("change", () => {
@@ -612,8 +631,51 @@ function layerChips() {
     });
     const x = el("span", { class: "x", title: "빼기" }, "×");
     x.addEventListener("click", () => toggleLayer(key));
-    return el("span", { class: "ind-chip layer", title: def.desc }, def.name, ...inputs, x);
+    if (key === "fib") inputs.push(...fibChipParts());
+    return el("span", { class: `ind-chip layer${key === "fib" ? " fib-chip" : ""}`, title: def.desc }, def.name, ...inputs, x);
   });
+}
+
+// 피보나치 칩: [자동 · 상승분 되돌림 · 하락분 회복] + 지금 위치. 레버리지·인버스 ETF 면 기초자산 기준 위치도 (일봉만)
+function fibChipParts() {
+  const mode = state.layers.fib.mode || "auto";
+  const seg = el("span", { class: "fib-mode" }, ...Object.entries(FIB_MODES).map(([k, label]) => {
+    const b = el("button", { class: k === mode ? "on" : "" }, label);
+    b.addEventListener("click", (e) => { e.stopPropagation(); state.layers.fib.mode = k; applyLayers(); });
+    return b;
+  }));
+  const parts = [seg];
+  const f = state.data && fibLevels(state.data.candles, state.layers.fib.bars, mode);
+  parts.push(el("span", { class: "fib-now" }, f ? `지금 ${fibWhere(f)}`
+    : state.data ? `이 기간엔 ${FIB_MODES[mode]} 파동이 없어요 (기간을 늘려 보세요)` : ""));
+  const u = state.fibUnder;
+  if (u?.key === fibUnderKey() && u.data?.underlying && !u.data.fib) {
+    parts.push(el("span", { class: "fib-now" }, `기초자산 ${u.data.underlying.label}: 이 기간엔 그 방향 파동이 없어요`));
+  }
+  if (u?.key === fibUnderKey() && u.data?.fib) {
+    const ul = u.data.underlying;
+    const link = el("a", { href: "#", class: "fib-under" },
+      `기초자산 ${ul.label} 기준: ${fibWhere(u.data.fib)}${ul.inverse ? " · 인버스라 반대로 움직여요" : ""}`);
+    link.title = `${ul.label}(${ul.symbol})으로 같은 기간·같은 방향의 피보나치를 그렸을 때 지금 위치. `
+      + `${ul.leverage}배 ETF 는 매일 재조정 때문에 기초자산보다 더 많이 반납해서, 되돌림 비율은 기초자산으로 보는 게 맞아요. 누르면 기초자산 차트로.`;
+    link.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); load(ul.symbol); });
+    parts.push(link);
+  }
+  return parts;
+}
+
+const fibUnderKey = () => state.data && on("fib") ? `${state.data.symbol}:${state.layers.fib.bars}:${state.layers.fib.mode || "auto"}` : null;
+
+// 레버리지·인버스 ETF 의 기초자산 피보나치 위치 (일봉에서만, 같은 조건이면 다시 안 받는다)
+async function loadFibUnderlying() {
+  const key = fibUnderKey();
+  if (!key || !isDaily() || state.data.macro || state.data.market !== "US") return;
+  if (state.fibUnder?.key === key) return;
+  state.fibUnder = { key, data: null };
+  const res = await fetch(`/api/fib_underlying/${encodeURIComponent(state.data.symbol)}?bars=${state.layers.fib.bars}&mode=${state.layers.fib.mode || "auto"}`).catch(() => null);
+  if (state.fibUnder?.key !== key) return;
+  state.fibUnder.data = res?.ok ? await res.json() : null;
+  renderIndicatorChips();
 }
 
 function renderIndicatorChips() {
@@ -1757,6 +1819,7 @@ async function loadChart(symbol) {
   state.patFocus = null;
   banner(d.demo ? demoText : "");
   renderIntervalBar();                       // 야후 지표는 분봉을 골라도 일봉이 온다 → 실제 봉 단위에 불을 켠다
+  loadFibUnderlying();                       // 피보나치를 켜 둔 레버리지 ETF 면 기초자산 기준 위치도
 
   chart.applyOptions({ timeScale: { timeVisible: d.intraday, secondsVisible: false } });
   state.panes.forEach((p) => p.chart.applyOptions({ timeScale: { timeVisible: d.intraday } }));

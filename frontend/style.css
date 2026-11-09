@@ -652,3 +652,13 @@ button.chip:hover { border-color: var(--accent); color: var(--accent); }
 .short-level.high { background: color-mix(in srgb, var(--down) 25%, transparent); }
 .short-explain { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.65; color: var(--muted); }
 .short-line b { display: inline; margin: 0; font-size: 12px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 15%, transparent); }
+
+/* 피보나치 칩: 방향 고르기 + 지금 위치 + 기초자산 기준 */
+.fib-mode { display: inline-flex; gap: 2px; margin-left: 4px; }
+.fib-mode button { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.fib-mode button.on { color: #111; background: #fab005; border-color: #fab005; font-weight: 600; }
+.fib-now { font-size: 11px; color: var(--muted); margin-left: 6px; }
+.fib-under { font-size: 11px; margin-left: 6px; color: var(--accent); text-decoration: none; } .fib-under:hover { text-decoration: underline; }
+.ind-chip.fib-chip { flex: 1 1 100%; flex-wrap: wrap; row-gap: 4px; }
+.ind-chip.fib-chip > * { white-space: nowrap; }
+.ind-chip.fib-chip .fib-under { white-space: normal; }

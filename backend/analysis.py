@@ -746,3 +746,31 @@ def alert_lines(candles: list[dict], drawings: list[dict]) -> dict:
             out[kind].append({"id": f"{d['id']}-{i}" if i else d["id"], "price": round(value, 4),
                               "touches": 0, "label": label})
     return out
+
+
+FIB_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+
+
+def fib_levels(candles: list[dict], bars: int = 120, mode: str = "auto") -> dict | None:
+    """피보나치 되돌림 (화면 app.js 의 fibLevels 와 같은 규칙).
+    up   = 상승분 되돌림: 기간 안 최고가와 그 전의 최저가. 고점에서 아래로 잰다. now_pct = 오른 폭 중 반납한 %
+    down = 하락분 회복:   기간 안 최저가와 그 전의 최고가. 저점에서 위로 잰다. now_pct = 내린 폭 중 회복한 %
+    auto = 최고가·최저가 중 나중에 나온 쪽으로 (저점 → 고점이면 up, 고점 → 저점이면 down)."""
+    seg = candles[-bars:]
+    if len(seg) < 10:
+        return None
+    hi = max(range(len(seg)), key=lambda i: seg[i]["high"])
+    lo = min(range(len(seg)), key=lambda i: seg[i]["low"])
+    if mode == "auto":
+        mode = "up" if lo < hi else "down"
+    if mode == "up":
+        lo = min(range(hi + 1), key=lambda i: seg[i]["low"])
+    else:
+        hi = max(range(lo + 1), key=lambda i: seg[i]["high"])
+    H, L, last = seg[hi]["high"], seg[lo]["low"], seg[-1]["close"]
+    if not H > L or hi == lo:                 # 그 방향 파동이 없다 (예: 최저가가 기간 맨 앞이면 '그 전 최고가'가 없음)
+        return None
+    up = mode == "up"
+    return {"mode": mode, "high": {"time": seg[hi]["time"], "price": H}, "low": {"time": seg[lo]["time"], "price": L},
+            "levels": [{"r": r, "price": H - (H - L) * r if up else L + (H - L) * r} for r in FIB_RATIOS],
+            "last": last, "now_pct": round(((H - last) if up else (last - L)) / (H - L) * 100, 1)}

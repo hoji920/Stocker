@@ -1448,6 +1448,27 @@ def company_info(symbol: str):
         raise HTTPException(status_code=502, detail=f"회사 정보를 못 받았어요 ({type(error).__name__})")
 
 
+@app.get("/api/fib_underlying/{symbol}")
+def fib_underlying(symbol: str, bars: int = 120, mode: str = "auto"):
+    """레버리지·인버스 ETF 면 기초자산(SOXL → 필라델피아 반도체 지수)으로 그린 피보나치 되돌림 위치.
+    레버리지 ETF 는 매일 재조정 때문에 오르내림이 반복되면 기초자산보다 더 많이 반납한다 → 되돌림 비율은 기초자산으로 보는 게 맞다.
+    기초자산의 선을 ETF 가격으로 옮길 수는 없어서(경로마다 달라짐) 위치(%)와 선 가격만 준다. 아니면 {"underlying": None}."""
+    symbol = symbol.strip().upper()
+    if macro.is_macro(symbol) or market_of(symbol) == "KR":
+        return {"underlying": None}
+    info = load_stock(symbol)[0]
+    u = underlying.resolve(symbol, info)
+    if not u or (u["leverage"] == 1 and not u["inverse"]):
+        return {"underlying": None}
+    bars, mode = max(20, min(int(bars), 500)), mode if mode in ("auto", "up", "down") else "auto"
+    try:
+        cs = load_stock(u["quote"])[1] if u["quote_is_stock"] else macro.daily_candles(u["quote"], years=2)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"기초자산 시세를 못 받았어요 ({type(error).__name__})")
+    return {"underlying": {"symbol": u["quote"], "label": u["label"], "leverage": u["leverage"], "inverse": u["inverse"]},
+            "fib": analysis.fib_levels(cs, bars, mode)}
+
+
 @app.get("/api/short/{symbol}")
 def short_interest(symbol: str):
     """공매도 잔고 (미국 종목만, 야후). 국내 공매도는 아직 없다."""
