@@ -49,13 +49,16 @@ def straddle(chain: dict, spot: float) -> dict | None:
             co, po = vol(opt["calls"], "openInterest"), vol(opt["puts"], "openInterest")
             move = c + p
             share = lambda a, b: round(a / (a + b) * 100) if a + b else None
+            # 미결제약정이 비어서 올 때가 있다 (2026-11 야후: 하루 거래 수십만 계약인데 미결제 0~수십 계약).
+            # 쌓여 있는 계약은 보통 하루 거래량보다 훨씬 많다 → 거래량의 20%도 안 되면 믿을 수 없는 값으로 보고 비율을 내지 않는다
+            oi_ok = co + po >= max(50, 0.2 * (cv + pv))
             return {"strike": k, "straddle": round(move, 2), "move_pct": round(move / spot * 100, 1),
                     "low": round(spot - move, 2), "high": round(spot + move, 2),
                     "atm_iv_pct": round(sum(iv) / len(iv) * 100, 1) if iv else None,
-                    "put_call_volume": round(pv / cv, 2) if cv else None, "put_call_oi": round(po / co, 2) if co else None,
+                    "put_call_volume": round(pv / cv, 2) if cv else None, "put_call_oi": round(po / co, 2) if co and oi_ok else None,
                     # 콜이 몇 %인지 (그 만기 전체 행사가 합). 풋 % = 100 − 콜 %
                     "call_volume": int(cv), "put_volume": int(pv), "call_oi": int(co), "put_oi": int(po),
-                    "call_volume_pct": share(cv, pv), "call_oi_pct": share(co, po)}
+                    "call_volume_pct": share(cv, pv), "call_oi_pct": share(co, po) if oi_ok else None, "oi_ok": oi_ok}
     return None
 
 
@@ -105,7 +108,9 @@ def expected_moves(symbol: str, earnings_date: str | None = None) -> dict:
     # 보여주는 만기들을 합친 콜·풋 비중 (거래량 = 오늘 하루, 미결제약정 = 쌓여 있는 계약)
     tot = {k: sum(r[k] for r in rows[:4]) for k in ("call_volume", "put_volume", "call_oi", "put_oi")}
     pct = lambda a, b: round(a / (a + b) * 100) if a + b else None
-    flow = {**tot, "call_volume_pct": pct(tot["call_volume"], tot["put_volume"]), "call_oi_pct": pct(tot["call_oi"], tot["put_oi"])}
+    oi_ok = tot["call_oi"] + tot["put_oi"] >= max(50, 0.2 * (tot["call_volume"] + tot["put_volume"]))   # 위 _straddle 과 같은 기준
+    flow = {**tot, "call_volume_pct": pct(tot["call_volume"], tot["put_volume"]),
+            "call_oi_pct": pct(tot["call_oi"], tot["put_oi"]) if oi_ok else None, "oi_ok": oi_ok}
     out = {"symbol": symbol, "spot": spot, "flow": flow, "as_of": datetime.fromtimestamp(q.get("regularMarketTime") or time.time(), timezone.utc).isoformat(),
            "expiries": rows[:4], "earnings": earn, "source": "야후 파이낸스 옵션 (몇 분 늦을 수 있음)"}
     _cache[key] = (time.time(), out)

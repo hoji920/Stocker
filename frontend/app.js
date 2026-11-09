@@ -2091,7 +2091,11 @@ async function loadOptions() {
       e.earnings_only_pct ? el("span", { class: "muted" }, ` · 그중 실적 몫 약 ±${e.earnings_only_pct}%`) : "") : "",
     el("ul", {}, ...rows),
     bar("거래량 (오늘)", f.call_volume_pct, f.call_volume, f.put_volume),
-    bar("쌓인 계약 (미결제)", f.call_oi_pct, f.call_oi, f.put_oi),
+    f.oi_ok === false
+      ? el("div", { class: "opt-flow" }, el("span", { class: "opt-flow-label" }, "쌓인 계약 (미결제)"),
+        el("span", { class: "muted", title: `야후가 준 미결제약정: 콜 ${f.call_oi} · 풋 ${f.put_oi} 계약 (하루 거래량 ${(f.call_volume + f.put_volume).toLocaleString()}계약보다 터무니없이 적음)` },
+          "오늘은 야후 데이터가 비어 있어서 못 보여줘요"))
+      : bar("쌓인 계약 (미결제)", f.call_oi_pct, f.call_oi, f.put_oi),
     el("p", { class: "muted hint" }, `위 만기들을 합친 콜·풋 비중이에요. 많은 쪽이 이긴다는 뜻은 아니에요 (풋은 보험인 경우가 많아요). `
       + "예상 폭은 등가격 콜+풋 가격으로 본 거라 그 안에 머문다는 보장은 없어요. 야후 옵션, 장이 닫혀 있으면 마지막 호가 기준.")));
 }
