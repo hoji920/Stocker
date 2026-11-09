@@ -259,12 +259,17 @@ function renderLevels() {
   }
   // 피보나치 되돌림: 최근 N봉의 고점·저점 사이. 저점이 먼저면(오른 뒤) 고점에서 아래로, 고점이 먼저면(내린 뒤) 저점에서 위로 잰다
   const fib = currentFib();
-  if (fib?.levels) for (const lv of fib.levels) state.priceLines.push(candles.createPriceLine({
-    price: lv.price, color: FIB_COLOR + (lv.key ? "cc" : "66"), lineWidth: lv.key ? 1 : 1,
-    lineStyle: lv.r === 0 || lv.r === 1 ? LW.LineStyle.Solid : LW.LineStyle.Dotted,
-    axisLabelVisible: lv.key, axisLabelColor: FIB_COLOR, axisLabelTextColor: "#111",
-    title: lv.key ? `피보 ${lv.label}` : "",
-  }));
+  // 라벨: 주요 선(38.2·50·61.8%)과 구간의 시작·끝(0%·100% = 그 파동의 저점·고점). 시작선이 다른 선에 묻혀 헷갈리지 않게
+  if (fib?.levels) for (const lv of fib.levels) {
+    const edge = lv.r === 0 || lv.r === 1;
+    const edgeWord = edge ? ((lv.r === 0) === fib.up ? "고점" : "저점") : "";   // 상승분 되돌림은 0% = 고점, 하락분 회복은 0% = 저점
+    state.priceLines.push(candles.createPriceLine({
+      price: lv.price, color: FIB_COLOR + (lv.key || edge ? "cc" : "66"), lineWidth: 1,
+      lineStyle: edge ? LW.LineStyle.Solid : LW.LineStyle.Dotted,
+      axisLabelVisible: lv.key || edge, axisLabelColor: FIB_COLOR, axisLabelTextColor: "#111",
+      title: lv.key ? `피보 ${lv.label}` : edge ? `피보 ${lv.label} ${edgeWord}` : "",
+    }));
+  }
   // 52주(또는 보고 있는 기간) 최고·최저: 회색 점선
   const ex = state.data.extremes;
   if (ex && on("extremes")) for (const [side, word] of [["high", "최고"], ["low", "최저"]]) state.priceLines.push(candles.createPriceLine({
