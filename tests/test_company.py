@@ -47,3 +47,14 @@ def test_fib_levels_measure_the_up_move_down_from_the_high_or_the_down_move_up_f
     assert analysis.fib_levels(cs, 120, "auto")["mode"] == "up"                                   # 최저가(처음) → 최고가 순서
     down = analysis.fib_levels(cs, 120, "down")                                                   # 최저가 100 이 맨 앞이라 그 전 최고도 100
     assert down is None
+
+
+def test_fib_widens_to_a_bigger_swing_when_the_base_low_is_broken():
+    from backend import analysis
+    # 100 → 150 (큰 상승) → 140 (눌림) → 200 (고점) → 120 (지금): 최근 20봉 기간에선 저점 140 이 이미 깨졌다 → 100 부터 다시
+    path = [100 + i * 5 for i in range(11)] + [150 - i for i in range(11)] + [140 + i * 6 for i in range(11)] + [200 - i * 8 for i in range(1, 11)]
+    cs = [{"time": f"d{i:03d}", "open": p, "high": p, "low": p, "close": p} for i, p in enumerate(path)]
+    f = analysis.fib_levels(cs, 20, "up")
+    assert f["extended"] and (f["low"]["price"], f["high"]["price"]) == (100, 200) and f["now_pct"] == 80.0
+    g = analysis.fib_levels(cs, 60, "up")                                                       # 처음부터 넉넉한 기간이면 넓힐 필요 없음
+    assert not g["extended"] and g["now_pct"] == 80.0

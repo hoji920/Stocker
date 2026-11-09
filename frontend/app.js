@@ -171,23 +171,60 @@ const FIB_RATIOS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
 //       auto = 최고가·최저가 중 나중에 나온 쪽으로. 서버 analysis.fib_levels 와 같은 규칙
 const FIB_MODES = { auto: "자동", up: "상승분 되돌림", down: "하락분 회복" };
 function fibLevels(cs, bars, mode = "auto") {
-  const seg = cs.slice(-bars);
-  if (seg.length < 10) return null;
-  let hi = 0, lo = 0;
-  seg.forEach((c, i) => { if (c.high > seg[hi].high) hi = i; if (c.low < seg[lo].low) lo = i; });
+  const n = cs.length;
+  if (n < 10) return null;
+  let start = Math.max(0, n - bars), hi = start, lo = start;
+  for (let i = start; i < n; i++) { if (cs[i].high > cs[hi].high) hi = i; if (cs[i].low < cs[lo].low) lo = i; }
   if (mode === "auto") mode = lo < hi ? "up" : "down";
-  if (mode === "up") { lo = 0; for (let i = 0; i <= hi; i++) if (seg[i].low < seg[lo].low) lo = i; }
-  else { hi = 0; for (let i = 0; i <= lo; i++) if (seg[i].high > seg[hi].high) hi = i; }
-  const H = seg[hi].high, L = seg[lo].low, last = seg.at(-1).close;
-  if (!(H > L) || hi === lo) return null;              // 그 방향 파동이 없다 (최저가가 기간 맨 앞 등)
-  const up = mode === "up";
+  const last = cs[n - 1].close;
+  const minLow = (a, b) => { let k = a; for (let i = a; i <= b; i++) if (cs[i].low < cs[k].low) k = i; return k; };
+  const maxHigh = (a, b) => { let k = a; for (let i = a; i <= b; i++) if (cs[i].high > cs[k].high) k = i; return k; };
+  // 기준 저점(고점)이 이미 깨졌으면(되돌림 100% 넘음) 그 파동은 의미가 없다 → 20봉씩 앞으로 넓혀 더 큰 파동으로
+  let extended = false;
+  // 넓힐 땐 현재가 아래 저점을 찾은 뒤에도, 20봉 더 넓혀 더 낮은 저점이 안 나올 때까지 간다 (그 상승이 시작된 바닥까지)
+  if (mode === "up") {
+    lo = minLow(start, hi);
+    while (cs[lo].low > last && start > 0) { start = Math.max(0, start - 20); lo = minLow(start, hi); extended = true; }
+    while (extended && start > 0 && cs[minLow(Math.max(0, start - 20), hi)].low < cs[lo].low) { start = Math.max(0, start - 20); lo = minLow(start, hi); }
+  } else {
+    hi = maxHigh(start, lo);
+    while (cs[hi].high < last && start > 0) { start = Math.max(0, start - 20); hi = maxHigh(start, lo); extended = true; }
+    while (extended && start > 0 && cs[maxHigh(Math.max(0, start - 20), lo)].high > cs[hi].high) { start = Math.max(0, start - 20); hi = maxHigh(start, lo); }
+  }
+  return fibFrom({ time: cs[lo].time, price: cs[lo].low }, { time: cs[hi].time, price: cs[hi].high }, mode === "up", last, extended);
+}
+
+// 저점·고점 두 점으로 되돌림 선. up = 저점이 먼저(오른 뒤 되돌림, 고점에서 아래로) / 아니면 저점에서 위로
+function fibFrom(low, high, up, last, extended = false) {
+  const H = high.price, L = low.price;
+  if (!(H > L) || low.time === high.time) return null;    // 그 방향 파동이 없다 (최저가가 기간 맨 앞 등)
   const levels = FIB_RATIOS.map((r) => ({
     r, price: up ? H - (H - L) * r : L + (H - L) * r,
     label: `${(r * 100).toFixed(r === 0.236 || r === 0.382 || r === 0.618 || r === 0.786 ? 1 : 0)}%`,
     key: r === 0.382 || r === 0.5 || r === 0.618,
   }));
   const nowPct = ((up ? H - last : last - L) / (H - L)) * 100;
-  return { up, mode, nowPct, high: { time: seg[hi].time, price: H }, low: { time: seg[lo].time, price: L }, levels };
+  return { up, mode: up ? "up" : "down", nowPct, extended, high, low, levels };
+}
+
+// 직접 그린 피보나치 (종목마다 브라우저에 기억, 일봉 날짜 기준): { 종목: { a: {time, price}, b: {time, price} } }
+const fibManualAll = () => store.load("stocking.fibManual", {});
+const fibManualOf = (symbol) => fibManualAll()[symbol] || null;
+function setFibManual(symbol, pts) {
+  const all = fibManualAll();
+  if (pts) all[symbol] = pts; else delete all[symbol];
+  store.save("stocking.fibManual", all);
+}
+// 지금 그릴 피보나치: 직접 그린 게 있으면(일봉) 그것, 아니면 자동
+function currentFib() {
+  const d = state.data;
+  if (!d || !on("fib")) return null;
+  const m = isDaily() && fibManualOf(d.symbol);
+  if (m) {
+    const [low, high] = m.a.price < m.b.price ? [m.a, m.b] : [m.b, m.a];
+    return { ...fibFrom(low, high, low.time < high.time, d.candles.at(-1).close), manual: true };
+  }
+  return fibLevels(d.candles, state.layers.fib.bars, state.layers.fib.mode);
 }
 
 // 지금 위치를 말로: '상승분의 98% 되돌림 (78.6% 아래)' — 어느 두 선 사이인지까지
@@ -221,8 +258,8 @@ function renderLevels() {
     }));
   }
   // 피보나치 되돌림: 최근 N봉의 고점·저점 사이. 저점이 먼저면(오른 뒤) 고점에서 아래로, 고점이 먼저면(내린 뒤) 저점에서 위로 잰다
-  const fib = on("fib") ? fibLevels(state.data.candles, state.layers.fib.bars, state.layers.fib.mode) : null;
-  if (fib) for (const lv of fib.levels) state.priceLines.push(candles.createPriceLine({
+  const fib = currentFib();
+  if (fib?.levels) for (const lv of fib.levels) state.priceLines.push(candles.createPriceLine({
     price: lv.price, color: FIB_COLOR + (lv.key ? "cc" : "66"), lineWidth: lv.key ? 1 : 1,
     lineStyle: lv.r === 0 || lv.r === 1 ? LW.LineStyle.Solid : LW.LineStyle.Dotted,
     axisLabelVisible: lv.key, axisLabelColor: FIB_COLOR, axisLabelTextColor: "#111",
@@ -639,15 +676,29 @@ function layerChips() {
 // 피보나치 칩: [자동 · 상승분 되돌림 · 하락분 회복] + 지금 위치. 레버리지·인버스 ETF 면 기초자산 기준 위치도 (일봉만)
 function fibChipParts() {
   const mode = state.layers.fib.mode || "auto";
+  // 일봉은 'YYYY-MM-DD', 분봉은 한국 시간으로 옮긴 유닉스 초
+  const day = (t) => typeof t === "number"
+    ? (({ M, D, h, m }) => `${M}/${D} ${h}:${m}`)((() => { const x = new Date(t * 1000); return { M: x.getUTCMonth() + 1, D: x.getUTCDate(), h: String(x.getUTCHours()).padStart(2, "0"), m: String(x.getUTCMinutes()).padStart(2, "0") }; })())
+    : `${+String(t).slice(5, 7)}/${+String(t).slice(8, 10)}`;
+  const span = (f) => f.up ? `${day(f.low.time)} ${fmt(f.low.price)} → ${day(f.high.time)} ${fmt(f.high.price)}`
+    : `${day(f.high.time)} ${fmt(f.high.price)} → ${day(f.low.time)} ${fmt(f.low.price)}`;
+  const cur = currentFib();
+  if (cur?.manual) {                                    // 직접 그린 구간: 방향·기간 칸 대신 구간과 '자동으로'
+    const back = el("button", { class: "fib-back" }, "자동으로");
+    back.addEventListener("click", (e) => { e.stopPropagation(); setFibManual(state.data.symbol, null); applyLayers(); });
+    return [el("span", { class: "fib-now" }, `직접 그린 구간 ${span(cur)} · 지금 ${fibWhere(cur)}`), back];
+  }
   const seg = el("span", { class: "fib-mode" }, ...Object.entries(FIB_MODES).map(([k, label]) => {
     const b = el("button", { class: k === mode ? "on" : "" }, label);
     b.addEventListener("click", (e) => { e.stopPropagation(); state.layers.fib.mode = k; applyLayers(); });
     return b;
   }));
   const parts = [seg];
-  const f = state.data && fibLevels(state.data.candles, state.layers.fib.bars, mode);
-  parts.push(el("span", { class: "fib-now" }, f ? `지금 ${fibWhere(f)}`
+  const f = cur;
+  parts.push(el("span", { class: "fib-now" }, f ? `${span(f)} · 지금 ${fibWhere(f)}`
     : state.data ? `이 기간엔 ${FIB_MODES[mode]} 파동이 없어요 (기간을 늘려 보세요)` : ""));
+  if (f?.extended) parts.push(el("span", { class: "fib-now", title: "되돌림이 100%를 넘으면(기준 저점·고점이 깨지면) 그 파동은 의미가 없어서, 기간을 앞으로 넓혀 더 큰 파동으로 다시 잡았어요." },
+    "· 기준이 깨져서 더 큰 파동으로 다시 잡았어요"));
   const u = state.fibUnder;
   if (u?.key === fibUnderKey() && u.data?.underlying && !u.data.fib) {
     parts.push(el("span", { class: "fib-now" }, `기초자산 ${u.data.underlying.label}: 이 기간엔 그 방향 파동이 없어요`));
@@ -664,7 +715,8 @@ function fibChipParts() {
   return parts;
 }
 
-const fibUnderKey = () => state.data && on("fib") ? `${state.data.symbol}:${state.layers.fib.bars}:${state.layers.fib.mode || "auto"}` : null;
+const fibUnderKey = () => state.data && on("fib") && !(isDaily() && fibManualOf(state.data.symbol))
+  ? `${state.data.symbol}:${state.layers.fib.bars}:${state.layers.fib.mode || "auto"}` : null;
 
 // 레버리지·인버스 ETF 의 기초자산 피보나치 위치 (일봉에서만, 같은 조건이면 다시 안 받는다)
 async function loadFibUnderlying() {
@@ -754,7 +806,9 @@ function setDrawMode(mode) {
   $("#draw-trend").classList.toggle("on", state.drawMode === "trend");
   $("#draw-hline").classList.toggle("on", state.drawMode === "hline");
   $("#draw-channel").classList.toggle("on", state.drawMode === "channel");
+  $("#fib-draw")?.classList.toggle("on", state.drawMode === "fib");
   banner({
+    fib: "피보나치: 파동의 시작점과 끝점(저점과 고점)을 차례로 클릭하세요. 꼬리 끝에 달라붙어요. 저점을 먼저 찍든 고점을 먼저 찍든, 날짜가 이른 쪽이 시작이에요. Esc 취소",
     trend: "추세선 시작점을 클릭하세요 (Esc 취소)",
     hline: "선을 그을 가격을 클릭하세요 (Esc 취소)",
     channel: "채널: 기준선이 지날 저점(또는 고점) 두 곳을 차례로 클릭하세요 (1/3). 클릭은 가까운 꼬리 끝에 달라붙어요. Esc 취소",
@@ -824,6 +878,15 @@ $("#chart").addEventListener("click", (e) => {
   if (state.drawMode === "hline") {
     saveDrawings([...state.drawings, { id, type: "horizontal", p1: pt }]);
     return setDrawMode(null);
+  }
+  if (state.drawMode === "fib") {                    // 두 점을 찍으면 그 사이로 (종목마다 브라우저에 기억)
+    if (!state.pending?.length) { state.pending = [pt]; return banner("끝점(반대쪽 고점 또는 저점)을 클릭하세요 (Esc 취소)"); }
+    const a = state.pending[0];
+    if (a.time === pt.time || a.price === pt.price) return;
+    setFibManual(state.data.symbol, { a, b: pt });
+    if (!on("fib")) state.layers.fib = { ...LAYERS.fib.params };
+    setDrawMode(null);
+    return applyLayers();
   }
   const pending = state.pending || [];
   if (pending.length === 0) {
@@ -1845,7 +1908,7 @@ async function loadChart(symbol) {
   $("#daily-only").hidden = isDaily();
   // 지수·선물·금리(야후)는 관심종목/이유찾기 대상이 아니고 토스 실시간도 없음
   $("#watch-toggle").hidden = $("#why-row").hidden = $("#live-dot").hidden = !!d.macro;
-  ["#draw-trend", "#draw-hline", "#draw-channel"].forEach((id) => ($(id).disabled = !isDaily()));
+  ["#draw-trend", "#draw-hline", "#draw-channel", "#fib-draw"].forEach((id) => ($(id).disabled = !isDaily()));
   // autoSize 가 첫 레이아웃 후에 폭을 잡기 때문에 한 프레임 뒤에 범위를 지정해야 안 찌그러진다
   requestAnimationFrame(() => setTimeout(() =>
     chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 12 }), 50));   // 오른쪽에 늘린 선이 조금 보이게
@@ -1882,6 +1945,7 @@ async function loadOlder(d) {
 // 로그 버튼: 서버 설정을 바꾼다 (신호·알림·내 규칙도 같은 추세선을 쓰게) → 차트를 다시 받아 그린다
 // 피보나치 되돌림: 궁금할 때만 버튼으로 켜고 끈다 (+ 추가 메뉴에는 넣지 않는다)
 $("#fib-toggle").addEventListener("click", () => toggleLayer("fib"));
+$("#fib-draw").addEventListener("click", () => setDrawMode("fib"));
 $("#fib-toggle").classList.toggle("on", on("fib"));
 
 $("#log-scale").addEventListener("click", async () => {

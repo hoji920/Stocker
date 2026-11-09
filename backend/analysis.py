@@ -755,22 +755,41 @@ def fib_levels(candles: list[dict], bars: int = 120, mode: str = "auto") -> dict
     """피보나치 되돌림 (화면 app.js 의 fibLevels 와 같은 규칙).
     up   = 상승분 되돌림: 기간 안 최고가와 그 전의 최저가. 고점에서 아래로 잰다. now_pct = 오른 폭 중 반납한 %
     down = 하락분 회복:   기간 안 최저가와 그 전의 최고가. 저점에서 위로 잰다. now_pct = 내린 폭 중 회복한 %
-    auto = 최고가·최저가 중 나중에 나온 쪽으로 (저점 → 고점이면 up, 고점 → 저점이면 down)."""
-    seg = candles[-bars:]
-    if len(seg) < 10:
+    auto = 최고가·최저가 중 나중에 나온 쪽으로 (저점 → 고점이면 up, 고점 → 저점이면 down).
+    기준 저점(up)·고점(down)이 이미 깨졌으면(되돌림 100% 넘음) 그 파동은 의미가 없어서, 기간을 20봉씩 앞으로 넓혀
+    현재가보다 낮은 저점(높은 고점)이 나올 때까지 더 큰 파동으로 다시 잡는다 (extended=True)."""
+    n = len(candles)
+    if n < 10:
         return None
-    hi = max(range(len(seg)), key=lambda i: seg[i]["high"])
-    lo = min(range(len(seg)), key=lambda i: seg[i]["low"])
+    start = max(0, n - bars)
+    hi = max(range(start, n), key=lambda i: candles[i]["high"])
+    lo = min(range(start, n), key=lambda i: candles[i]["low"])
     if mode == "auto":
         mode = "up" if lo < hi else "down"
+    last, extended = candles[-1]["close"], False
+    # 넓힐 땐 현재가 아래 저점을 찾은 뒤에도, 20봉 더 넓혀 더 낮은 저점이 안 나올 때까지 간다 (그 상승이 시작된 바닥까지)
     if mode == "up":
-        lo = min(range(hi + 1), key=lambda i: seg[i]["low"])
+        low = lambda a: min(range(a, hi + 1), key=lambda i: candles[i]["low"])
+        lo = low(start)
+        while candles[lo]["low"] > last and start > 0:
+            start, extended = max(0, start - 20), True
+            lo = low(start)
+        while extended and start > 0 and candles[low(max(0, start - 20))]["low"] < candles[lo]["low"]:
+            start = max(0, start - 20)
+            lo = low(start)
     else:
-        hi = max(range(lo + 1), key=lambda i: seg[i]["high"])
-    H, L, last = seg[hi]["high"], seg[lo]["low"], seg[-1]["close"]
+        high = lambda a: max(range(a, lo + 1), key=lambda i: candles[i]["high"])
+        hi = high(start)
+        while candles[hi]["high"] < last and start > 0:
+            start, extended = max(0, start - 20), True
+            hi = high(start)
+        while extended and start > 0 and candles[high(max(0, start - 20))]["high"] > candles[hi]["high"]:
+            start = max(0, start - 20)
+            hi = high(start)
+    H, L = candles[hi]["high"], candles[lo]["low"]
     if not H > L or hi == lo:                 # 그 방향 파동이 없다 (예: 최저가가 기간 맨 앞이면 '그 전 최고가'가 없음)
         return None
     up = mode == "up"
-    return {"mode": mode, "high": {"time": seg[hi]["time"], "price": H}, "low": {"time": seg[lo]["time"], "price": L},
+    return {"mode": mode, "extended": extended, "high": {"time": candles[hi]["time"], "price": H}, "low": {"time": candles[lo]["time"], "price": L},
             "levels": [{"r": r, "price": H - (H - L) * r if up else L + (H - L) * r} for r in FIB_RATIOS],
             "last": last, "now_pct": round(((H - last) if up else (last - L)) / (H - L) * 100, 1)}
