@@ -80,8 +80,9 @@ const candles = chart.addCandlestickSeries({
   priceLineWidth: 2, priceLineStyle: LW.LineStyle.LargeDashed,
 });
 const volume = chart.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
-chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-candles.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.22 } });
+// 거래량은 아래 16%, 가격은 그 위로 띄워 둔다 (가장 낮은 선 — 볼린저 하단 등 — 이 거래량 막대에 묻히지 않게)
+chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
+candles.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.26 } });
 chart.timeScale().subscribeVisibleLogicalRangeChange((r) => r && state.panes.forEach((p) => p.chart.timeScale().setVisibleLogicalRange(r)));
 window.__app = { chart, state };   // 콘솔 디버깅용
 
@@ -510,14 +511,16 @@ function renderIndicators() {
     }
     for (const [li, ln] of out.lines.entries()) {
       // 사용자가 고른 색(ind.color)이 있으면 첫 줄에, 볼린저밴드처럼 같은 계열 선들(상단·중심·하단)엔 전부
-      const auto = pickColor();
+      // 볼린저밴드는 세 줄(상단·중심·하단)을 한 색으로: 하단이 다른 선들 사이에서 '띠'로 읽히게
+      const auto = ind.key === "bb" ? (li === 0 ? pickColor() : ind.colors[0]) : pickColor();
       const color = ind.color && (li === 0 || ind.key === "bb") ? ind.color : auto;
       ind.colors.push(color);
       // 차트 위 지표는 가격축 라벨 대신 범례로 (가격축이 복잡해지지 않게)
       const common = { priceLineVisible: false, lastValueVisible: def.type === "pane", title: "" };
       const s = ln.type === "histogram"
         ? target.addHistogramSeries({ ...common })
-        : target.addLineSeries({ ...common, color, lineWidth: 2, lineStyle: ln.dashed ? LW.LineStyle.Dashed : LW.LineStyle.Solid, crosshairMarkerVisible: false });
+        : target.addLineSeries({ ...common, color, lineWidth: ind.key === "bb" && !ln.dashed ? 1.5 : 2,
+            lineStyle: ln.dashed ? LW.LineStyle.Dashed : LW.LineStyle.Solid, crosshairMarkerVisible: false });
       const pts = toPoints(ln.data);
       if (ln.type === "histogram") pts.forEach((p) => p.value != null && (p.color = (p.value >= 0 ? css("--up") : css("--down")) + "99"));
       s.setData(pts);
