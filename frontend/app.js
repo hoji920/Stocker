@@ -8,7 +8,7 @@ const $ = (sel) => document.querySelector(sel);
 const LAYERS = {
   levels: { name: "지지/저항선", params: { count: 1 }, paramLabel: { count: "위아래 개수" },
     desc: "과거에 여러 번 방향이 바뀐 가격대. 현재가 아래에 있으면 지지, 위에 있으면 저항이에요 (막혔던 가격을 뚫고 올라오면 지지로 바뀌어요). 가장 가까운 선만 진하게 보여요." },
-  fib: { name: "피보나치 되돌림", params: { bars: 120 }, paramLabel: { bars: "최근 몇 봉에서 고점·저점" }, paramRange: { bars: [20, 500] },
+  fib: { name: "피보나치 되돌림", button: true, params: { bars: 120 }, paramLabel: { bars: "최근 몇 봉에서 고점·저점" }, paramRange: { bars: [20, 500] },
     desc: "최근 N봉의 가장 높은 가격과 가장 낮은 가격 사이를 23.6·38.2·50·61.8·78.6%로 나눈 선. 오르다 쉬면 위에서부터, 내리다 반등하면 아래에서부터 재요. 많은 사람이 38.2·50·61.8% 근처에서 멈추거나 되돌아온다고 보는데, 우리 검증(미국 30 + 국내 10종목, 8년)에선 피보나치 지지가 무작위 선보다 잘 지켜지지 않았어요 (57.7% vs 57.1%, 차이 없음)." },
   extremes: { name: "52주 최고·최저", desc: "최근 1년(일봉이 아니면 보고 있는 기간) 중 가장 높았던 가격과 가장 낮았던 가격. 지지/저항선이 안 잡히는 신고가 근처에서도 기준이 돼요." },
   trend: { name: "자동 추세선", desc: "저점끼리 이은 상승 추세선, 고점끼리 이은 하락 추세선. 비스듬한 지지/저항이에요. 두 점만 이은 선은 '임시'로 표시해요 (세 번째로 닿아야 확인된 선)." },
@@ -581,6 +581,7 @@ function labelOf(ind) {
 // 레이어 하나 켜고/끄고 → 해당 그림만 다시
 function applyLayers() {
   saveLayers();
+  $("#fib-toggle")?.classList.toggle("on", on("fib"));
   volume.applyOptions({ visible: on("volume") });
   renderLevels();
   renderTrendlines();
@@ -654,7 +655,7 @@ function renderIndicatorChips() {
 
 function buildIndicatorMenu() {
   const menu = $("#ind-menu");
-  const layerItems = Object.entries(LAYERS).map(([key, def]) => {
+  const layerItems = Object.entries(LAYERS).filter(([, def]) => !def.button).map(([key, def]) => {   // 버튼으로 켜는 레이어(피보나치)는 메뉴에 없음
     const item = el("div", { class: `item${on(key) ? " on" : ""}` },
       el("b", {}, def.name), el("span", { class: "kind" }, on(key) ? "켜짐 · 누르면 끔" : "누르면 켬"),
       el("p", {}, def.desc));
@@ -1816,6 +1817,10 @@ async function loadOlder(d) {
 }
 
 // 로그 버튼: 서버 설정을 바꾼다 (신호·알림·내 규칙도 같은 추세선을 쓰게) → 차트를 다시 받아 그린다
+// 피보나치 되돌림: 궁금할 때만 버튼으로 켜고 끈다 (+ 추가 메뉴에는 넣지 않는다)
+$("#fib-toggle").addEventListener("click", () => toggleLayer("fib"));
+$("#fib-toggle").classList.toggle("on", on("fib"));
+
 $("#log-scale").addEventListener("click", async () => {
   const res = await fetch("/api/settings/scale", { method: "PUT", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ log: !state.data?.log_scale }) });
