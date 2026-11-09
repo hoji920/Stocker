@@ -74,6 +74,36 @@ const baseOptions = () => ({
 });
 
 const chart = LW.createChart($("#chart"), baseOptions());
+
+// 차트 높이: 아래 막대를 끌어서 바꾼다 (브라우저에 기억, 두 번 누르면 기본). 차트는 autoSize 라 칸 높이만 바꾸면 된다
+const CHART_H = { min: 300, max: 1400 };
+function setChartHeight(h, save = true) {
+  if (h == null) { document.documentElement.style.removeProperty("--chart-h"); if (save) store.save("stocking.chartH", null); return; }
+  const v = Math.round(Math.max(CHART_H.min, Math.min(CHART_H.max, h)));
+  document.documentElement.style.setProperty("--chart-h", `${v}px`);
+  if (save) store.save("stocking.chartH", v);
+}
+setChartHeight(store.load("stocking.chartH", null), false);
+(() => {
+  const bar = $("#chart-resize");
+  let startY = 0, startH = 0;
+  const move = (e) => setChartHeight(startH + (e.clientY - startY), false);
+  const up = () => {
+    bar.classList.remove("dragging");
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", up);
+    store.save("stocking.chartH", $("#chart").getBoundingClientRect().height);
+  };
+  bar.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    startY = e.clientY;
+    startH = $("#chart").getBoundingClientRect().height;
+    bar.classList.add("dragging");
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+  });
+  bar.addEventListener("dblclick", () => setChartHeight(null));
+})();
 const candles = chart.addCandlestickSeries({
   upColor: css("--up"), downColor: css("--down"), borderVisible: false,
   wickUpColor: css("--up"), wickDownColor: css("--down"),
