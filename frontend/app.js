@@ -8,6 +8,8 @@ const $ = (sel) => document.querySelector(sel);
 const LAYERS = {
   levels: { name: "지지/저항선", params: { count: 1 }, paramLabel: { count: "위아래 개수" },
     desc: "과거에 여러 번 방향이 바뀐 가격대. 현재가 아래에 있으면 지지, 위에 있으면 저항이에요 (막혔던 가격을 뚫고 올라오면 지지로 바뀌어요). 가장 가까운 선만 진하게 보여요." },
+  fib: { name: "피보나치 되돌림", params: { bars: 120 }, paramLabel: { bars: "최근 몇 봉에서 고점·저점" }, paramRange: { bars: [20, 500] },
+    desc: "최근 N봉의 가장 높은 가격과 가장 낮은 가격 사이를 23.6·38.2·50·61.8·78.6%로 나눈 선. 오르다 쉬면 위에서부터, 내리다 반등하면 아래에서부터 재요. 많은 사람이 38.2·50·61.8% 근처에서 멈추거나 되돌아온다고 보는데, 우리 검증(미국 30 + 국내 10종목, 8년)에선 피보나치 지지가 무작위 선보다 잘 지켜지지 않았어요 (57.7% vs 57.1%, 차이 없음)." },
   extremes: { name: "52주 최고·최저", desc: "최근 1년(일봉이 아니면 보고 있는 기간) 중 가장 높았던 가격과 가장 낮았던 가격. 지지/저항선이 안 잡히는 신고가 근처에서도 기준이 돼요." },
   trend: { name: "자동 추세선", desc: "저점끼리 이은 상승 추세선, 고점끼리 이은 하락 추세선. 비스듬한 지지/저항이에요. 두 점만 이은 선은 '임시'로 표시해요 (세 번째로 닿아야 확인된 선)." },
   channel: { name: "추세 채널", desc: "추세선과, 그 반대편 끝에 평행하게 그은 선으로 만든 통로. 천장·바닥에서 막히거나 튕길 거라고 보는 사람이 많지만, 과거 검증에선 무작위로 그은 선과 차이가 없었어요." },
@@ -161,6 +163,26 @@ function autoItems() {
 
 const isVisible = (it) => on(it.layer) && (state.vis[it.id] ?? it.defaultVisible);
 
+const FIB_COLOR = "#fab005";
+const FIB_RATIOS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+
+// 최근 bars 봉에서 고점·저점과 그 사이 되돌림 가격. key = 축에 라벨을 붙일 주요 선 (38.2·50·61.8%)
+function fibLevels(cs, bars) {
+  const seg = cs.slice(-bars);
+  if (seg.length < 10) return null;
+  let hi = 0, lo = 0;
+  seg.forEach((c, i) => { if (c.high > seg[hi].high) hi = i; if (c.low < seg[lo].low) lo = i; });
+  const H = seg[hi].high, L = seg[lo].low;
+  if (!(H > L)) return null;
+  const up = lo < hi;                                  // 저점 → 고점 (오른 뒤 되돌림) / 고점 → 저점 (내린 뒤 반등)
+  const levels = FIB_RATIOS.map((r) => ({
+    r, price: up ? H - (H - L) * r : L + (H - L) * r,
+    label: `${(r * 100).toFixed(r === 0.236 || r === 0.382 || r === 0.618 || r === 0.786 ? 1 : 0)}%`,
+    key: r === 0.382 || r === 0.5 || r === 0.618,
+  }));
+  return { up, high: { time: seg[hi].time, price: H }, low: { time: seg[lo].time, price: L }, levels };
+}
+
 function renderLevels() {
   state.priceLines.forEach((l) => candles.removePriceLine(l));
   state.priceLines = [];
@@ -180,6 +202,14 @@ function renderLevels() {
       title: label ? (it.kind === "support" ? "지지" : "저항") : "",
     }));
   }
+  // 피보나치 되돌림: 최근 N봉의 고점·저점 사이. 저점이 먼저면(오른 뒤) 고점에서 아래로, 고점이 먼저면(내린 뒤) 저점에서 위로 잰다
+  const fib = on("fib") ? fibLevels(state.data.candles, state.layers.fib.bars) : null;
+  if (fib) for (const lv of fib.levels) state.priceLines.push(candles.createPriceLine({
+    price: lv.price, color: FIB_COLOR + (lv.key ? "cc" : "66"), lineWidth: lv.key ? 1 : 1,
+    lineStyle: lv.r === 0 || lv.r === 1 ? LW.LineStyle.Solid : LW.LineStyle.Dotted,
+    axisLabelVisible: lv.key, axisLabelColor: FIB_COLOR, axisLabelTextColor: "#111",
+    title: lv.key ? `피보 ${lv.label}` : "",
+  }));
   // 52주(또는 보고 있는 기간) 최고·최저: 회색 점선
   const ex = state.data.extremes;
   if (ex && on("extremes")) for (const [side, word] of [["high", "최고"], ["low", "최저"]]) state.priceLines.push(candles.createPriceLine({
@@ -571,10 +601,11 @@ function layerChips() {
   return Object.keys(LAYERS).filter(on).map((key) => {
     const def = LAYERS[key];
     const inputs = Object.entries(state.layers[key]).map(([k, v]) => {
-      const input = el("input", { type: "number", min: "1", max: "3", value: String(v), title: def.paramLabel?.[k] || k });
+      const [lo, hi] = def.paramRange?.[k] || [1, 3];
+      const input = el("input", { type: "number", min: String(lo), max: String(hi), value: String(v), title: def.paramLabel?.[k] || k });
       input.addEventListener("change", () => {
         const num = Math.round(Number(input.value));
-        if (num >= 1 && num <= 3) { state.layers[key][k] = num; applyLayers(); }
+        if (num >= lo && num <= hi) { state.layers[key][k] = num; applyLayers(); }
       });
       return input;
     });
