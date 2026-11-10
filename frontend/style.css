@@ -666,3 +666,8 @@ button.chip:hover { border-color: var(--accent); color: var(--accent); }
 .ind-chip.fib-chip > * { white-space: nowrap; }
 .ind-chip.fib-chip .fib-under { white-space: normal; }
 .fib-back { font-size: 11px; padding: 1px 7px; border-radius: 6px; background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+
+/* 지켜보는 조건 (알림 탭) */
+.cond-list { list-style: none; margin: 4px 0 10px; padding: 0; }
+.cond-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; line-height: 1.5; }
+.cond-list b { display: inline; margin: 0; font-size: inherit; cursor: pointer; } .cond-list b:hover { color: var(--accent); }

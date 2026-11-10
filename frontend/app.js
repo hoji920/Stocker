@@ -2751,6 +2751,7 @@ async function runAction(a) {
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "실행하지 못했어요");
     a.state = "done";
+    if (a.kind === "alert_zone" || a.kind === "alert_rsi") loadConditions();
     // 바뀐 것을 화면에 반영: 관심종목 / 지금 보는 종목의 선 / 내 규칙 카드
     if (a.kind !== "rules_update") {
       state.watchlist = (await (await fetch("/api/watchlist")).json()).symbols;
@@ -2936,7 +2937,26 @@ function onAlert(ev) {
   $("#alerts").prepend(alertItem(ev));
   if (state.tab !== "alerts" || $("#app").classList.contains("collapsed")) $("#alert-badge").hidden = false;
   toast(ev);
+  if (ev.kind === "condition") loadConditions();          // 꺾임·돌파가 나면 그 조건은 끝 → 목록에서 빠진다
   if (ev.symbol === state.data?.symbol) $("#chart").animate([{ outline: "2px solid var(--resistance)" }, { outline: "none" }], 1500);
+}
+
+// 지켜보는 조건 (질문 탭에서 '그때 알려줘'로 만든 것): 구간 도착·꺾임·돌파, RSI 위로·꺾임
+async function loadConditions() {
+  const res = await fetch("/api/conditions").catch(() => null);
+  if (!res?.ok) return;
+  const { active } = await res.json();
+  const box = $("#cond-box");
+  if (!active.length) return box.replaceChildren();
+  box.replaceChildren(el("div", { class: "brief-sub" }, `지켜보는 조건 ${active.length}개`),
+    el("ul", { class: "cond-list" }, ...active.map((c) => {
+      const x = el("button", { class: "ghost small", title: "이 조건 알림 지우기" }, "지우기");
+      x.addEventListener("click", async () => { await fetch(`/api/conditions/${c.id}`, { method: "DELETE" }); loadConditions(); });
+      const seen = c.state?.reached ? " · 구간 도착함" : c.state?.peak != null ? ` · RSI 최고 ${c.state.peak}` : "";
+      const name = el("b", {}, `${c.name} (${c.symbol})`);
+      name.addEventListener("click", () => load(c.symbol));
+      return el("li", {}, el("div", {}, name, el("span", { class: "muted" }, ` ${c.text}${seen} · ${c.created}부터`)), x);
+    })));
 }
 
 async function initAlerts() {
@@ -2950,6 +2970,7 @@ async function initAlerts() {
   const items = (await (await fetch("/api/alerts?limit=30")).json()).items;
   $("#alerts").replaceChildren(...(items.length ? items.map(alertItem) : [el("li", { class: "muted" }, "아직 알림이 없어요")]));
 
+  loadConditions();
   const es = new EventSource("/api/alerts/stream");
   es.onmessage = (m) => onAlert(JSON.parse(m.data));
 

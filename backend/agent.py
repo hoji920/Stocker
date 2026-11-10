@@ -71,6 +71,19 @@ _SYSTEM = (
     "목표가는 도구에 있는 값(내 규칙의 목표, 애널리스트 목표가)만 쓰고 네가 만들지 않는다. "
     "사용자가 정하지 않은 매매 요령('저항을 못 넘고 되밀리면 판다' 같은 것)을 네가 덧붙이지 않는다.\n"
     "3-1) 추세를 물으면 read_chart 결과의 추세선·채널·insights 에 있는 사실만 전한다 (어느 선 위/아래인지, 채널의 어디쯤인지).\n"
+    "3-2) '기술적 반등이야?', '바닥이야?', '데드캣이야?', '상승 전환인지 어떻게 구별해?'처럼 반등의 성격을 물으면 technical_check 를 부른다 "
+    "(종합 검토·record_view 는 하지 않는다). 답은 이 순서로, 숫자는 도구 값 그대로:\n"
+    "   봉 크기는 candle.long_body 가 true 일 때만 '장대'라고 쓰고, 아니면 몸통은 '보통 크기'로 말한다 (등락률이 커도 갭이면 몸통은 작을 수 있다).\n"
+    "   **반등으로 볼 근거** (오늘 봉 크기·아래꼬리, 다시 넘은 되돌림 선, RSI 과매도 탈출 등 — 있는 것만) / "
+    "**아직 아닐 수 있는 이유** (거래량이 최근 하락일보다 적음, 강세 다이버전스 없음, RSI 30 근처, 바로 위 시험대 등) / "
+    "**구별하는 법**: 상승 전환 쪽 조건(시험대 구간을 종가로 뚫고 버팀·거래량 동반, 최근 저점보다 높은 데서 다시 반등 = 저점 높아짐, RSI 50 위 안착)과 "
+    "데드캣 쪽 조건(시험대 구간에서 막히고 밀림, RSI 가 50 근처에서 꺾임, 최근 저점 이탈)을 구체적 가격·값으로 / "
+    "보유 중이면 **내 포지션** 한 줄 (평단 대비 위치와 시험대까지 거리만, 팔라·사라 말 없이).\n"
+    "   레버리지·인버스 ETF 면 선·되돌림·시험대는 underlying(기초자산) 숫자로 말하고, ETF 가격은 참고로만 붙인다. "
+    "답 끝에 한 줄: '이 조건들에 알림을 걸 수 있어요 (예: \"그때 알려줘\")'. 이건 8)의 '원하시면' 금지의 예외다.\n"
+    "   사용자가 '그때 알려줘', '알림 걸어줘'라고 하면 직전 답의 조건으로 propose_action 을 부른다: 시험대 구간은 alert_zone(changes={low, high}), "
+    "RSI 기준은 alert_rsi(changes={level}). 둘 다 말했으면 두 번 부른다. 레버리지 ETF 인데 조건이 기초자산 가격이면 기초자산이 아니라 "
+    "사용자가 보는 종목의 RSI·가격으로 걸 수 있는 것만 걸고, 기초자산 가격 구간은 '그 종목 차트에서 걸어야 해요'라고 말한다.\n"
     "4) 규칙 결과를 전할 때는 한 번, 짧게: 이 앱의 백테스트에서 자동 지지/저항·채널은 무작위 선보다 잘 지켜지지 않았다는 점을 덧붙인다. "
     "그래서 종합 의견에서 선(지지·저항)은 근거로 가볍게만 쓰고, 뉴스·실적·가치·시장을 더 무겁게 본다.\n"
     "5) 왜 움직였는지 물으면 why_moved, 뉴스는 get_news, 시장 전체는 market_brief 를 쓴다. 근거 기사가 있으면 언론사 이름을 붙인다.\n"
@@ -121,11 +134,13 @@ TOOLS = [
       "required": ["symbol"]}),
     ("propose_action", "사용자 대신 할 일을 제안한다 (실행은 사용자가 확인 버튼을 눌러야 된다). "
                        "watch_add/watch_remove=관심종목 추가/빼기(symbol), alert_line=그 가격에 수평선을 긋고 닿으면 알림(symbol, price), "
+                       "alert_zone=가격 구간 알림: 도착·꺾임(종가가 구간 아래로)·돌파(종가가 구간 위로) (symbol, changes={low, high}), "
+                       "alert_rsi=일봉 RSI 알림: 기준 위로 넘음·그 근처에서 꺾임 (symbol, changes={level}, 보통 50), "
                        "rules_update=내 규칙 숫자 바꾸기(changes).",
      {"type": "object", "properties": {
-         "kind": {"type": "string", "enum": ["watch_add", "watch_remove", "alert_line", "rules_update"]},
+         "kind": {"type": "string", "enum": ["watch_add", "watch_remove", "alert_line", "alert_zone", "alert_rsi", "rules_update"]},
          "symbol": {"type": "string"}, "price": {"type": "number"},
-         "changes": {"type": "object", "description": "바꿀 값만. 키: buy_support_atr(지지 근처 ATR 배수), buy_channel_pct(채널 하단 %), "
+         "changes": {"type": "object", "description": "alert_zone 이면 {low, high}, alert_rsi 면 {level}. rules_update 면 바꿀 값만. 키: buy_support_atr(지지 근처 ATR 배수), buy_channel_pct(채널 하단 %), "
                                                      "target_near_atr(목표 근처 ATR 배수), stop_atr(손절 ATR 배수), min_rr(최소 손익비), "
                                                      "min_risk_atr(손익비를 셀 때 위험의 최소 ATR 배수)"}},
       "required": ["kind"]}),
@@ -134,6 +149,10 @@ TOOLS = [
     ("price_check", "사용자가 말한 특정 가격을 차트에서 본다: 현재가에서 몇 %·ATR 몇 배, 그 가격 근처에서 방향이 바뀐 날(고점·저점)과 "
                     "그 뒤 10봉 동안 움직임, 최근 1년 그 가격 위에서 마감한 날 수, 근처 자동 지지/저항선, 보유 중이면 그 가격에 팔 때 평단 대비 수익.",
      {"type": "object", "properties": {"symbol": {"type": "string"}, "price": {"type": "number"}}, "required": ["symbol", "price"]}),
+    ("technical_check", "반등·바닥 체크 (끝난 일봉 기준, 숫자는 코드 계산): 오늘 봉(등락·몸통이 ATR 몇 배·아래꼬리), RSI(지금·최근 10개·"
+                        "과매도 탈출·강세 다이버전스), 거래량(오늘 vs 최근 하락일 평균·20일 평균), 20·50·200일선, 피보나치 되돌림(상승분 기준 위치·"
+                        "오늘 다시 넘은 선), 위쪽 다음 시험대(저항선·이평선·피보나치가 3% 안에 몰린 구간), 아래 지킬 자리, 최근 20일 저점, "
+                        "보유 중이면 평단. 레버리지·인버스 ETF 면 기초자산 기준 숫자도.", _sym),
     ("options_move", "옵션이 예상하는 움직임: 가까운 만기들의 등가격 스트래들로 본 '만기까지 ±몇 %'와 범위, 내재변동성, 풋/콜 비율, "
                      "다음 실적 직후 만기의 예상 움직임.", _sym),
     ("my_thesis", "사용자가 이 종목에 적어 둔 투자 논리(왜 샀나, 기둥, 틀렸다고 볼 조건, 기다리는 이벤트)와 마지막 점검 결과.", _sym),
@@ -149,7 +168,7 @@ TOOLS = [
 LABELS = {"check_my_rules": "내 규칙 대조", "read_chart": "차트 읽기", "get_news": "뉴스", "why_moved": "움직인 이유",
           "market_brief": "시장 요약", "my_portfolio": "내 계좌", "find_symbol": "종목 찾기", "scan_my_rules": "전체 규칙 대조",
           "backtest_my_rules": "과거 대조", "propose_action": "할 일 제안", "fundamentals": "펀더멘탈", "record_view": "판단 기록",
-          "price_check": "그 가격 보기", "options_move": "옵션 예상 움직임", "my_thesis": "내 투자 논리"}
+          "price_check": "그 가격 보기", "technical_check": "반등·바닥 체크", "options_move": "옵션 예상 움직임", "my_thesis": "내 투자 논리"}
 
 
 def chat(settings: Settings, tools: dict, messages: list[dict], symbol: str | None, rules_note: str = "", about: str = "") -> dict:

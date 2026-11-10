@@ -131,7 +131,7 @@ class Store:
 
 class Monitor:
     def __init__(self, settings: Settings, store: Store, load_levels, fetch_prices, formatter, load_signals=None,
-                 check_move=None):
+                 check_move=None, check_conditions=None):
         """load_levels(symbol) -> (name, currency, levels) / fetch_prices(symbols) -> {symbol: price}
         load_signals(symbol) -> [알림 이벤트] : 가장 최근 확정 봉에서 새로 난 차트 신호 (key 포함)."""
         self.settings = settings
@@ -139,6 +139,7 @@ class Monitor:
         self.load_levels = load_levels
         self.load_signals = load_signals
         self.check_move = check_move      # check_move(symbol, price) -> [급등락 알림] (이유 찾기 포함, 느릴 수 있음)
+        self.check_conditions = check_conditions   # check_conditions() -> [조건 알림] (챗봇에서 만든 '그때 알려줘', 관심종목과 상관없이)
         self.fetch_prices = fetch_prices
         self.formatter = formatter
         self.last_price: dict[str, float] = {}
@@ -169,14 +170,20 @@ class Monitor:
 
     async def tick(self) -> list[dict]:
         symbols = self.store.watchlist()
-        if not symbols:
-            return []
         if date.today() != self.fired_day:
             self.fired.clear()
             self.fired_day = date.today()
-
-        prices = await asyncio.to_thread(self.fetch_prices, symbols)
         new_events = []
+        if self.check_conditions:
+            try:
+                for ev in await asyncio.to_thread(self.check_conditions):
+                    if ev["key"] in self.fired or self.store.alerted(ev["key"]):
+                        continue
+                    self.fired.add(ev["key"])
+                    new_events.append(ev)
+            except Exception as error:
+                print(f"[alerts] 조건 알림 확인 실패: {error}")
+        prices = await asyncio.to_thread(self.fetch_prices, symbols) if symbols else {}
         for symbol in symbols:
             # 확정 차트 신호: key 에 봉 날짜가 들어 있어서, 재시작해도 알림 기록에 있으면 다시 안 보낸다
             if self.load_signals:
