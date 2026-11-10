@@ -1945,8 +1945,10 @@ async function loadChart(symbol) {
   $("#watch-toggle").hidden = $("#why-row").hidden = $("#live-dot").hidden = !!d.macro;
   ["#draw-trend", "#draw-hline", "#draw-channel", "#fib-draw"].forEach((id) => ($(id).disabled = !isDaily()));
   // autoSize 가 첫 레이아웃 후에 폭을 잡기 때문에 한 프레임 뒤에 범위를 지정해야 안 찌그러진다
+  // 처음 보여줄 봉 수: 분봉은 적게 (일봉처럼 150개를 넣으면 너무 촘촘하다)
+  const show = { "1m": 120, "3m": 100, "5m": 90, "15m": 90, "30m": 90, "60m": 90, "240m": 80 }[d.interval] || 150;
   requestAnimationFrame(() => setTimeout(() =>
-    chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 12 }), 50));   // 오른쪽에 늘린 선이 조금 보이게
+    chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - show, to: d.candles.length + 12 }), 50));   // 오른쪽에 늘린 선이 조금 보이게
   if (d.interval !== "1y" && !d.demo) loadOlder(d);           // 년봉은 처음부터 상장 이후 전부
 }
 
