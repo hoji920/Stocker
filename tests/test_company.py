@@ -34,3 +34,27 @@ def test_money_uses_the_currency_yahoo_reports(monkeypatch):
     company._fund.pop("TEST.KS", None)
     f = company.fundamentals("TEST.KS")
     assert f["market_cap"] == "81.69조 원" and f["balance"]["total_cash"] == "87.90조 원" and "market_cap_usd" not in f
+
+
+def test_fib_levels_measure_the_up_move_down_from_the_high_or_the_down_move_up_from_the_low():
+    from backend import analysis
+    # 100 → 200 (오름) → 140 (조정): 상승분 되돌림 60% / 하락분 회복은 '200 뒤 최저 140, 그 전 최고 200' 기준 0%
+    path = [100 + i * 5 for i in range(21)] + [200 - i * 6 for i in range(1, 11)]
+    cs = [{"time": f"d{i:03d}", "open": p, "high": p, "low": p, "close": p} for i, p in enumerate(path)]
+    up = analysis.fib_levels(cs, 120, "up")
+    assert (up["mode"], up["high"]["price"], up["low"]["price"], up["now_pct"]) == ("up", 200, 100, 60.0)
+    assert [round(x["price"], 1) for x in up["levels"]][1:4] == [176.4, 161.8, 150.0]          # 23.6 · 38.2 · 50% 되돌림
+    assert analysis.fib_levels(cs, 120, "auto")["mode"] == "up"                                   # 최저가(처음) → 최고가 순서
+    down = analysis.fib_levels(cs, 120, "down")                                                   # 최저가 100 이 맨 앞이라 그 전 최고도 100
+    assert down is None
+
+
+def test_fib_widens_to_a_bigger_swing_when_the_base_low_is_broken():
+    from backend import analysis
+    # 100 → 150 (큰 상승) → 140 (눌림) → 200 (고점) → 120 (지금): 최근 20봉 기간에선 저점 140 이 이미 깨졌다 → 100 부터 다시
+    path = [100 + i * 5 for i in range(11)] + [150 - i for i in range(11)] + [140 + i * 6 for i in range(11)] + [200 - i * 8 for i in range(1, 11)]
+    cs = [{"time": f"d{i:03d}", "open": p, "high": p, "low": p, "close": p} for i, p in enumerate(path)]
+    f = analysis.fib_levels(cs, 20, "up")
+    assert f["extended"] and (f["low"]["price"], f["high"]["price"]) == (100, 200) and f["now_pct"] == 80.0
+    g = analysis.fib_levels(cs, 60, "up")                                                       # 처음부터 넉넉한 기간이면 넓힐 필요 없음
+    assert not g["extended"] and g["now_pct"] == 80.0

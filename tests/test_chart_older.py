@@ -56,3 +56,13 @@ def test_long_days_reuses_a_longer_download(monkeypatch):
     monkeypatch.setitem(main._cache, f"days:TEST:{main.bars.DAILY['1y']}", (main.time.time(), _days(5)))
     monkeypatch.setattr(main, "toss", lambda: (_ for _ in ()).throw(AssertionError("다시 받으면 안 된다")))
     assert len(main.long_days("TEST", main.bars.DAILY["1w"])) == 5
+
+
+def test_four_hour_bars_group_by_korean_time():
+    from backend import bars
+    assert bars.MINUTE["240m"][0] == 240 and "240m" in bars.INTERVALS and "240m" in bars.MINUTE_LONG
+    t0 = 1761696000 - bars.KST_SHIFT              # 한국 시간 00:00 인 순간 (UTC 기준 유닉스 초)
+    ones = [{"time": t0 + 60 * k, "open": k, "high": k + 1, "low": k - 1, "close": k, "volume": 1.0} for k in range(0, 600, 30)]
+    out = bars.aggregate_minutes(ones, 240)
+    assert [b["time"] - out[0]["time"] for b in out] == [0, 4 * 3600, 8 * 3600]      # 00:00 · 04:00 · 08:00 (한국 시간)
+    assert out[0]["open"] == 0 and out[0]["close"] == 210 and out[0]["volume"] == 8

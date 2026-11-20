@@ -8,6 +8,8 @@ const $ = (sel) => document.querySelector(sel);
 const LAYERS = {
   levels: { name: "지지/저항선", params: { count: 1 }, paramLabel: { count: "위아래 개수" },
     desc: "과거에 여러 번 방향이 바뀐 가격대. 현재가 아래에 있으면 지지, 위에 있으면 저항이에요 (막혔던 가격을 뚫고 올라오면 지지로 바뀌어요). 가장 가까운 선만 진하게 보여요." },
+  fib: { name: "피보나치 되돌림", button: true, params: { bars: 120, mode: "auto" }, paramLabel: { bars: "최근 몇 봉에서 고점·저점" }, paramRange: { bars: [20, 500] },
+    desc: "최근 N봉의 가장 높은 가격과 가장 낮은 가격 사이를 23.6·38.2·50·61.8·78.6%로 나눈 선. 오르다 쉬면 위에서부터, 내리다 반등하면 아래에서부터 재요. 많은 사람이 38.2·50·61.8% 근처에서 멈추거나 되돌아온다고 보는데, 우리 검증(미국 30 + 국내 10종목, 8년)에선 피보나치 지지가 무작위 선보다 잘 지켜지지 않았어요 (57.7% vs 57.1%, 차이 없음)." },
   extremes: { name: "52주 최고·최저", desc: "최근 1년(일봉이 아니면 보고 있는 기간) 중 가장 높았던 가격과 가장 낮았던 가격. 지지/저항선이 안 잡히는 신고가 근처에서도 기준이 돼요." },
   trend: { name: "자동 추세선", desc: "저점끼리 이은 상승 추세선, 고점끼리 이은 하락 추세선. 비스듬한 지지/저항이에요. 두 점만 이은 선은 '임시'로 표시해요 (세 번째로 닿아야 확인된 선)." },
   channel: { name: "추세 채널", desc: "추세선과, 그 반대편 끝에 평행하게 그은 선으로 만든 통로. 천장·바닥에서 막히거나 튕길 거라고 보는 사람이 많지만, 과거 검증에선 무작위로 그은 선과 차이가 없었어요." },
@@ -72,6 +74,36 @@ const baseOptions = () => ({
 });
 
 const chart = LW.createChart($("#chart"), baseOptions());
+
+// 차트 높이: 아래 막대를 끌어서 바꾼다 (브라우저에 기억, 두 번 누르면 기본). 차트는 autoSize 라 칸 높이만 바꾸면 된다
+const CHART_H = { min: 300, max: 1400 };
+function setChartHeight(h, save = true) {
+  if (h == null) { document.documentElement.style.removeProperty("--chart-h"); if (save) store.save("stocking.chartH", null); return; }
+  const v = Math.round(Math.max(CHART_H.min, Math.min(CHART_H.max, h)));
+  document.documentElement.style.setProperty("--chart-h", `${v}px`);
+  if (save) store.save("stocking.chartH", v);
+}
+setChartHeight(store.load("stocking.chartH", null), false);
+(() => {
+  const bar = $("#chart-resize");
+  let startY = 0, startH = 0;
+  const move = (e) => setChartHeight(startH + (e.clientY - startY), false);
+  const up = () => {
+    bar.classList.remove("dragging");
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", up);
+    store.save("stocking.chartH", $("#chart").getBoundingClientRect().height);
+  };
+  bar.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    startY = e.clientY;
+    startH = $("#chart").getBoundingClientRect().height;
+    bar.classList.add("dragging");
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+  });
+  bar.addEventListener("dblclick", () => setChartHeight(null));
+})();
 const candles = chart.addCandlestickSeries({
   upColor: css("--up"), downColor: css("--down"), borderVisible: false,
   wickUpColor: css("--up"), wickDownColor: css("--down"),
@@ -80,8 +112,9 @@ const candles = chart.addCandlestickSeries({
   priceLineWidth: 2, priceLineStyle: LW.LineStyle.LargeDashed,
 });
 const volume = chart.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
-chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-candles.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.22 } });
+// 거래량은 아래 16%, 가격은 그 위로 띄워 둔다 (가장 낮은 선 — 볼린저 하단 등 — 이 거래량 막대에 묻히지 않게)
+chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
+candles.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.26 } });
 chart.timeScale().subscribeVisibleLogicalRangeChange((r) => r && state.panes.forEach((p) => p.chart.timeScale().setVisibleLogicalRange(r)));
 window.__app = { chart, state };   // 콘솔 디버깅용
 
@@ -160,6 +193,81 @@ function autoItems() {
 
 const isVisible = (it) => on(it.layer) && (state.vis[it.id] ?? it.defaultVisible);
 
+const FIB_COLOR = "#fab005";
+const FIB_RATIOS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+
+// 최근 bars 봉에서 고점·저점과 그 사이 되돌림 가격. key = 축에 라벨을 붙일 주요 선 (38.2·50·61.8%)
+// mode: up = 상승분 되돌림 (최고가와 그 전 최저가, 고점에서 아래로) / down = 하락분 회복 (최저가와 그 전 최고가, 저점에서 위로)
+//       auto = 최고가·최저가 중 나중에 나온 쪽으로. 서버 analysis.fib_levels 와 같은 규칙
+const FIB_MODES = { auto: "자동", up: "상승분 되돌림", down: "하락분 회복" };
+function fibLevels(cs, bars, mode = "auto") {
+  const n = cs.length;
+  if (n < 10) return null;
+  let start = Math.max(0, n - bars), hi = start, lo = start;
+  for (let i = start; i < n; i++) { if (cs[i].high > cs[hi].high) hi = i; if (cs[i].low < cs[lo].low) lo = i; }
+  if (mode === "auto") mode = lo < hi ? "up" : "down";
+  const last = cs[n - 1].close;
+  const minLow = (a, b) => { let k = a; for (let i = a; i <= b; i++) if (cs[i].low < cs[k].low) k = i; return k; };
+  const maxHigh = (a, b) => { let k = a; for (let i = a; i <= b; i++) if (cs[i].high > cs[k].high) k = i; return k; };
+  // 기준 저점(고점)이 이미 깨졌으면(되돌림 100% 넘음) 그 파동은 의미가 없다 → 20봉씩 앞으로 넓혀 더 큰 파동으로
+  let extended = false;
+  // 넓힐 땐 현재가 아래 저점을 찾은 뒤에도, 20봉 더 넓혀 더 낮은 저점이 안 나올 때까지 간다 (그 상승이 시작된 바닥까지)
+  if (mode === "up") {
+    lo = minLow(start, hi);
+    while (cs[lo].low > last && start > 0) { start = Math.max(0, start - 20); lo = minLow(start, hi); extended = true; }
+    while (extended && start > 0 && cs[minLow(Math.max(0, start - 20), hi)].low < cs[lo].low) { start = Math.max(0, start - 20); lo = minLow(start, hi); }
+  } else {
+    hi = maxHigh(start, lo);
+    while (cs[hi].high < last && start > 0) { start = Math.max(0, start - 20); hi = maxHigh(start, lo); extended = true; }
+    while (extended && start > 0 && cs[maxHigh(Math.max(0, start - 20), lo)].high > cs[hi].high) { start = Math.max(0, start - 20); hi = maxHigh(start, lo); }
+  }
+  return fibFrom({ time: cs[lo].time, price: cs[lo].low }, { time: cs[hi].time, price: cs[hi].high }, mode === "up", last, extended);
+}
+
+// 저점·고점 두 점으로 되돌림 선. up = 저점이 먼저(오른 뒤 되돌림, 고점에서 아래로) / 아니면 저점에서 위로
+function fibFrom(low, high, up, last, extended = false) {
+  const H = high.price, L = low.price;
+  if (!(H > L) || low.time === high.time) return null;    // 그 방향 파동이 없다 (최저가가 기간 맨 앞 등)
+  const levels = FIB_RATIOS.map((r) => ({
+    r, price: up ? H - (H - L) * r : L + (H - L) * r,
+    label: `${(r * 100).toFixed(r === 0.236 || r === 0.382 || r === 0.618 || r === 0.786 ? 1 : 0)}%`,
+    key: r === 0.382 || r === 0.5 || r === 0.618,
+  }));
+  const nowPct = ((up ? H - last : last - L) / (H - L)) * 100;
+  return { up, mode: up ? "up" : "down", nowPct, extended, high, low, levels };
+}
+
+// 직접 그린 피보나치 (종목마다 브라우저에 기억, 일봉 날짜 기준): { 종목: { a: {time, price}, b: {time, price} } }
+const fibManualAll = () => store.load("stocking.fibManual", {});
+const fibManualOf = (symbol) => fibManualAll()[symbol] || null;
+function setFibManual(symbol, pts) {
+  const all = fibManualAll();
+  if (pts) all[symbol] = pts; else delete all[symbol];
+  store.save("stocking.fibManual", all);
+}
+// 지금 그릴 피보나치: 직접 그린 게 있으면(일봉) 그것, 아니면 자동
+function currentFib() {
+  const d = state.data;
+  if (!d || !on("fib")) return null;
+  const m = isDaily() && fibManualOf(d.symbol);
+  if (m) {
+    const [low, high] = m.a.price < m.b.price ? [m.a, m.b] : [m.b, m.a];
+    return { ...fibFrom(low, high, low.time < high.time, d.candles.at(-1).close), manual: true };
+  }
+  return fibLevels(d.candles, state.layers.fib.bars, state.layers.fib.mode);
+}
+
+// 지금 위치를 말로: '상승분의 98% 되돌림 (78.6% 아래)' — 어느 두 선 사이인지까지
+function fibWhere(f) {
+  const p = f.nowPct ?? f.now_pct;
+  const word = (f.up ?? f.mode === "up") ? "상승분의" : "하락분의";
+  const verb = (f.up ?? f.mode === "up") ? "되돌림" : "회복";
+  const marks = [0, 23.6, 38.2, 50, 61.8, 78.6, 100];
+  const below = marks.filter((m) => m <= p).at(-1), above = marks.find((m) => m > p);
+  const band = p < 0 ? "0% 밖" : above == null ? "100% 넘음" : `${below}~${above}% 사이`;
+  return `${word} ${p.toFixed(0)}% ${verb} (${band})`;
+}
+
 function renderLevels() {
   state.priceLines.forEach((l) => candles.removePriceLine(l));
   state.priceLines = [];
@@ -177,6 +285,19 @@ function renderLevels() {
       axisLabelColor: kindColor(it.kind),          // 가격 라벨은 진하게 그대로
       axisLabelTextColor: "#111",
       title: label ? (it.kind === "support" ? "지지" : "저항") : "",
+    }));
+  }
+  // 피보나치 되돌림: 최근 N봉의 고점·저점 사이. 저점이 먼저면(오른 뒤) 고점에서 아래로, 고점이 먼저면(내린 뒤) 저점에서 위로 잰다
+  const fib = currentFib();
+  // 라벨: 주요 선(38.2·50·61.8%)과 구간의 시작·끝(0%·100% = 그 파동의 저점·고점). 시작선이 다른 선에 묻혀 헷갈리지 않게
+  if (fib?.levels) for (const lv of fib.levels) {
+    const edge = lv.r === 0 || lv.r === 1;
+    const edgeWord = edge ? ((lv.r === 0) === fib.up ? "고점" : "저점") : "";   // 상승분 되돌림은 0% = 고점, 하락분 회복은 0% = 저점
+    state.priceLines.push(candles.createPriceLine({
+      price: lv.price, color: FIB_COLOR + (lv.key || edge ? "cc" : "66"), lineWidth: 1,
+      lineStyle: edge ? LW.LineStyle.Solid : LW.LineStyle.Dotted,
+      axisLabelVisible: lv.key || edge, axisLabelColor: FIB_COLOR, axisLabelTextColor: "#111",
+      title: lv.key ? `피보 ${lv.label}` : edge ? `피보 ${lv.label} ${edgeWord}` : "",
     }));
   }
   // 52주(또는 보고 있는 기간) 최고·최저: 회색 점선
@@ -510,14 +631,16 @@ function renderIndicators() {
     }
     for (const [li, ln] of out.lines.entries()) {
       // 사용자가 고른 색(ind.color)이 있으면 첫 줄에, 볼린저밴드처럼 같은 계열 선들(상단·중심·하단)엔 전부
-      const auto = pickColor();
+      // 볼린저밴드는 세 줄(상단·중심·하단)을 한 색으로: 하단이 다른 선들 사이에서 '띠'로 읽히게
+      const auto = ind.key === "bb" ? (li === 0 ? pickColor() : ind.colors[0]) : pickColor();
       const color = ind.color && (li === 0 || ind.key === "bb") ? ind.color : auto;
       ind.colors.push(color);
       // 차트 위 지표는 가격축 라벨 대신 범례로 (가격축이 복잡해지지 않게)
       const common = { priceLineVisible: false, lastValueVisible: def.type === "pane", title: "" };
       const s = ln.type === "histogram"
         ? target.addHistogramSeries({ ...common })
-        : target.addLineSeries({ ...common, color, lineWidth: 2, lineStyle: ln.dashed ? LW.LineStyle.Dashed : LW.LineStyle.Solid, crosshairMarkerVisible: false });
+        : target.addLineSeries({ ...common, color, lineWidth: ind.key === "bb" && !ln.dashed ? 1.5 : 2,
+            lineStyle: ln.dashed ? LW.LineStyle.Dashed : LW.LineStyle.Solid, crosshairMarkerVisible: false });
       const pts = toPoints(ln.data);
       if (ln.type === "histogram") pts.forEach((p) => p.value != null && (p.color = (p.value >= 0 ? css("--up") : css("--down")) + "99"));
       s.setData(pts);
@@ -548,6 +671,8 @@ function labelOf(ind) {
 // 레이어 하나 켜고/끄고 → 해당 그림만 다시
 function applyLayers() {
   saveLayers();
+  $("#fib-toggle")?.classList.toggle("on", on("fib"));
+  if (on("fib") && state.data) loadFibUnderlying();
   volume.applyOptions({ visible: on("volume") });
   renderLevels();
   renderTrendlines();
@@ -567,18 +692,77 @@ function toggleLayer(key) {
 function layerChips() {
   return Object.keys(LAYERS).filter(on).map((key) => {
     const def = LAYERS[key];
-    const inputs = Object.entries(state.layers[key]).map(([k, v]) => {
-      const input = el("input", { type: "number", min: "1", max: "3", value: String(v), title: def.paramLabel?.[k] || k });
+    const inputs = Object.entries(state.layers[key]).filter(([, v]) => typeof v === "number").map(([k, v]) => {
+      const [lo, hi] = def.paramRange?.[k] || [1, 3];
+      const input = el("input", { type: "number", min: String(lo), max: String(hi), value: String(v), title: def.paramLabel?.[k] || k });
       input.addEventListener("change", () => {
         const num = Math.round(Number(input.value));
-        if (num >= 1 && num <= 3) { state.layers[key][k] = num; applyLayers(); }
+        if (num >= lo && num <= hi) { state.layers[key][k] = num; applyLayers(); }
       });
       return input;
     });
     const x = el("span", { class: "x", title: "빼기" }, "×");
     x.addEventListener("click", () => toggleLayer(key));
-    return el("span", { class: "ind-chip layer", title: def.desc }, def.name, ...inputs, x);
+    if (key === "fib") inputs.push(...fibChipParts());
+    return el("span", { class: `ind-chip layer${key === "fib" ? " fib-chip" : ""}`, title: def.desc }, def.name, ...inputs, x);
   });
+}
+
+// 피보나치 칩: [자동 · 상승분 되돌림 · 하락분 회복] + 지금 위치. 레버리지·인버스 ETF 면 기초자산 기준 위치도 (일봉만)
+function fibChipParts() {
+  const mode = state.layers.fib.mode || "auto";
+  // 일봉은 'YYYY-MM-DD', 분봉은 한국 시간으로 옮긴 유닉스 초
+  const day = (t) => typeof t === "number"
+    ? (({ M, D, h, m }) => `${M}/${D} ${h}:${m}`)((() => { const x = new Date(t * 1000); return { M: x.getUTCMonth() + 1, D: x.getUTCDate(), h: String(x.getUTCHours()).padStart(2, "0"), m: String(x.getUTCMinutes()).padStart(2, "0") }; })())
+    : `${+String(t).slice(5, 7)}/${+String(t).slice(8, 10)}`;
+  const span = (f) => f.up ? `${day(f.low.time)} ${fmt(f.low.price)} → ${day(f.high.time)} ${fmt(f.high.price)}`
+    : `${day(f.high.time)} ${fmt(f.high.price)} → ${day(f.low.time)} ${fmt(f.low.price)}`;
+  const cur = currentFib();
+  if (cur?.manual) {                                    // 직접 그린 구간: 방향·기간 칸 대신 구간과 '자동으로'
+    const back = el("button", { class: "fib-back" }, "자동으로");
+    back.addEventListener("click", (e) => { e.stopPropagation(); setFibManual(state.data.symbol, null); applyLayers(); });
+    return [el("span", { class: "fib-now" }, `직접 그린 구간 ${span(cur)} · 지금 ${fibWhere(cur)}`), back];
+  }
+  const seg = el("span", { class: "fib-mode" }, ...Object.entries(FIB_MODES).map(([k, label]) => {
+    const b = el("button", { class: k === mode ? "on" : "" }, label);
+    b.addEventListener("click", (e) => { e.stopPropagation(); state.layers.fib.mode = k; applyLayers(); });
+    return b;
+  }));
+  const parts = [seg];
+  const f = cur;
+  parts.push(el("span", { class: "fib-now" }, f ? `${span(f)} · 지금 ${fibWhere(f)}`
+    : state.data ? `이 기간엔 ${FIB_MODES[mode]} 파동이 없어요 (기간을 늘려 보세요)` : ""));
+  if (f?.extended) parts.push(el("span", { class: "fib-now", title: "되돌림이 100%를 넘으면(기준 저점·고점이 깨지면) 그 파동은 의미가 없어서, 기간을 앞으로 넓혀 더 큰 파동으로 다시 잡았어요." },
+    "· 기준이 깨져서 더 큰 파동으로 다시 잡았어요"));
+  const u = state.fibUnder;
+  if (u?.key === fibUnderKey() && u.data?.underlying && !u.data.fib) {
+    parts.push(el("span", { class: "fib-now" }, `기초자산 ${u.data.underlying.label}: 이 기간엔 그 방향 파동이 없어요`));
+  }
+  if (u?.key === fibUnderKey() && u.data?.fib) {
+    const ul = u.data.underlying;
+    const link = el("a", { href: "#", class: "fib-under" },
+      `기초자산 ${ul.label} 기준: ${fibWhere(u.data.fib)}${ul.inverse ? " · 인버스라 반대로 움직여요" : ""}`);
+    link.title = `${ul.label}(${ul.symbol})으로 같은 기간·같은 방향의 피보나치를 그렸을 때 지금 위치. `
+      + `${ul.leverage}배 ETF 는 매일 재조정 때문에 기초자산보다 더 많이 반납해서, 되돌림 비율은 기초자산으로 보는 게 맞아요. 누르면 기초자산 차트로.`;
+    link.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); load(ul.symbol); });
+    parts.push(link);
+  }
+  return parts;
+}
+
+const fibUnderKey = () => state.data && on("fib") && !(isDaily() && fibManualOf(state.data.symbol))
+  ? `${state.data.symbol}:${state.layers.fib.bars}:${state.layers.fib.mode || "auto"}` : null;
+
+// 레버리지·인버스 ETF 의 기초자산 피보나치 위치 (일봉에서만, 같은 조건이면 다시 안 받는다)
+async function loadFibUnderlying() {
+  const key = fibUnderKey();
+  if (!key || !isDaily() || state.data.macro || state.data.market !== "US") return;
+  if (state.fibUnder?.key === key) return;
+  state.fibUnder = { key, data: null };
+  const res = await fetch(`/api/fib_underlying/${encodeURIComponent(state.data.symbol)}?bars=${state.layers.fib.bars}&mode=${state.layers.fib.mode || "auto"}`).catch(() => null);
+  if (state.fibUnder?.key !== key) return;
+  state.fibUnder.data = res?.ok ? await res.json() : null;
+  renderIndicatorChips();
 }
 
 function renderIndicatorChips() {
@@ -620,7 +804,7 @@ function renderIndicatorChips() {
 
 function buildIndicatorMenu() {
   const menu = $("#ind-menu");
-  const layerItems = Object.entries(LAYERS).map(([key, def]) => {
+  const layerItems = Object.entries(LAYERS).filter(([, def]) => !def.button).map(([key, def]) => {   // 버튼으로 켜는 레이어(피보나치)는 메뉴에 없음
     const item = el("div", { class: `item${on(key) ? " on" : ""}` },
       el("b", {}, def.name), el("span", { class: "kind" }, on(key) ? "켜짐 · 누르면 끔" : "누르면 켬"),
       el("p", {}, def.desc));
@@ -657,7 +841,9 @@ function setDrawMode(mode) {
   $("#draw-trend").classList.toggle("on", state.drawMode === "trend");
   $("#draw-hline").classList.toggle("on", state.drawMode === "hline");
   $("#draw-channel").classList.toggle("on", state.drawMode === "channel");
+  $("#fib-draw")?.classList.toggle("on", state.drawMode === "fib");
   banner({
+    fib: "피보나치: 파동의 시작점과 끝점(저점과 고점)을 차례로 클릭하세요. 꼬리 끝에 달라붙어요. 저점을 먼저 찍든 고점을 먼저 찍든, 날짜가 이른 쪽이 시작이에요. Esc 취소",
     trend: "추세선 시작점을 클릭하세요 (Esc 취소)",
     hline: "선을 그을 가격을 클릭하세요 (Esc 취소)",
     channel: "채널: 기준선이 지날 저점(또는 고점) 두 곳을 차례로 클릭하세요 (1/3). 클릭은 가까운 꼬리 끝에 달라붙어요. Esc 취소",
@@ -727,6 +913,15 @@ $("#chart").addEventListener("click", (e) => {
   if (state.drawMode === "hline") {
     saveDrawings([...state.drawings, { id, type: "horizontal", p1: pt }]);
     return setDrawMode(null);
+  }
+  if (state.drawMode === "fib") {                    // 두 점을 찍으면 그 사이로 (종목마다 브라우저에 기억)
+    if (!state.pending?.length) { state.pending = [pt]; return banner("끝점(반대쪽 고점 또는 저점)을 클릭하세요 (Esc 취소)"); }
+    const a = state.pending[0];
+    if (a.time === pt.time || a.price === pt.price) return;
+    setFibManual(state.data.symbol, { a, b: pt });
+    if (!on("fib")) state.layers.fib = { ...LAYERS.fib.params };
+    setDrawMode(null);
+    return applyLayers();
   }
   const pending = state.pending || [];
   if (pending.length === 0) {
@@ -1511,10 +1706,129 @@ function focusDate(date) {
 // ── 로드 ──
 // 봉 단위. 토스 API 는 1분·일봉만 주고 나머지는 서버가 묶어서 만든다
 const INTERVALS = [
-  ["1m", "1분"], ["3m", "3분"], ["5m", "5분"], ["15m", "15분"], ["30m", "30분"], ["60m", "1시간"],
+  ["1m", "1분"], ["3m", "3분"], ["5m", "5분"], ["15m", "15분"], ["30m", "30분"], ["60m", "1시간"], ["240m", "4시간"],
   ["1d", "일"], ["1w", "주"], ["1M", "월"], ["1y", "년"],
 ];
 state.interval = store.load("stocking.interval", "1d");
+
+// ── 두 번째 차트: 위 차트와 다른 종목을 골라서 (예: 위 QQQ, 아래 나스닥100 선물). 캔들·거래량·옛 봉만 (선·신호·지표는 위 차트에만) ──
+// 켜짐·봉 단위·종목은 브라우저에 기억 (stocking.chart2 = 봉 단위, null 이면 꺼짐 / stocking.chart2.sym = 종목)
+const c2 = { iv: store.load("stocking.chart2", null), sym: store.load("stocking.chart2.sym", "NQ=F"),
+  chart: null, candles: null, volume: null, data: null, seq: 0 };
+function ensureChart2() {
+  if (c2.chart) return;
+  c2.chart = LW.createChart($("#chart2"), baseOptions());
+  c2.candles = c2.chart.addCandlestickSeries({ upColor: css("--up"), downColor: css("--down"), borderVisible: false,
+    wickUpColor: css("--up"), wickDownColor: css("--down"), priceLineWidth: 2, priceLineStyle: LW.LineStyle.LargeDashed });
+  c2.volume = c2.chart.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
+  c2.chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
+  c2.candles.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.26 } });
+}
+function setChart2Bars(d) {
+  c2.candles.setData(d.candles.map((c) => ({ ...c })));
+  c2.volume.setData(d.candles.map((c) => ({ time: c.time, value: c.volume, color: (c.close >= c.open ? css("--up") : css("--down")) + "55" })));
+}
+function renderChart2Bar(shown = c2.data?.interval || c2.iv) {
+  $("#chart2-intervals").replaceChildren(...INTERVALS.map(([iv, label]) => {
+    const b = el("button", { class: `iv${iv === shown ? " on" : ""}${iv === "1d" ? " sep" : ""}` }, label);
+    b.addEventListener("click", () => {
+      if (iv === c2.iv) return;
+      c2.iv = iv;
+      store.save("stocking.chart2", iv);
+      renderChart2Bar(iv);
+      loadChart2();
+    });
+    return b;
+  }));
+}
+// 고르기 목록: 자주 보는 지수·선물 + 보유·관심종목 (치는 중엔 검색 결과로 바꾼다)
+const C2_QUICK = [["NQ=F", "나스닥100 선물"], ["ES=F", "S&P500 선물"], ["^IXIC", "나스닥 종합"], ["^GSPC", "S&P 500"]];
+function fillChart2List(items) {
+  const list = items || [...C2_QUICK, ...state.holdings.map((h) => [h.symbol, h.name || ""]), ...state.watchlist.map((s) => [s, ""])];
+  const seen = new Set();
+  $("#chart2-list").replaceChildren(...list.filter(([s]) => !seen.has(s) && seen.add(s)).map(([s, n]) => el("option", { value: s }, n)));
+}
+async function loadChart2() {
+  $("#chart2-box").hidden = !c2.iv;
+  $("#chart2-toggle").classList.toggle("on", !!c2.iv);
+  if (!c2.iv) return;
+  ensureChart2();
+  const seq = ++c2.seq, iv = c2.iv, symbol = c2.sym;
+  $("#chart2-symbol").value = symbol;
+  $("#chart2-title").textContent = "";
+  const msg = $("#chart2-msg");
+  msg.hidden = false; msg.textContent = "불러오는 중...";
+  if (c2.data && c2.data.symbol !== symbol) { c2.candles.setData([]); c2.volume.setData([]); }   // 다른 종목 받는 동안 옛 종목 봉을 남기지 않는다
+  const res = await fetch(`/api/chart/${encodeURIComponent(symbol)}?interval=${iv}`).catch(() => null);
+  const d = res ? await res.json().catch(() => ({})) : {};
+  if (seq !== c2.seq) return;                       // 받는 사이에 종목·봉을 또 바꿨으면 버린다
+  if (!res?.ok) { msg.textContent = d.detail || "불러오기 실패"; c2.candles.setData([]); c2.volume.setData([]); c2.data = null; return; }
+  msg.hidden = true;
+  c2.data = d;
+  $("#chart2-title").textContent = `${d.name} ${fmtIn(d.candles.at(-1).close, d.currency)}`;
+  renderChart2Bar(d.interval);                      // 야후 지표는 분봉을 골라도 일봉이 온다
+  c2.chart.applyOptions({ timeScale: { timeVisible: d.intraday, secondsVisible: false } });
+  c2.candles.applyOptions({ priceFormat: d.currency === "KRW" ? { type: "price", precision: 0, minMove: 1 } : { type: "price", precision: 2, minMove: 0.01 } });
+  c2.candles.priceScale().applyOptions({ mode: d.log_scale ? LW.PriceScaleMode.Logarithmic : LW.PriceScaleMode.Normal });
+  setChart2Bars(d);
+  const show = { "1m": 120, "3m": 100, "5m": 90, "15m": 90, "30m": 90, "60m": 90, "240m": 80 }[d.interval] || 150;
+  requestAnimationFrame(() => setTimeout(() =>
+    c2.chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - show, to: d.candles.length + 5 }), 50));
+  if (d.interval === "1y" || d.demo || d.macro_minutes) return;
+  // 옛 봉 (위 차트의 loadOlder 와 같은 방식)
+  const r2 = await fetch(`/api/chart/${encodeURIComponent(symbol)}/older?interval=${d.interval}&before=${d.candles[0].time}`).catch(() => null);
+  if (!r2?.ok || seq !== c2.seq) return;
+  const body = await r2.json();
+  const swap = !!body.replace_first;
+  if (!body.candles.length || seq !== c2.seq || (swap && body.candles.length === 1)) return;
+  const r = c2.chart.timeScale().getVisibleLogicalRange();
+  const added = body.candles.length - (swap ? 1 : 0);
+  d.candles = [...body.candles, ...d.candles.slice(swap ? 1 : 0)];
+  setChart2Bars(d);
+  if (r) c2.chart.timeScale().setVisibleLogicalRange({ from: r.from + added, to: r.to + added });
+}
+// 코드를 그대로 쳤으면 그대로, 이름으로 쳤으면 검색해서 첫 결과의 코드로
+async function pickChart2(q) {
+  q = q.trim();
+  if (!q) return;
+  let symbol = q.toUpperCase();
+  const known = C2_QUICK.some(([s]) => s === symbol) || [...$("#chart2-list").options].some((o) => o.value === q);
+  if (!known) {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=1`).catch(() => null);
+    const hit = res?.ok ? (await res.json()).items[0] : null;
+    if (hit) symbol = hit.symbol;
+  }
+  c2.sym = symbol;
+  store.save("stocking.chart2.sym", symbol);
+  $("#chart2-symbol").blur();
+  loadChart2();
+}
+let c2Timer;
+$("#chart2-symbol").addEventListener("focus", () => { $("#chart2-symbol").select(); fillChart2List(); });
+$("#chart2-symbol").addEventListener("input", (e) => {
+  const q = e.target.value.trim();
+  if (e.inputType === "insertReplacementText" || (!e.inputType && [...$("#chart2-list").options].some((o) => o.value === q)))
+    return pickChart2(q);                           // 목록에서 골랐으면 바로
+  clearTimeout(c2Timer);
+  if (!q) return fillChart2List();
+  c2Timer = setTimeout(async () => {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=10`).catch(() => null);
+    if (!res?.ok || $("#chart2-symbol").value.trim() !== q) return;
+    fillChart2List((await res.json()).items.map((it) => [it.symbol, it.name]));
+  }, 150);
+});
+$("#chart2-symbol").addEventListener("keydown", (e) => { if (e.key === "Enter") pickChart2(e.target.value); });
+$("#chart2-symbol").addEventListener("blur", () => setTimeout(() => {
+  if (document.activeElement !== $("#chart2-symbol")) $("#chart2-symbol").value = c2.sym;   // 고르지 않고 나가면 원래대로
+}, 200));
+$("#chart2-toggle").addEventListener("click", () => {
+  c2.iv = c2.iv ? null : state.interval;            // 처음 켜면 위와 같은 봉 단위로 (종목만 다르게)
+  store.save("stocking.chart2", c2.iv);
+  if (c2.iv) renderChart2Bar(c2.iv);
+  loadChart2();
+});
+$("#chart2-close").addEventListener("click", () => { c2.iv = null; store.save("stocking.chart2", null); loadChart2(); });
+if (c2.iv) { renderChart2Bar(c2.iv); loadChart2(); }
 // 실제로 보이는 봉 단위: 야후 지표(비트코인·지수 등)는 분봉을 골라도 서버가 일봉을 준다 → 응답의 interval 을 따른다.
 // 고른 봉 단위(state.interval)는 그대로 두어서 다른 종목으로 가면 다시 분봉
 const shownInterval = () => state.data?.interval || state.interval;
@@ -1522,8 +1836,8 @@ const isDaily = () => shownInterval() === "1d";
 
 function renderIntervalBar(shown = shownInterval()) {
   $("#intervals").replaceChildren(...INTERVALS.map(([iv, label], i) => {
-    const b = el("button", { class: `iv${iv === shown ? " on" : ""}${i === 6 ? " sep" : ""}`,
-      ...(state.data?.macro && /^\d+m$/.test(iv) ? { title: "이 지표는 분봉이 없어서 일봉으로 보여줘요" } : {}) }, label);
+    const b = el("button", { class: `iv${iv === shown ? " on" : ""}${iv === "1d" ? " sep" : ""}`,
+      ...(state.data?.macro && !state.data?.macro_minutes && /^\d+m$/.test(iv) ? { title: "이 지표는 분봉이 없어서 일봉으로 보여줘요" } : {}) }, label);
     b.addEventListener("click", () => {
       if (iv === state.interval) return;
       state.interval = iv;
@@ -1559,6 +1873,9 @@ function renderPrice(price) {
   box.replaceChildren(inKrw ? krw : fmt(price),
     el("span", { class: `chg ${chg >= 0 ? "up" : "down"}` }, `${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`),
     usd ? el("span", { class: "krw", title: `${state.fx.source} ${state.fx.usd_krw.toLocaleString()}원 기준` }, `≈ ${inKrw ? fmt(price) : krw}`) : "");
+  // 브라우저 탭 제목: 'Stocking' 대신 지금 보는 종목과 가격·등락 (미국은 티커, 국내·지표는 이름이 알아보기 쉽다)
+  const label = d.market === "US" && !d.macro ? d.symbol : d.name || d.symbol;
+  document.title = `${label} ${fmt(price)} ${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%`;
   if (prev != null && prev !== price) {           // 토스처럼 바뀔 때 깜빡임
     box.classList.remove("flash-up", "flash-down");
     void box.offsetWidth;
@@ -1708,8 +2025,10 @@ setInterval(loadFx, 60000);
 // 차트만 다시 (봉 단위 바꿀 때). 뉴스는 그대로 둔다
 async function loadChart(symbol) {
   banner("불러오는 중...");
-  const res = await fetch(`/api/chart/${encodeURIComponent(symbol)}?interval=${state.interval}`);
+  const want = state.interval;
+  const res = await fetch(`/api/chart/${encodeURIComponent(symbol)}?interval=${want}`);
   const d = await res.json();
+  if (want !== state.interval) return loadChart(symbol);   // 받는 사이에 봉 단위를 바꿨으면 (첫 화면 로딩 중 클릭) 새 단위로 다시
   if (!res.ok) return banner(d.detail || "불러오기 실패", "error");
   if (state.data && state.data.symbol !== symbol && state.loading !== symbol) return;
   state.data = d;
@@ -1719,6 +2038,7 @@ async function loadChart(symbol) {
   state.patFocus = null;
   banner(d.demo ? demoText : "");
   renderIntervalBar();                       // 야후 지표는 분봉을 골라도 일봉이 온다 → 실제 봉 단위에 불을 켠다
+  loadFibUnderlying();                       // 피보나치를 켜 둔 레버리지 ETF 면 기초자산 기준 위치도
 
   chart.applyOptions({ timeScale: { timeVisible: d.intraday, secondsVisible: false } });
   state.panes.forEach((p) => p.chart.applyOptions({ timeScale: { timeVisible: d.intraday } }));
@@ -1744,10 +2064,12 @@ async function loadChart(symbol) {
   $("#daily-only").hidden = isDaily();
   // 지수·선물·금리(야후)는 관심종목/이유찾기 대상이 아니고 토스 실시간도 없음
   $("#watch-toggle").hidden = $("#why-row").hidden = $("#live-dot").hidden = !!d.macro;
-  ["#draw-trend", "#draw-hline", "#draw-channel"].forEach((id) => ($(id).disabled = !isDaily()));
+  ["#draw-trend", "#draw-hline", "#draw-channel", "#fib-draw"].forEach((id) => ($(id).disabled = !isDaily()));
   // autoSize 가 첫 레이아웃 후에 폭을 잡기 때문에 한 프레임 뒤에 범위를 지정해야 안 찌그러진다
+  // 처음 보여줄 봉 수: 분봉은 적게 (일봉처럼 150개를 넣으면 너무 촘촘하다)
+  const show = { "1m": 120, "3m": 100, "5m": 90, "15m": 90, "30m": 90, "60m": 90, "240m": 80 }[d.interval] || 150;
   requestAnimationFrame(() => setTimeout(() =>
-    chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 150, to: d.candles.length + 12 }), 50));   // 오른쪽에 늘린 선이 조금 보이게
+    chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - show, to: d.candles.length + 12 }), 50));   // 오른쪽에 늘린 선이 조금 보이게
   if (d.interval !== "1y" && !d.demo) loadOlder(d);           // 년봉은 처음부터 상장 이후 전부
 }
 
@@ -1779,11 +2101,17 @@ async function loadOlder(d) {
 }
 
 // 로그 버튼: 서버 설정을 바꾼다 (신호·알림·내 규칙도 같은 추세선을 쓰게) → 차트를 다시 받아 그린다
+// 피보나치 되돌림: 궁금할 때만 버튼으로 켜고 끈다 (+ 추가 메뉴에는 넣지 않는다)
+$("#fib-toggle").addEventListener("click", () => toggleLayer("fib"));
+$("#fib-draw").addEventListener("click", () => setDrawMode("fib"));
+$("#fib-toggle").classList.toggle("on", on("fib"));
+
 $("#log-scale").addEventListener("click", async () => {
   const res = await fetch("/api/settings/scale", { method: "PUT", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ log: !state.data?.log_scale }) });
   if (!res.ok || !state.data) return;
   await loadChart(state.data.symbol);
+  loadChart2();                               // 아래 차트도 로그 눈금 맞춤
   loadRulesCheck();
 });
 
@@ -1847,8 +2175,45 @@ async function loadCompany() {
   box.replaceChildren(el("div", { class: "company" },
     el("div", { class: "company-facts" }, ...facts.filter(Boolean).map((t) => el("span", {}, t))),
     c.summary ? el("p", {}, c.summary) : c.summary_en ? el("p", { class: "muted" }, c.summary_en.slice(0, 300) + "…") : "",
+    el("div", { id: "short-line" }),
     el("p", { class: "muted hint" }, "야후 파이낸스 프로필 · 설명은 AI 가 한국어로 줄인 것",
       c.website ? el("a", { href: c.website, target: "_blank", rel: "noopener" }, " · 홈페이지") : "")));
+  loadShort(d.symbol);
+}
+
+// 공매도 잔고 (회사 카드에 보여주는 참고 정보). 판단 기록 실험과는 상관없다 — 서버도 따로 받고(/api/short, company.short_interest)
+// 따로 저장한다. 미국 거래소가 한 달에 두 번 공시 (2주쯤 늦음). 숫자를 일반인이 읽을 수 있는 말로 풀어서 보여준다
+async function loadShort(symbol) {
+  const res = await fetch(`/api/short/${encodeURIComponent(symbol)}`).catch(() => null);
+  const s = res?.ok ? (await res.json()).short : null;
+  const box = $("#short-line");
+  if (!s || !box || state.data?.symbol !== symbol) return;
+  const man = (v) => (v >= 1e8 ? `${(v / 1e8).toFixed(2)}억` : `${Math.round(v / 1e4).toLocaleString()}만`);
+  const pct = s.pct_float ?? s.pct_out;
+  // 흔히 쓰는 대략적인 눈금: 5% 아래 낮음, 5~10% 보통, 10~20% 높음, 20% 넘으면 매우 높음
+  const level = pct == null ? null : pct < 5 ? ["낮은 편", "low"] : pct < 10 ? ["보통", ""] : pct < 20 ? ["높은 편", "high"] : ["매우 높은 편", "high"];
+  const lines = [];
+  if (pct != null) {
+    const n = Math.round(pct);
+    lines.push(`이 회사 주식 100주 중 약 ${n < 1 ? "1주가 안 되는 양" : `${n}주`}를 누군가 빌려서 팔아 둔 상태예요. 주가가 내려야 돈을 버는 쪽이에요.`);
+  }
+  if (s.change_pct != null) {
+    lines.push(s.change_pct > 5 ? `지난달보다 ${s.change_pct}% 늘었어요. 하락에 거는 사람이 늘었다는 뜻이에요.`
+      : s.change_pct < -5 ? `지난달보다 ${Math.abs(s.change_pct)}% 줄었어요. 하락에 걸었던 사람들이 일부 정리했다는 뜻이에요.`
+      : "지난달과 거의 비슷해요.");
+  }
+  if (s.days_to_cover != null) {
+    lines.push(`이 사람들이 빌린 주식을 갚으려고 한꺼번에 되사면, 평소 거래량으로 약 ${s.days_to_cover}일이 걸려요. `
+      + "이 날짜가 길수록, 주가가 갑자기 오를 때 되사려는 주문이 몰려 더 크게 뛸 수 있어요 (숏 스퀴즈).");
+  }
+  lines.push(`${s.date ? `${md(s.date)} 기준이라` : ""} 2주쯤 늦은 숫자예요. 공매도가 많다고 꼭 내리는 건 아니에요 (위험을 줄이려고 파는 거래도 섞여 있어요).`);
+  box.replaceChildren(el("div", { class: "short-box" },
+    el("div", { class: "short-line" },
+      el("b", {}, "공매도"),
+      el("span", {}, pct != null ? `유통 주식의 ${pct}%` : "비율 없음"),
+      level ? el("span", { class: `short-level ${level[1]}` }, level[0]) : "",
+      el("span", { class: "muted" }, `${man(s.shares)}주`)),
+    el("ul", { class: "short-explain" }, ...lines.map((t) => el("li", {}, t)))));
 }
 
 // ── 옵션이 예상하는 움직임 (한눈에 보기): 등가격 스트래들 = 그 만기까지 ±몇 %. 야후 옵션, 서버 15분 캐시 ──
@@ -1885,7 +2250,11 @@ async function loadOptions() {
       e.earnings_only_pct ? el("span", { class: "muted" }, ` · 그중 실적 몫 약 ±${e.earnings_only_pct}%`) : "") : "",
     el("ul", {}, ...rows),
     bar("거래량 (오늘)", f.call_volume_pct, f.call_volume, f.put_volume),
-    bar("쌓인 계약 (미결제)", f.call_oi_pct, f.call_oi, f.put_oi),
+    f.oi_ok === false
+      ? el("div", { class: "opt-flow" }, el("span", { class: "opt-flow-label" }, "쌓인 계약 (미결제)"),
+        el("span", { class: "muted", title: `야후가 준 미결제약정: 콜 ${f.call_oi} · 풋 ${f.put_oi} 계약 (하루 거래량 ${(f.call_volume + f.put_volume).toLocaleString()}계약보다 터무니없이 적음)` },
+          "오늘은 야후 데이터가 비어 있어서 못 보여줘요"))
+      : bar("쌓인 계약 (미결제)", f.call_oi_pct, f.call_oi, f.put_oi),
     el("p", { class: "muted hint" }, `위 만기들을 합친 콜·풋 비중이에요. 많은 쪽이 이긴다는 뜻은 아니에요 (풋은 보험인 경우가 많아요). `
       + "예상 폭은 등가격 콜+풋 가격으로 본 거라 그 안에 머문다는 보장은 없어요. 야후 옵션, 장이 닫혀 있으면 마지막 호가 기준.")));
 }
@@ -2506,6 +2875,7 @@ async function runAction(a) {
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || "실행하지 못했어요");
     a.state = "done";
+    if (a.kind === "alert_zone" || a.kind === "alert_rsi") loadConditions();
     // 바뀐 것을 화면에 반영: 관심종목 / 지금 보는 종목의 선 / 내 규칙 카드
     if (a.kind !== "rules_update") {
       state.watchlist = (await (await fetch("/api/watchlist")).json()).symbols;
@@ -2691,7 +3061,26 @@ function onAlert(ev) {
   $("#alerts").prepend(alertItem(ev));
   if (state.tab !== "alerts" || $("#app").classList.contains("collapsed")) $("#alert-badge").hidden = false;
   toast(ev);
+  if (ev.kind === "condition") loadConditions();          // 꺾임·돌파가 나면 그 조건은 끝 → 목록에서 빠진다
   if (ev.symbol === state.data?.symbol) $("#chart").animate([{ outline: "2px solid var(--resistance)" }, { outline: "none" }], 1500);
+}
+
+// 지켜보는 조건 (질문 탭에서 '그때 알려줘'로 만든 것): 구간 도착·꺾임·돌파, RSI 위로·꺾임
+async function loadConditions() {
+  const res = await fetch("/api/conditions").catch(() => null);
+  if (!res?.ok) return;
+  const { active } = await res.json();
+  const box = $("#cond-box");
+  if (!active.length) return box.replaceChildren();
+  box.replaceChildren(el("div", { class: "brief-sub" }, `지켜보는 조건 ${active.length}개`),
+    el("ul", { class: "cond-list" }, ...active.map((c) => {
+      const x = el("button", { class: "ghost small", title: "이 조건 알림 지우기" }, "지우기");
+      x.addEventListener("click", async () => { await fetch(`/api/conditions/${c.id}`, { method: "DELETE" }); loadConditions(); });
+      const seen = c.state?.reached ? " · 구간 도착함" : c.state?.peak != null ? ` · RSI 최고 ${c.state.peak}` : "";
+      const name = el("b", {}, `${c.name} (${c.symbol})`);
+      name.addEventListener("click", () => load(c.symbol));
+      return el("li", {}, el("div", {}, name, el("span", { class: "muted" }, ` ${c.text}${seen} · ${c.created}부터`)), x);
+    })));
 }
 
 async function initAlerts() {
@@ -2705,6 +3094,7 @@ async function initAlerts() {
   const items = (await (await fetch("/api/alerts?limit=30")).json()).items;
   $("#alerts").replaceChildren(...(items.length ? items.map(alertItem) : [el("li", { class: "muted" }, "아직 알림이 없어요")]));
 
+  loadConditions();
   const es = new EventSource("/api/alerts/stream");
   es.onmessage = (m) => onAlert(JSON.parse(m.data));
 
@@ -2724,14 +3114,44 @@ let liveSource = null, liveKey = "", listRenderQueued = false;
 
 // 브라우저는 한 서버에 연결을 6개까지만 연다. 탭마다 실시간(SSE)·알림(SSE)이 하나씩 붙들고 있어서 탭을 여러 개 열면
 // 나머지 요청(판단 기록, 차트 …)이 줄을 서서 안 뜨거나 한참 걸렸다 → 안 보이는 탭은 실시간 연결을 닫는다 (알림은 둔다: 백그라운드 알림용)
+// 탭을 내려둔 사이 실시간이 끊겨서 그동안의 봉이 비고(돌아오면 마지막 봉 다음에 지금 봉이 바로 붙음), 체결로 만든 봉은 거래량도 0이다
+// → 30초 넘게 안 보였으면 돌아올 때 최근 봉을 서버에서 다시 받아 바꿔 낀다 (보던 자리·선·신호는 그대로)
+let hiddenAt = 0;
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    hiddenAt = Date.now();
     liveSource?.close();
     liveSource = null;
     liveKey = "";
     $("#live-dot").classList.remove("on");
-  } else updateLiveSubscription();
+  } else {
+    updateLiveSubscription();
+    if (hiddenAt && Date.now() - hiddenAt > 30000) {
+      refreshRecent(state.data, () => state.data, setBars, chart, () => { renderIndicators(); renderMarkers(); }, () => loadChart(state.data.symbol));
+      if (c2.iv) refreshRecent(c2.data, () => c2.data, setChart2Bars, c2.chart, null, loadChart2);
+    }
+    hiddenAt = 0;
+  }
 });
+
+// 최근 봉만 다시 받아 차트의 뒷부분을 바꾼다. 받은 첫 봉은 범위 시작에서 잘린 덜 찬 봉일 수 있어서 버리고,
+// 그 기간까지는 가진 봉을 쓴다 (앞에 붙여 둔 옛 봉도 그대로)
+async function refreshRecent(d, current, apply, tchart, after, reload) {
+  if (!d || d.demo) return;
+  const res = await fetch(`/api/chart/${encodeURIComponent(d.symbol)}?interval=${d.interval}`).catch(() => null);
+  if (!res?.ok || current() !== d) return;
+  const fresh = (await res.json()).candles;
+  if (current() !== d || !fresh || fresh.length < 2) return;
+  if (d.candles.at(-1).time < fresh[0].time) return reload?.();   // 너무 오래 내려둬서 받은 범위와 이어지지 않으면 통째로 다시
+  const cut = fresh[1].time;
+  const r = tchart.timeScale().getVisibleLogicalRange();
+  const before = d.candles.length;
+  d.candles = [...d.candles.filter((c) => c.time < cut), ...fresh.slice(1)];
+  apply(d);
+  after?.();
+  const added = d.candles.length - before;
+  if (r) tchart.timeScale().setVisibleLogicalRange({ from: r.from + added, to: r.to + added });
+}
 
 function updateLiveSubscription() {
   if (!state.toss || document.hidden) return;
@@ -2756,7 +3176,7 @@ const mondayOf = (day) => {
   return d.toISOString().slice(0, 10);
 };
 const samePeriod = (a, b, iv) => (iv === "1w" ? mondayOf(a) === mondayOf(b) : iv === "1M" ? a.slice(0, 7) === b.slice(0, 7) : iv === "1y" ? a.slice(0, 4) === b.slice(0, 4) : a === b);
-const MINUTES = { "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "60m": 60 };
+const MINUTES = { "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "240m": 240 };
 
 // 체결 하나로 차트 마지막 봉을 갱신하거나 새 봉을 연다
 function updateLastBar(price, tsIso) {

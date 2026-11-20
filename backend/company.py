@@ -7,6 +7,7 @@
 from __future__ import annotations
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -53,6 +54,31 @@ def fetch_yahoo(symbol: str) -> dict:
 
 
 _fund: dict[str, tuple[float, dict]] = {}
+_short: dict[str, tuple[float, dict | None]] = {}
+
+
+def short_interest(symbol: str) -> dict | None:
+    """공매도 잔고 (야후 · 미국 거래소 공시: 한 달에 두 번, 2주쯤 늦음). 6시간 캐시. 없으면 None.
+    fundamentals 와 따로 받는다 — fundamentals 는 판단 기록 실험의 입력이라 칸을 늘리면 실험 입력이 바뀐다."""
+    hit = _short.get(symbol)
+    if hit and time.time() - hit[0] < 6 * 3600:
+        return hit[1]
+    c, crumb = _client()
+    r = c.get(f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}", params={"modules": "defaultKeyStatistics", "crumb": crumb})
+    r.raise_for_status()
+    ks = ((r.json().get("quoteSummary", {}).get("result") or [{}])[0].get("defaultKeyStatistics") or {})
+    raw = lambda k: (ks.get(k) or {}).get("raw") if isinstance(ks.get(k), dict) else ks.get(k)
+    day = lambda k: datetime.fromtimestamp(raw(k), timezone.utc).date().isoformat() if isinstance(raw(k), (int, float)) else None
+    shares, prior = raw("sharesShort"), raw("sharesShortPriorMonth")
+    out = None
+    if isinstance(shares, (int, float)):
+        out = {"shares": shares, "prior_shares": prior, "prior_date": day("sharesShortPreviousMonthDate"),
+               "pct_float": round(raw("shortPercentOfFloat") * 100, 2) if isinstance(raw("shortPercentOfFloat"), (int, float)) else None,
+               "pct_out": round(raw("sharesPercentSharesOut") * 100, 2) if isinstance(raw("sharesPercentSharesOut"), (int, float)) else None,
+               "days_to_cover": raw("shortRatio"), "date": day("dateShortInterest"),
+               "change_pct": round((shares / prior - 1) * 100, 1) if isinstance(prior, (int, float)) and prior else None}
+    _short[symbol] = (time.time(), out)
+    return out
 
 
 def fundamentals(symbol: str) -> dict:

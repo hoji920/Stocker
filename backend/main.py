@@ -24,12 +24,13 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend import (agent, ai_cache, analysis, bars, company, demo, judgments, market_calendar, options, peers, thesis, macro, market_brief, movers, news, patterns, reading, rules, search,
+from backend import (agent, ai_cache, analysis, bars, company, conditions, technical, demo, judgments, market_calendar, options, peers, thesis, macro, market_brief, movers, news, patterns, reading, rules, search,
                      signals, underlying)
 from backend.realtime import Hub
 from backend.alerts import Monitor, Store
 from backend.config import get_settings, market_of
 from backend.toss_client import TossApiError, TossClient
+from backend.minute_store import MinuteStore
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -214,9 +215,42 @@ def move_alerts(symbol: str, price: float, seen) -> list[dict]:
 
 
 store = Store(get_settings().data_dir)
+cond_store = conditions.Conditions(get_settings().data_dir / "conditions.json")
+
+
+def closed_daily(symbol: str) -> list[dict]:
+    """끝난 일봉만 (오늘 장이 안 끝났으면 오늘 봉은 뺀다). 국내는 KRX 종가(야후 .KS), 미국은 토스."""
+    market = judgments.market_of(symbol)
+    return judgments.completed(judge_candles(symbol), market=market)
+
+
+def check_conditions() -> list[dict]:
+    """조건 알림 (alerts.Monitor 가 1분마다 부른다). 일봉은 5분 캐시, 실시간 가격은 토스 현재가."""
+    active = cond_store.active()
+    if not active:
+        return []
+    syms = sorted({c["symbol"] for c in active})
+    try:
+        live = toss().prices(syms) if get_settings().toss_enabled else {}
+    except Exception:
+        live = {}
+    events, changed = [], {}
+    for c in active:
+        try:
+            closed = cached(f"cond-daily:{c['symbol']}", 300, lambda: closed_daily(c["symbol"]))
+            fmt = price_formatter(c.get("currency") or ("KRW" if judgments.market_of(c["symbol"]) == "KR" else "USD"))
+            new = conditions.evaluate(c, closed, live.get(c["symbol"]), fmt)
+        except Exception as error:
+            print(f"[conditions] {c['symbol']} {type(error).__name__}: {error}")
+            continue
+        changed[c["id"]] = c
+        events += new
+    if changed:
+        cond_store.save([changed.get(x["id"], x) for x in cond_store.all()])
+    return conditions.stamp(events)
 analysis.LOG_TRENDS = bool(store.settings().get("log_trends"))     # 추세선·채널을 로그 가격에서 그을지 (차트의 '로그' 버튼)
 monitor = Monitor(get_settings(), store, levels_for_alert,
-                  lambda symbols: toss().prices(symbols), price_formatter, signal_alerts, move_alerts)
+                  lambda symbols: toss().prices(symbols), price_formatter, signal_alerts, move_alerts, check_conditions)
 
 
 hub = Hub(lambda: toss()._get_token())
@@ -283,9 +317,14 @@ def load_bars(symbol: str, interval: str, daily: list[dict]) -> list[dict]:
     """interval 에 맞는 봉. 일봉(2페이지)은 이미 받아둔 걸 쓰고, 나머지는 원천을 더 받아 묶는다."""
     if interval == "1d":
         return daily
-    if macro.is_macro(symbol):               # 지수·선물·금리: 야후 일봉(10년)을 묶음. 분봉은 없음
+    if macro.is_macro(symbol):               # 지수·선물·금리: 야후 일봉(10년)을 묶음. 분봉은 미국 선물만 (야후 분봉)
         if interval in bars.MINUTE:
-            raise HTTPException(status_code=400, detail="지수·선물·금리·원자재는 일·주·월·년 봉만 볼 수 있어요")
+            if not macro.has_minutes(symbol):
+                raise HTTPException(status_code=400, detail="이 지표는 일·주·월·년 봉만 볼 수 있어요")
+            try:
+                return bars.aggregate_minutes(macro.minute_candles(symbol, interval), bars.MINUTE[interval][0])
+            except Exception as error:
+                raise HTTPException(status_code=502, detail=f"야후 분봉을 못 받았어요: {error}")
         return bars.aggregate_days(macro.daily_candles(symbol), interval)
     if not get_settings().toss_enabled:      # 데모: 분봉은 없음, 주/월/년은 데모 일봉을 묶음
         if interval in bars.MINUTE:
@@ -294,7 +333,7 @@ def load_bars(symbol: str, interval: str, daily: list[dict]) -> list[dict]:
     try:
         if interval in bars.MINUTE:
             size, pages = bars.MINUTE[interval]
-            raw = cached(f"min:{symbol}:{pages}", 60, lambda: toss().minute_candles(symbol, pages))
+            raw = minute_store.get(symbol, pages)
             return bars.aggregate_minutes(raw, size)
         return bars.aggregate_days(long_days(symbol, bars.DAILY[interval]), interval)
     except TossApiError as error:
@@ -313,7 +352,7 @@ def long_days(symbol: str, pages: int) -> list[dict]:
 @app.get("/api/chart/{symbol}/older")
 def chart_older(symbol: str, before: str, interval: str = "1d"):
     """차트의 왼쪽을 채울 옛 봉. 화면이 차트를 그린 뒤에 따로 받아 붙인다.
-    일·주·월봉은 상장 이후 전부, 분봉은 bars.MINUTE_LONG 페이지만큼 (1분봉 약 5일 ~ 60분봉 약 6주). 년봉은 처음부터 전부라 없다.
+    일·주·월봉은 상장 이후 전부, 분봉은 bars.MINUTE_LONG 페이지만큼 (1분봉 약 1주 ~ 30분봉 약 4개월), 1시간·4시간봉은 야후 60분봉 약 2년. 년봉은 처음부터 전부라 없다.
     차트의 첫 봉과 같은 기간의 봉까지 주고 replace_first 로 알린다: 첫 봉은 받은 범위의 시작에서 잘려
     덜 찬 봉일 수 있어서(분봉의 앞 몇 분, 주봉의 앞 며칠) 화면이 꽉 찬 봉으로 바꿔 낀다.
     보여주기만 한다 — 선·신호·내 규칙·판단 기록은 지금처럼 차트 응답의 봉만 쓴다."""
@@ -325,7 +364,9 @@ def chart_older(symbol: str, before: str, interval: str = "1d"):
             if macro.is_macro(symbol) or not get_settings().toss_enabled:
                 return {"candles": [], "replace_first": False}
             size, _ = bars.MINUTE[interval]
-            out, key = bars.aggregate_minutes(long_minutes(symbol, bars.MINUTE_LONG[interval]), size), (lambda t: t)
+            # 1시간·4시간봉: 토스 1분봉 5개월 반(2분 넘게 걸림) 대신 야후 60분봉 약 2년 (1~2초)
+            raw = macro.stock_hours(symbol) if size >= 60 else long_minutes(symbol, bars.MINUTE_LONG[interval])
+            out, key = bars.aggregate_minutes(raw, size), (lambda t: t)
             cut = int(before)
         else:
             if macro.is_macro(symbol):
@@ -345,13 +386,12 @@ def chart_older(symbol: str, before: str, interval: str = "1d"):
 
 
 def long_minutes(symbol: str, pages: int) -> list[dict]:
-    """1분봉 pages 페이지. 지난 분봉은 안 바뀌니까 30분 동안 다시 안 받고, 더 긴 걸 받아뒀으면 그걸 쓴다
-    (차트 첫 봉보다 앞선 봉만 쓰므로 30분 묵어도 괜찮다)."""
-    for p in sorted({v for v in bars.MINUTE_LONG.values() if v > pages}, reverse=True):
-        hit = _cache.get(f"min-long:{symbol}:{p}")
-        if hit and time.time() - hit[0] < 1800:
-            return hit[1]
-    return cached(f"min-long:{symbol}:{pages}", 1800, lambda: toss().minute_candles(symbol, pages))
+    """1분봉 pages 페이지. 한 번 받은 건 minute_store 가 들고 있다가 새 페이지만 붙인다."""
+    return minute_store.get(symbol, pages)
+
+
+# 종목별 1분봉 모음 (메모리). 다시 볼 때는 최신 페이지만 받는다
+minute_store = MinuteStore(lambda symbol, pages: toss().minute_candles(symbol, pages))
 
 
 # ── 차트 / 뉴스 ──
@@ -360,8 +400,8 @@ def chart(symbol: str, interval: str = "1d"):
     symbol = symbol.strip().upper()
     if interval not in bars.INTERVALS:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 봉 단위: {interval}")
-    if macro.is_macro(symbol) and interval in bars.MINUTE:
-        interval = "1d"                      # 야후 지표(지수·코인·금리)는 분봉이 없어서 일봉으로 보여준다 (응답의 interval 로 화면이 맞춘다)
+    if macro.is_macro(symbol) and interval in bars.MINUTE and not macro.has_minutes(symbol):
+        interval = "1d"                      # 야후 지표(지수·코인·금리)는 분봉이 없어서 일봉으로 보여준다 (응답의 interval 로 화면이 맞춘다). 미국 선물은 야후 분봉
     info, daily, is_demo = load_stock(symbol)
     if len(daily) < 30:
         raise HTTPException(status_code=404, detail="일봉 데이터가 너무 적어요 (신규 상장 종목?)")
@@ -379,6 +419,7 @@ def chart(symbol: str, interval: str = "1d"):
         "interval": interval,
         "intraday": interval in bars.MINUTE,
         "macro": bool(info.get("macro")),          # 지수·선물·금리·원자재: 실시간·관심종목·보유 없음
+        "macro_minutes": macro.has_minutes(symbol),   # 야후 분봉이 되는 지표 (미국 선물). 받은 기간이 전부라 옛 봉을 더 붙이지 않는다
         "prev_close": prev_close,
         "candles": candles,
         "log_scale": analysis.LOG_TRENDS,          # 추세선·채널을 로그 가격에서 그었나 (화면의 가격축도 로그로 맞춘다)
@@ -849,6 +890,32 @@ def _chart_summary(symbol: str) -> dict:
     }
 
 
+def technical_check(symbol: str) -> dict:
+    """에이전트 도구: '기술적 반등이야? 데드캣이야?'용 숫자 (backend/technical.py, 끝난 일봉 기준).
+    레버리지·인버스 ETF 면 기초자산(SOXL → 반도체 지수)도 같이 — 되돌림·선은 기초자산으로 보는 게 맞다."""
+    symbol = symbol.strip().upper()
+    info, _, _ = load_stock(symbol)
+    fmt = price_formatter(currency_of(info, symbol))
+    out = {"symbol": symbol, "name": info.get("name", symbol), **technical.check(closed_daily(symbol), fmt)}
+    held = holding_of(symbol)
+    if held:
+        out["holding"] = {"avg_price": fmt(held["avg_price"]), "pl_rate_pct": held.get("pl_rate")}
+    u = underlying.resolve(symbol, info) if not macro.is_macro(symbol) else None
+    if u and (u["leverage"] != 1 or u["inverse"]):
+        try:
+            cs = load_stock(u["quote"])[1] if u["quote_is_stock"] else macro.daily_candles(u["quote"], years=2)
+            cs = judgments.completed(cs, market="US")
+            ufmt = (lambda v: f"{v:,.2f}")
+            uc = technical.check(cs, ufmt)
+            out["underlying"] = {"label": u["label"], "symbol": u["quote"], "leverage": u["leverage"], "inverse": u["inverse"],
+                                 "why": "레버리지 ETF 는 매일 재조정 때문에 오르내림이 반복되면 기초자산보다 더 많이 반납해요. 선·되돌림은 기초자산으로 보세요.",
+                                 **{k: uc.get(k) for k in ("candle", "rsi14", "fib_retracement", "next_test_zone_above", "crowded_zone_above",
+                                                           "support_zones_below", "recent_low_20d", "moving_averages")}}
+        except Exception as error:
+            out["underlying"] = {"label": u["label"], "error": f"기초자산 시세를 못 받았어요 ({type(error).__name__})"}
+    return out
+
+
 def price_check(symbol: str, price: float) -> dict:
     """에이전트 도구: 사용자가 말한 특정 가격(예: '51불에 팔까')을 차트에서 본다.
     그 가격 근처(허용폭 = max(ATR 절반, 가격의 1%))에서 방향이 바뀐 날(고점·저점), 그 뒤 10봉 동안 얼마나 밀렸나(올랐나),
@@ -969,7 +1036,7 @@ def normalize_action(kind: str, symbol: str | None = None, price: float | None =
             raise ValueError("바꿀 규칙 값이 없어요 (바꿀 수 있는 것: " + ", ".join(RULE_NAMES.values()) + ")")
         return {"kind": kind, "changes": diff,
                 "label": "내 규칙 바꾸기: " + ", ".join(f"{RULE_NAMES[k]} {cur[k]:g} → {v:g}" for k, v in diff.items())}
-    if kind not in ("watch_add", "watch_remove", "alert_line"):
+    if kind not in ("watch_add", "watch_remove", "alert_line", "alert_zone", "alert_rsi"):
         raise ValueError(f"할 수 없는 일이에요: {kind}")
     symbol = (symbol or "").strip().upper()
     try:
@@ -987,11 +1054,35 @@ def normalize_action(kind: str, symbol: str | None = None, price: float | None =
         if symbol not in store.watchlist():
             raise ValueError(f"{name}은(는) 관심종목이 아니에요")
         return {"kind": kind, "symbol": symbol, "label": f"{name}({symbol}) 관심종목에서 빼기"}
+    last = daily[-1]["close"]
+    fmt = price_formatter(currency_of(info, symbol))
+    if kind == "alert_zone":            # 가격 구간: changes {low, high} (price 하나만 오면 ±1%)
+        ch = changes or {}
+        try:
+            low, high = float(ch.get("low", price)), float(ch.get("high", price))
+        except (TypeError, ValueError):
+            raise ValueError("구간의 아래·위 가격(low, high)이 필요해요")
+        low, high = min(low, high), max(low, high)
+        if low == high:
+            low, high = low * 0.99, high * 1.01
+        if not (0.2 * last <= low and high <= 5 * last):
+            raise ValueError(f"현재가({fmt(last)})와 너무 먼 구간이에요")
+        return {"kind": kind, "symbol": symbol, "name": name, "low": round(low, 4), "high": round(high, 4), "currency": currency_of(info, symbol),
+                "changes": {"low": round(low, 4), "high": round(high, 4)},           # 확인 버튼이 이 값을 그대로 다시 보낸다
+                "label": f"{name}({symbol}) {fmt(low)}~{fmt(high)} 구간 알림 — 도착 · 꺾임(종가가 구간 아래로) · 돌파(종가가 구간 위로)"}
+    if kind == "alert_rsi":             # 일봉 RSI 기준선: changes {level} (기본 50)
+        try:
+            level = float((changes or {}).get("level", 50))
+        except (TypeError, ValueError):
+            raise ValueError("RSI 기준값(level)이 숫자여야 해요")
+        if not 10 <= level <= 90:
+            raise ValueError("RSI 기준값은 10~90 사이여야 해요")
+        return {"kind": kind, "symbol": symbol, "name": name, "level": level, "currency": currency_of(info, symbol), "changes": {"level": level},
+                "label": f"{name}({symbol}) 일봉 RSI {level:g} 알림 — 위로 넘을 때 · 그 근처에서 꺾일 때"}
     try:
         price = float(price)
     except (TypeError, ValueError):
         raise ValueError("선을 그을 가격이 필요해요")
-    last = daily[-1]["close"]
     if not 0.2 * last <= price <= 5 * last:
         raise ValueError(f"현재가({last:g})와 너무 먼 가격이에요: {price:g}")
     text = price_formatter(currency_of(info, symbol))(price)
@@ -1027,6 +1118,10 @@ def agent_act(body: ActBody):
         store.set_watchlist(store.watchlist() + [a["symbol"]])
     elif a["kind"] == "watch_remove":
         store.set_watchlist([s for s in store.watchlist() if s != a["symbol"]])
+    elif a["kind"] == "alert_zone":
+        cond_store.add({"type": "zone", "symbol": a["symbol"], "name": a["name"], "low": a["low"], "high": a["high"], "currency": a["currency"]})
+    elif a["kind"] == "alert_rsi":
+        cond_store.add({"type": "rsi", "symbol": a["symbol"], "name": a["name"], "level": a["level"], "currency": a["currency"]})
     else:
         _, daily, _ = load_stock(a["symbol"])
         line = {"id": f"agent-{int(time.time() * 1000)}", "type": "horizontal", "p1": {"time": daily[-1]["time"], "price": a["price"]},
@@ -1050,6 +1145,7 @@ AGENT_TOOLS = {
     "propose_action": propose_action,
     "fundamentals": lambda symbol: company.fundamentals(symbol.strip().upper()),
     "price_check": price_check,
+    "technical_check": technical_check,
     "options_move": lambda symbol: options.expected_moves(symbol.strip().upper(), _next_earnings(symbol.strip().upper())),
     "my_thesis": lambda symbol: _thesis_for_agent(symbol),
     "record_view": lambda **kw: record_view(**kw),
@@ -1446,6 +1542,54 @@ def company_info(symbol: str):
         return {"company": company.profile(get_settings(), symbol, info)}
     except Exception as error:
         raise HTTPException(status_code=502, detail=f"회사 정보를 못 받았어요 ({type(error).__name__})")
+
+
+@app.get("/api/fib_underlying/{symbol}")
+def fib_underlying(symbol: str, bars: int = 120, mode: str = "auto"):
+    """레버리지·인버스 ETF 면 기초자산(SOXL → 필라델피아 반도체 지수)으로 그린 피보나치 되돌림 위치.
+    레버리지 ETF 는 매일 재조정 때문에 오르내림이 반복되면 기초자산보다 더 많이 반납한다 → 되돌림 비율은 기초자산으로 보는 게 맞다.
+    기초자산의 선을 ETF 가격으로 옮길 수는 없어서(경로마다 달라짐) 위치(%)와 선 가격만 준다. 아니면 {"underlying": None}."""
+    symbol = symbol.strip().upper()
+    if macro.is_macro(symbol) or market_of(symbol) == "KR":
+        return {"underlying": None}
+    info = load_stock(symbol)[0]
+    u = underlying.resolve(symbol, info)
+    if not u or (u["leverage"] == 1 and not u["inverse"]):
+        return {"underlying": None}
+    bars, mode = max(20, min(int(bars), 500)), mode if mode in ("auto", "up", "down") else "auto"
+    try:
+        cs = load_stock(u["quote"])[1] if u["quote_is_stock"] else macro.daily_candles(u["quote"], years=2)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"기초자산 시세를 못 받았어요 ({type(error).__name__})")
+    return {"underlying": {"symbol": u["quote"], "label": u["label"], "leverage": u["leverage"], "inverse": u["inverse"]},
+            "fib": analysis.fib_levels(cs, bars, mode)}
+
+
+@app.get("/api/conditions")
+def conditions_list():
+    """챗봇에서 만든 조건 알림 (지켜보는 중인 것 + 끝난 것 최근 10개)."""
+    items = cond_store.all()
+    act = {c["id"] for c in cond_store.active()}
+    fmt = lambda c: price_formatter(c.get("currency") or "USD")
+    row = lambda c: {"id": c["id"], "symbol": c["symbol"], "name": c.get("name", c["symbol"]), "created": c["created"],
+                     "text": conditions.describe(c, fmt(c)), "active": c["id"] in act, "state": c.get("state", {})}
+    return {"active": [row(c) for c in items if c["id"] in act], "done": [row(c) for c in items if c["id"] not in act][-10:]}
+
+
+@app.delete("/api/conditions/{cid}")
+def conditions_delete(cid: str):
+    cond_store.remove(cid)
+    return {"ok": True}
+
+
+@app.get("/api/short/{symbol}")
+def short_interest(symbol: str):
+    """공매도 잔고 (미국 종목만, 야후). 국내 공매도는 아직 없다."""
+    symbol = _us_stock(symbol)
+    try:
+        return {"short": company.short_interest(symbol)}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"공매도 정보를 못 받았어요 ({type(error).__name__})")
 
 
 def _us_stock(symbol: str) -> str:

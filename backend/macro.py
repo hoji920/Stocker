@@ -40,13 +40,13 @@ def is_macro(symbol: str) -> bool:
 _yf_lock = threading.Lock()
 
 
-def _download(symbols: list[str], period: str, interval: str = "1d"):
+def _download(symbols: list[str], period: str, interval: str = "1d", prepost: bool = False):
     """yfinance 는 동시에 여러 스레드에서 부르면 내부 공유 상태가 섞여 결과가 비거나 엉킨다
     (시장 탭 갱신과 차트 요청이 겹칠 때 실제로 발생) → 한 번에 하나씩."""
     import yfinance as yf
     with _yf_lock:
         df = yf.download(symbols, period=period, interval=interval, progress=False, auto_adjust=False,
-                         group_by="column", threads=True)
+                         group_by="column", threads=True, prepost=prepost)
     if df.empty:
         raise RuntimeError(f"야후에서 데이터가 비어서 왔어요: {', '.join(symbols)}")
     if not isinstance(df.columns, pd.MultiIndex):          # 버전에 따라 단일 종목은 1단 컬럼
@@ -120,3 +120,65 @@ def daily_candles(symbol: str, years: int = 10) -> list[dict]:
                         "volume": 0.0 if v != v else float(v)})
         return out
     return _cached(f"candles:{symbol}:{years}", 300, fetch)
+
+
+# 미국 선물(지수·원자재, 야후 '=F')만 분봉을 받는다. 야후가 주는 기간이 짧다: 1분봉 약 7일, 5·15·30분봉 약 60일, 60분봉 약 2년.
+# 앱의 봉 → (야후 원천 봉, 받을 기간). 3분·4시간은 1분·60분을 묶는다.
+YF_MINUTE = {"1m": ("1m", "7d"), "3m": ("1m", "7d"), "5m": ("5m", "60d"), "15m": ("15m", "60d"),
+             "30m": ("30m", "60d"), "60m": ("60m", "730d"), "240m": ("60m", "730d")}
+
+
+def stock_hours(symbol: str) -> list[dict]:
+    """종목 야후 60분봉 약 2년 (미국은 장 전·후 포함). 토스 1분봉은 5개월 반까지라 받는 데 2분이 넘어서,
+    1시간·4시간봉 차트의 옛 봉은 이걸로 채운다. 국내는 .KS 먼저, 비면 .KQ. 보여주기만 하는 봉."""
+    kr = symbol.isdigit()
+    names = [f"{symbol}.KS", f"{symbol}.KQ"] if kr else [symbol]
+
+    def fetch():
+        for name in names:
+            try:
+                df = _download([name], "730d", "60m", prepost=not kr)
+            except RuntimeError:
+                continue
+            out = []
+            for ts, row in df.iterrows():
+                o, h, l, c = (float(row[(k, name)]) for k in ("Open", "High", "Low", "Close"))
+                if any(math.isnan(x) for x in (o, h, l, c)):
+                    continue
+                v = row[("Volume", name)]
+                out.append({"time": int(pd.Timestamp(ts).timestamp()), "open": o, "high": h, "low": l, "close": c,
+                            "volume": 0.0 if v != v else float(v)})
+            if out:
+                return out
+        raise RuntimeError(f"야후 60분봉이 없어요: {symbol}")
+    return _cached(f"hours:{symbol}", 1800, fetch)
+
+
+def has_minutes(symbol: str) -> bool:
+    """분봉을 볼 수 있는 지표인가 (야후 선물)."""
+    return symbol in BY_SYMBOL and symbol.endswith("=F")
+
+
+def minute_candles(symbol: str, interval: str) -> list[dict]:
+    """야후 분봉 → 앱의 1분봉 형식 (time = 유닉스 초, UTC). 묶기·한국 시간 이동은 bars.aggregate_minutes 가 한다.
+    야후 시세는 10분쯤 늦을 수 있다."""
+    src, period = YF_MINUTE[interval]
+
+    def fetch():
+        df = _download([symbol], period, src)
+        out = []
+        for ts, row in df.iterrows():
+            o, h, l, c = (float(row[(k, symbol)]) for k in ("Open", "High", "Low", "Close"))
+            if any(math.isnan(x) for x in (o, h, l, c)):
+                continue
+            v = row[("Volume", symbol)]
+            out.append({"time": int(pd.Timestamp(ts).timestamp()), "open": o, "high": h, "low": l, "close": c,
+                        "volume": 0.0 if v != v else float(v)})
+        return out
+    out = _cached(f"min:{symbol}:{src}:{period}", 60, fetch)
+    if src != "1m" and out:
+        # 야후 5·15·60분봉은 몇 시간씩 늦게 끝날 때가 있어서 (2026-11-11 확인: 1분봉은 지금까지, 5분봉은 3시간 전까지)
+        # 마지막 봉이 끝난 뒤는 1분봉으로 채운다. 묶을 때 같은 칸에 들어가니 봉 경계가 맞다
+        end = out[-1]["time"] + int(src[:-1]) * 60
+        out = out + [b for b in minute_candles(symbol, "1m") if b["time"] >= end]
+    return out
