@@ -671,3 +671,14 @@ button.chip:hover { border-color: var(--accent); color: var(--accent); }
 .cond-list { list-style: none; margin: 4px 0 10px; padding: 0; }
 .cond-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; line-height: 1.5; }
 .cond-list b { display: inline; margin: 0; font-size: inherit; cursor: pointer; } .cond-list b:hover { color: var(--accent); }
+
+/* 두 번째 차트: 같은 종목을 다른 봉 단위로 (선·신호 없이 캔들·거래량만) */
+#chart2-box { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.chart2-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chart2-head .intervals { margin-top: 0; }
+#chart2-close { margin-left: auto; }
+#chart2-symbol { width: 190px; padding: 5px 8px; font-size: 13px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+#chart2 { height: var(--chart2-h, 420px); }
+#chart2-msg[hidden] { display: none; }
+#chart2-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+@media (max-width: 760px) { #chart2 { height: 300px; } .chart2-head .intervals { flex: 1 1 100%; } }

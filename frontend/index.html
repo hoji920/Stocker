@@ -43,6 +43,7 @@
             <button id="draw-channel" class="ghost small" title="누르면 찍을 자리 ①②③을 추천해줘요. 그대로 쓰거나, 기준선이 지날 저점 두 곳과 반대편 고점을 직접 클릭하세요. 같은 폭으로 위아래 층이 그려져요.">⫽ 채널 긋기</button>
             <button id="fib-draw" class="ghost small" title="피보나치를 직접 그려요: 차트에서 파동의 저점과 고점을 차례로 클릭하세요. 그 종목은 자동 대신 이 구간으로 보여요 (칩의 '자동으로'로 되돌림).">✎ 피보</button>
             <button id="fib-toggle" class="ghost small" title="누르면 최근 고점·저점 사이 피보나치 되돌림(23.6~78.6%)을 그려요. 다시 누르면 꺼져요. 기간은 아래 칩에서 바꿔요.">피보나치</button>
+            <button id="chart2-toggle" class="ghost small" title="아래에 차트를 하나 더 띄워요. 같은 종목을 다른 봉 단위로 볼 수 있어요 (예: 위는 일봉, 아래는 1시간봉). 선·신호는 위 차트에만 있어요.">▭ 차트 2개</button>
             <button id="log-scale" class="ghost small" title="가격축을 로그 눈금으로 바꾸고, 자동 추세선·채널도 로그 가격에서 그어요. 몇 배씩 오르내린 종목은 같은 % 움직임이 같은 높이로 보여서 긴 추세선이 자연스러워져요. 수평 지지/저항과 내가 그은 선은 그대로예요. 켜면 신호·알림·내 규칙도 로그 추세선을 써요.">로그</button>
             <div class="dropdown">
               <button id="add-ind" class="small" title="차트에 표시할 선·지표를 골라 넣고 빼요">+ 추가</button>
@@ -58,6 +59,16 @@
         </div>
         <div id="chart-resize" title="끌어서 차트 높이 바꾸기 · 두 번 누르면 기본 높이"></div>
         <div id="panes"></div>
+        <div id="chart2-box" hidden>
+          <div class="chart2-head">
+            <input id="chart2-symbol" list="chart2-list" autocomplete="off" spellcheck="false" placeholder="종목 (예: NQ=F, SOXX, 삼성전자)" title="아래 차트에 띄울 종목. 이름이나 코드를 치고 Enter" />
+            <datalist id="chart2-list"></datalist>
+            <span id="chart2-title" class="muted"></span>
+            <div id="chart2-intervals" class="intervals" role="tablist" aria-label="두 번째 차트 봉 단위"></div>
+            <button id="chart2-close" class="ghost small" title="두 번째 차트 닫기">✕</button>
+          </div>
+          <div class="chart-wrap"><div id="chart2"></div><div id="chart2-msg" class="muted" hidden></div></div>
+        </div>
         <p class="note">이 화면은 공부용 정보이며 매수·매도 추천이 아니에요.</p>
       </section>
 

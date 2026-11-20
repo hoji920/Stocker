@@ -30,6 +30,7 @@ from backend.realtime import Hub
 from backend.alerts import Monitor, Store
 from backend.config import get_settings, market_of
 from backend.toss_client import TossApiError, TossClient
+from backend.minute_store import MinuteStore
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -316,9 +317,14 @@ def load_bars(symbol: str, interval: str, daily: list[dict]) -> list[dict]:
     """interval 에 맞는 봉. 일봉(2페이지)은 이미 받아둔 걸 쓰고, 나머지는 원천을 더 받아 묶는다."""
     if interval == "1d":
         return daily
-    if macro.is_macro(symbol):               # 지수·선물·금리: 야후 일봉(10년)을 묶음. 분봉은 없음
+    if macro.is_macro(symbol):               # 지수·선물·금리: 야후 일봉(10년)을 묶음. 분봉은 미국 선물만 (야후 분봉)
         if interval in bars.MINUTE:
-            raise HTTPException(status_code=400, detail="지수·선물·금리·원자재는 일·주·월·년 봉만 볼 수 있어요")
+            if not macro.has_minutes(symbol):
+                raise HTTPException(status_code=400, detail="이 지표는 일·주·월·년 봉만 볼 수 있어요")
+            try:
+                return bars.aggregate_minutes(macro.minute_candles(symbol, interval), bars.MINUTE[interval][0])
+            except Exception as error:
+                raise HTTPException(status_code=502, detail=f"야후 분봉을 못 받았어요: {error}")
         return bars.aggregate_days(macro.daily_candles(symbol), interval)
     if not get_settings().toss_enabled:      # 데모: 분봉은 없음, 주/월/년은 데모 일봉을 묶음
         if interval in bars.MINUTE:
@@ -327,7 +333,7 @@ def load_bars(symbol: str, interval: str, daily: list[dict]) -> list[dict]:
     try:
         if interval in bars.MINUTE:
             size, pages = bars.MINUTE[interval]
-            raw = cached(f"min:{symbol}:{pages}", 60, lambda: toss().minute_candles(symbol, pages))
+            raw = minute_store.get(symbol, pages)
             return bars.aggregate_minutes(raw, size)
         return bars.aggregate_days(long_days(symbol, bars.DAILY[interval]), interval)
     except TossApiError as error:
@@ -346,7 +352,7 @@ def long_days(symbol: str, pages: int) -> list[dict]:
 @app.get("/api/chart/{symbol}/older")
 def chart_older(symbol: str, before: str, interval: str = "1d"):
     """차트의 왼쪽을 채울 옛 봉. 화면이 차트를 그린 뒤에 따로 받아 붙인다.
-    일·주·월봉은 상장 이후 전부, 분봉은 bars.MINUTE_LONG 페이지만큼 (1분봉 약 5일 ~ 60분봉 약 6주). 년봉은 처음부터 전부라 없다.
+    일·주·월봉은 상장 이후 전부, 분봉은 bars.MINUTE_LONG 페이지만큼 (1분봉 약 1주 ~ 30분봉 약 4개월), 1시간·4시간봉은 야후 60분봉 약 2년. 년봉은 처음부터 전부라 없다.
     차트의 첫 봉과 같은 기간의 봉까지 주고 replace_first 로 알린다: 첫 봉은 받은 범위의 시작에서 잘려
     덜 찬 봉일 수 있어서(분봉의 앞 몇 분, 주봉의 앞 며칠) 화면이 꽉 찬 봉으로 바꿔 낀다.
     보여주기만 한다 — 선·신호·내 규칙·판단 기록은 지금처럼 차트 응답의 봉만 쓴다."""
@@ -358,7 +364,9 @@ def chart_older(symbol: str, before: str, interval: str = "1d"):
             if macro.is_macro(symbol) or not get_settings().toss_enabled:
                 return {"candles": [], "replace_first": False}
             size, _ = bars.MINUTE[interval]
-            out, key = bars.aggregate_minutes(long_minutes(symbol, bars.MINUTE_LONG[interval]), size), (lambda t: t)
+            # 1시간·4시간봉: 토스 1분봉 5개월 반(2분 넘게 걸림) 대신 야후 60분봉 약 2년 (1~2초)
+            raw = macro.stock_hours(symbol) if size >= 60 else long_minutes(symbol, bars.MINUTE_LONG[interval])
+            out, key = bars.aggregate_minutes(raw, size), (lambda t: t)
             cut = int(before)
         else:
             if macro.is_macro(symbol):
@@ -378,13 +386,12 @@ def chart_older(symbol: str, before: str, interval: str = "1d"):
 
 
 def long_minutes(symbol: str, pages: int) -> list[dict]:
-    """1분봉 pages 페이지. 지난 분봉은 안 바뀌니까 30분 동안 다시 안 받고, 더 긴 걸 받아뒀으면 그걸 쓴다
-    (차트 첫 봉보다 앞선 봉만 쓰므로 30분 묵어도 괜찮다)."""
-    for p in sorted({v for v in bars.MINUTE_LONG.values() if v > pages}, reverse=True):
-        hit = _cache.get(f"min-long:{symbol}:{p}")
-        if hit and time.time() - hit[0] < 1800:
-            return hit[1]
-    return cached(f"min-long:{symbol}:{pages}", 1800, lambda: toss().minute_candles(symbol, pages))
+    """1분봉 pages 페이지. 한 번 받은 건 minute_store 가 들고 있다가 새 페이지만 붙인다."""
+    return minute_store.get(symbol, pages)
+
+
+# 종목별 1분봉 모음 (메모리). 다시 볼 때는 최신 페이지만 받는다
+minute_store = MinuteStore(lambda symbol, pages: toss().minute_candles(symbol, pages))
 
 
 # ── 차트 / 뉴스 ──
@@ -393,8 +400,8 @@ def chart(symbol: str, interval: str = "1d"):
     symbol = symbol.strip().upper()
     if interval not in bars.INTERVALS:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 봉 단위: {interval}")
-    if macro.is_macro(symbol) and interval in bars.MINUTE:
-        interval = "1d"                      # 야후 지표(지수·코인·금리)는 분봉이 없어서 일봉으로 보여준다 (응답의 interval 로 화면이 맞춘다)
+    if macro.is_macro(symbol) and interval in bars.MINUTE and not macro.has_minutes(symbol):
+        interval = "1d"                      # 야후 지표(지수·코인·금리)는 분봉이 없어서 일봉으로 보여준다 (응답의 interval 로 화면이 맞춘다). 미국 선물은 야후 분봉
     info, daily, is_demo = load_stock(symbol)
     if len(daily) < 30:
         raise HTTPException(status_code=404, detail="일봉 데이터가 너무 적어요 (신규 상장 종목?)")
@@ -412,6 +419,7 @@ def chart(symbol: str, interval: str = "1d"):
         "interval": interval,
         "intraday": interval in bars.MINUTE,
         "macro": bool(info.get("macro")),          # 지수·선물·금리·원자재: 실시간·관심종목·보유 없음
+        "macro_minutes": macro.has_minutes(symbol),   # 야후 분봉이 되는 지표 (미국 선물). 받은 기간이 전부라 옛 봉을 더 붙이지 않는다
         "prev_close": prev_close,
         "candles": candles,
         "log_scale": analysis.LOG_TRENDS,          # 추세선·채널을 로그 가격에서 그었나 (화면의 가격축도 로그로 맞춘다)

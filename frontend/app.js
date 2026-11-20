@@ -1710,6 +1710,125 @@ const INTERVALS = [
   ["1d", "일"], ["1w", "주"], ["1M", "월"], ["1y", "년"],
 ];
 state.interval = store.load("stocking.interval", "1d");
+
+// ── 두 번째 차트: 위 차트와 다른 종목을 골라서 (예: 위 QQQ, 아래 나스닥100 선물). 캔들·거래량·옛 봉만 (선·신호·지표는 위 차트에만) ──
+// 켜짐·봉 단위·종목은 브라우저에 기억 (stocking.chart2 = 봉 단위, null 이면 꺼짐 / stocking.chart2.sym = 종목)
+const c2 = { iv: store.load("stocking.chart2", null), sym: store.load("stocking.chart2.sym", "NQ=F"),
+  chart: null, candles: null, volume: null, data: null, seq: 0 };
+function ensureChart2() {
+  if (c2.chart) return;
+  c2.chart = LW.createChart($("#chart2"), baseOptions());
+  c2.candles = c2.chart.addCandlestickSeries({ upColor: css("--up"), downColor: css("--down"), borderVisible: false,
+    wickUpColor: css("--up"), wickDownColor: css("--down"), priceLineWidth: 2, priceLineStyle: LW.LineStyle.LargeDashed });
+  c2.volume = c2.chart.addHistogramSeries({ priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
+  c2.chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.84, bottom: 0 } });
+  c2.candles.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.26 } });
+}
+function setChart2Bars(d) {
+  c2.candles.setData(d.candles.map((c) => ({ ...c })));
+  c2.volume.setData(d.candles.map((c) => ({ time: c.time, value: c.volume, color: (c.close >= c.open ? css("--up") : css("--down")) + "55" })));
+}
+function renderChart2Bar(shown = c2.data?.interval || c2.iv) {
+  $("#chart2-intervals").replaceChildren(...INTERVALS.map(([iv, label]) => {
+    const b = el("button", { class: `iv${iv === shown ? " on" : ""}${iv === "1d" ? " sep" : ""}` }, label);
+    b.addEventListener("click", () => {
+      if (iv === c2.iv) return;
+      c2.iv = iv;
+      store.save("stocking.chart2", iv);
+      renderChart2Bar(iv);
+      loadChart2();
+    });
+    return b;
+  }));
+}
+// 고르기 목록: 자주 보는 지수·선물 + 보유·관심종목 (치는 중엔 검색 결과로 바꾼다)
+const C2_QUICK = [["NQ=F", "나스닥100 선물"], ["ES=F", "S&P500 선물"], ["^IXIC", "나스닥 종합"], ["^GSPC", "S&P 500"]];
+function fillChart2List(items) {
+  const list = items || [...C2_QUICK, ...state.holdings.map((h) => [h.symbol, h.name || ""]), ...state.watchlist.map((s) => [s, ""])];
+  const seen = new Set();
+  $("#chart2-list").replaceChildren(...list.filter(([s]) => !seen.has(s) && seen.add(s)).map(([s, n]) => el("option", { value: s }, n)));
+}
+async function loadChart2() {
+  $("#chart2-box").hidden = !c2.iv;
+  $("#chart2-toggle").classList.toggle("on", !!c2.iv);
+  if (!c2.iv) return;
+  ensureChart2();
+  const seq = ++c2.seq, iv = c2.iv, symbol = c2.sym;
+  $("#chart2-symbol").value = symbol;
+  $("#chart2-title").textContent = "";
+  const msg = $("#chart2-msg");
+  msg.hidden = false; msg.textContent = "불러오는 중...";
+  if (c2.data && c2.data.symbol !== symbol) { c2.candles.setData([]); c2.volume.setData([]); }   // 다른 종목 받는 동안 옛 종목 봉을 남기지 않는다
+  const res = await fetch(`/api/chart/${encodeURIComponent(symbol)}?interval=${iv}`).catch(() => null);
+  const d = res ? await res.json().catch(() => ({})) : {};
+  if (seq !== c2.seq) return;                       // 받는 사이에 종목·봉을 또 바꿨으면 버린다
+  if (!res?.ok) { msg.textContent = d.detail || "불러오기 실패"; c2.candles.setData([]); c2.volume.setData([]); c2.data = null; return; }
+  msg.hidden = true;
+  c2.data = d;
+  $("#chart2-title").textContent = `${d.name} ${fmtIn(d.candles.at(-1).close, d.currency)}`;
+  renderChart2Bar(d.interval);                      // 야후 지표는 분봉을 골라도 일봉이 온다
+  c2.chart.applyOptions({ timeScale: { timeVisible: d.intraday, secondsVisible: false } });
+  c2.candles.applyOptions({ priceFormat: d.currency === "KRW" ? { type: "price", precision: 0, minMove: 1 } : { type: "price", precision: 2, minMove: 0.01 } });
+  c2.candles.priceScale().applyOptions({ mode: d.log_scale ? LW.PriceScaleMode.Logarithmic : LW.PriceScaleMode.Normal });
+  setChart2Bars(d);
+  const show = { "1m": 120, "3m": 100, "5m": 90, "15m": 90, "30m": 90, "60m": 90, "240m": 80 }[d.interval] || 150;
+  requestAnimationFrame(() => setTimeout(() =>
+    c2.chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - show, to: d.candles.length + 5 }), 50));
+  if (d.interval === "1y" || d.demo || d.macro_minutes) return;
+  // 옛 봉 (위 차트의 loadOlder 와 같은 방식)
+  const r2 = await fetch(`/api/chart/${encodeURIComponent(symbol)}/older?interval=${d.interval}&before=${d.candles[0].time}`).catch(() => null);
+  if (!r2?.ok || seq !== c2.seq) return;
+  const body = await r2.json();
+  const swap = !!body.replace_first;
+  if (!body.candles.length || seq !== c2.seq || (swap && body.candles.length === 1)) return;
+  const r = c2.chart.timeScale().getVisibleLogicalRange();
+  const added = body.candles.length - (swap ? 1 : 0);
+  d.candles = [...body.candles, ...d.candles.slice(swap ? 1 : 0)];
+  setChart2Bars(d);
+  if (r) c2.chart.timeScale().setVisibleLogicalRange({ from: r.from + added, to: r.to + added });
+}
+// 코드를 그대로 쳤으면 그대로, 이름으로 쳤으면 검색해서 첫 결과의 코드로
+async function pickChart2(q) {
+  q = q.trim();
+  if (!q) return;
+  let symbol = q.toUpperCase();
+  const known = C2_QUICK.some(([s]) => s === symbol) || [...$("#chart2-list").options].some((o) => o.value === q);
+  if (!known) {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=1`).catch(() => null);
+    const hit = res?.ok ? (await res.json()).items[0] : null;
+    if (hit) symbol = hit.symbol;
+  }
+  c2.sym = symbol;
+  store.save("stocking.chart2.sym", symbol);
+  $("#chart2-symbol").blur();
+  loadChart2();
+}
+let c2Timer;
+$("#chart2-symbol").addEventListener("focus", () => { $("#chart2-symbol").select(); fillChart2List(); });
+$("#chart2-symbol").addEventListener("input", (e) => {
+  const q = e.target.value.trim();
+  if (e.inputType === "insertReplacementText" || (!e.inputType && [...$("#chart2-list").options].some((o) => o.value === q)))
+    return pickChart2(q);                           // 목록에서 골랐으면 바로
+  clearTimeout(c2Timer);
+  if (!q) return fillChart2List();
+  c2Timer = setTimeout(async () => {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=10`).catch(() => null);
+    if (!res?.ok || $("#chart2-symbol").value.trim() !== q) return;
+    fillChart2List((await res.json()).items.map((it) => [it.symbol, it.name]));
+  }, 150);
+});
+$("#chart2-symbol").addEventListener("keydown", (e) => { if (e.key === "Enter") pickChart2(e.target.value); });
+$("#chart2-symbol").addEventListener("blur", () => setTimeout(() => {
+  if (document.activeElement !== $("#chart2-symbol")) $("#chart2-symbol").value = c2.sym;   // 고르지 않고 나가면 원래대로
+}, 200));
+$("#chart2-toggle").addEventListener("click", () => {
+  c2.iv = c2.iv ? null : state.interval;            // 처음 켜면 위와 같은 봉 단위로 (종목만 다르게)
+  store.save("stocking.chart2", c2.iv);
+  if (c2.iv) renderChart2Bar(c2.iv);
+  loadChart2();
+});
+$("#chart2-close").addEventListener("click", () => { c2.iv = null; store.save("stocking.chart2", null); loadChart2(); });
+if (c2.iv) { renderChart2Bar(c2.iv); loadChart2(); }
 // 실제로 보이는 봉 단위: 야후 지표(비트코인·지수 등)는 분봉을 골라도 서버가 일봉을 준다 → 응답의 interval 을 따른다.
 // 고른 봉 단위(state.interval)는 그대로 두어서 다른 종목으로 가면 다시 분봉
 const shownInterval = () => state.data?.interval || state.interval;
@@ -1718,7 +1837,7 @@ const isDaily = () => shownInterval() === "1d";
 function renderIntervalBar(shown = shownInterval()) {
   $("#intervals").replaceChildren(...INTERVALS.map(([iv, label], i) => {
     const b = el("button", { class: `iv${iv === shown ? " on" : ""}${iv === "1d" ? " sep" : ""}`,
-      ...(state.data?.macro && /^\d+m$/.test(iv) ? { title: "이 지표는 분봉이 없어서 일봉으로 보여줘요" } : {}) }, label);
+      ...(state.data?.macro && !state.data?.macro_minutes && /^\d+m$/.test(iv) ? { title: "이 지표는 분봉이 없어서 일봉으로 보여줘요" } : {}) }, label);
     b.addEventListener("click", () => {
       if (iv === state.interval) return;
       state.interval = iv;
@@ -1906,8 +2025,10 @@ setInterval(loadFx, 60000);
 // 차트만 다시 (봉 단위 바꿀 때). 뉴스는 그대로 둔다
 async function loadChart(symbol) {
   banner("불러오는 중...");
-  const res = await fetch(`/api/chart/${encodeURIComponent(symbol)}?interval=${state.interval}`);
+  const want = state.interval;
+  const res = await fetch(`/api/chart/${encodeURIComponent(symbol)}?interval=${want}`);
   const d = await res.json();
+  if (want !== state.interval) return loadChart(symbol);   // 받는 사이에 봉 단위를 바꿨으면 (첫 화면 로딩 중 클릭) 새 단위로 다시
   if (!res.ok) return banner(d.detail || "불러오기 실패", "error");
   if (state.data && state.data.symbol !== symbol && state.loading !== symbol) return;
   state.data = d;
@@ -1990,6 +2111,7 @@ $("#log-scale").addEventListener("click", async () => {
     body: JSON.stringify({ log: !state.data?.log_scale }) });
   if (!res.ok || !state.data) return;
   await loadChart(state.data.symbol);
+  loadChart2();                               // 아래 차트도 로그 눈금 맞춤
   loadRulesCheck();
 });
 
@@ -2992,14 +3114,44 @@ let liveSource = null, liveKey = "", listRenderQueued = false;
 
 // 브라우저는 한 서버에 연결을 6개까지만 연다. 탭마다 실시간(SSE)·알림(SSE)이 하나씩 붙들고 있어서 탭을 여러 개 열면
 // 나머지 요청(판단 기록, 차트 …)이 줄을 서서 안 뜨거나 한참 걸렸다 → 안 보이는 탭은 실시간 연결을 닫는다 (알림은 둔다: 백그라운드 알림용)
+// 탭을 내려둔 사이 실시간이 끊겨서 그동안의 봉이 비고(돌아오면 마지막 봉 다음에 지금 봉이 바로 붙음), 체결로 만든 봉은 거래량도 0이다
+// → 30초 넘게 안 보였으면 돌아올 때 최근 봉을 서버에서 다시 받아 바꿔 낀다 (보던 자리·선·신호는 그대로)
+let hiddenAt = 0;
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    hiddenAt = Date.now();
     liveSource?.close();
     liveSource = null;
     liveKey = "";
     $("#live-dot").classList.remove("on");
-  } else updateLiveSubscription();
+  } else {
+    updateLiveSubscription();
+    if (hiddenAt && Date.now() - hiddenAt > 30000) {
+      refreshRecent(state.data, () => state.data, setBars, chart, () => { renderIndicators(); renderMarkers(); }, () => loadChart(state.data.symbol));
+      if (c2.iv) refreshRecent(c2.data, () => c2.data, setChart2Bars, c2.chart, null, loadChart2);
+    }
+    hiddenAt = 0;
+  }
 });
+
+// 최근 봉만 다시 받아 차트의 뒷부분을 바꾼다. 받은 첫 봉은 범위 시작에서 잘린 덜 찬 봉일 수 있어서 버리고,
+// 그 기간까지는 가진 봉을 쓴다 (앞에 붙여 둔 옛 봉도 그대로)
+async function refreshRecent(d, current, apply, tchart, after, reload) {
+  if (!d || d.demo) return;
+  const res = await fetch(`/api/chart/${encodeURIComponent(d.symbol)}?interval=${d.interval}`).catch(() => null);
+  if (!res?.ok || current() !== d) return;
+  const fresh = (await res.json()).candles;
+  if (current() !== d || !fresh || fresh.length < 2) return;
+  if (d.candles.at(-1).time < fresh[0].time) return reload?.();   // 너무 오래 내려둬서 받은 범위와 이어지지 않으면 통째로 다시
+  const cut = fresh[1].time;
+  const r = tchart.timeScale().getVisibleLogicalRange();
+  const before = d.candles.length;
+  d.candles = [...d.candles.filter((c) => c.time < cut), ...fresh.slice(1)];
+  apply(d);
+  after?.();
+  const added = d.candles.length - before;
+  if (r) tchart.timeScale().setVisibleLogicalRange({ from: r.from + added, to: r.to + added });
+}
 
 function updateLiveSubscription() {
   if (!state.toss || document.hidden) return;
